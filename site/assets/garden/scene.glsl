@@ -19,11 +19,19 @@
 // units tall) can share one raymarch with the terrain.
 
 uniform float uProbe; // 0 = normal shading, 1 = probe frame (encode compId, no lighting)
+uniform float uProbeSel; // 0 = nothing selected, otherwise a COMP_* id — the matching
+// component gets a fresnel rim-light in the normal shading path below. Never set by
+// this branch (that's the probe panel's job), so it defaults to 0 and every pixel
+// below is byte-identical to before whenever nothing is selected.
 
 const float COMP_SKY       = 1.0;
 const float COMP_TERRAIN   = 2.0;
 const float COMP_CHARACTER = 3.0;
 const float COMP_SHADOW    = 4.0;
+const float COMP_POND      = 5.0;
+const float COMP_GRASS     = 6.0;
+const float COMP_CLOUDS    = 7.0;
+const float COMP_ROCKS     = 8.0;
 
 // @component sky "Sky & Atmosphere" "A gradient horizon-to-zenith plus a squinted-power sun disc — the cheapest possible sky that still reads as one. No clouds, no scattering sim: one lerp, one pow(), and an additive sun term."
 vec3 sg_sky_color(vec3 rd, float time) {
@@ -203,40 +211,185 @@ float sg_shadow_factor(vec2 xz) {
 }
 // @end
 
+// @component pond "Pond" "A small still-water pool set into a shallow terrain depression — no wave simulation, just a flat disk sunk below the surrounding ground and a planar reflection of the sky. The ripples are a normal-map trick: the water plane itself never moves."
+const vec2  SG_POND_XZ = vec2(1.7, 0.5);
+const float SG_POND_RADIUS = 0.5;
+const float SG_POND_DEPTH = 0.12;
+
+// @tune POND_RIPPLE 0.0 0.05 0.015 "ripple normal-perturbation strength"
+uniform float POND_RIPPLE;
+// @tune POND_TINT_MIX 0.0 1.0 0.35 "how much the water's own tint shows through the sky reflection"
+uniform float POND_TINT_MIX;
+
+// Sampled once per frame from the terrain at the pond's center (see
+// mainImage) — sunk slightly below it so the disk reads as filling a
+// depression, not floating on top of the ground.
+float sg_pond_water_y(vec2 xz) {
+  return sg_terrain_height(xz) - SG_POND_DEPTH;
+}
+
+// A flat, disk-shaped body of water. Not an exact SDF near the rim (it
+// mildly overestimates there), which is fine at this march's tolerance —
+// the terrain component uses the same kind of approximation for a much
+// bigger feature, for the same reason.
+float sg_pond_sdf(vec3 p, float waterY) {
+  float radial = length(p.xz - SG_POND_XZ) - SG_POND_RADIUS;
+  float vert = p.y - waterY;
+  return length(vec2(max(radial, 0.0), vert));
+}
+
+vec3 sg_pond_normal(vec2 xz) {
+  vec2 n2 = vec2(sg_noise2(xz * 6.0 + iTime * 0.6),
+                 sg_noise2(xz * 6.0 + vec2(19.3, -7.1) - iTime * 0.5)) - 0.5;
+  return normalize(vec3(n2.x * POND_RIPPLE * 4.0, 1.0, n2.y * POND_RIPPLE * 4.0));
+}
+
+// Cheap planar-reflection approximation: reflect the view ray and sample
+// the sky — no scene geometry in the reflection, just enough to read as
+// "water" once mixed with the pond's own tint.
+vec3 sg_pond_color(vec3 rd, vec3 N) {
+  vec3 R = reflect(rd, N);
+  vec3 refl = sg_sky_color(R, iTime);
+  vec3 tint = vec3(0.08, 0.20, 0.24);
+  return mix(refl, tint, clamp(POND_TINT_MIX, 0.0, 1.0));
+}
+// @end
+
+// @component grass "Meadow Sway" "A shading trick, not per-blade geometry: a wind-swayed color and normal wobble on the flattest, lowest patches of terrain. Cheap 2D noise offset by time stands in for blades bending in the wind — it only runs where terrain already shaded, no extra march-time cost."
+// @tune GRASS_SWAY_SPEED 0.2 3.0 1.0 "wind sway animation speed"
+uniform float GRASS_SWAY_SPEED;
+
+// 1 on flat, low ground; 0 near cliffs (the same slope test sg_terrain_color
+// uses) and near the snow line — grass grows in the meadow, not on exposed rock.
+float sg_grass_mask(float height01, float slope) {
+  float flatness = 1.0 - smoothstep(0.15, 0.55, slope);
+  float lowland  = 1.0 - smoothstep(0.30, 0.62, height01);
+  return flatness * lowland;
+}
+
+// N is nudged in place (inout) as well as the color — the "wobble" half of
+// wind-swayed grass, not just a color tint.
+vec3 sg_grass_shade(vec2 xz, inout vec3 N, vec3 baseCol, float mask) {
+  float wind = sg_noise2(xz * 2.2 + vec2(iTime * GRASS_SWAY_SPEED * 0.6, 0.0));
+  vec3 bladeCol = mix(vec3(0.34, 0.52, 0.18), vec3(0.48, 0.62, 0.22), wind);
+  vec2 wobble = (vec2(sg_noise2(xz * 3.1 + iTime * GRASS_SWAY_SPEED),
+                       sg_noise2(xz * 3.1 + 5.2 - iTime * GRASS_SWAY_SPEED)) - 0.5) * 0.10 * mask;
+  N = normalize(N + vec3(wobble.x, 0.0, wobble.y));
+  return mix(baseCol, bladeCol, mask * (0.55 + 0.25 * wind));
+}
+// @end
+
+// @component clouds "Drifting Clouds" "2D fbm drifting across a plane projected from the view ray — no volumetrics, just a coverage threshold blended into the sky color. Shading-time only: it runs once per sky pixel, never inside the raymarch."
+// @tune CLOUD_COVERAGE 0.0 1.0 0.45 "fraction of the sky covered by cloud"
+uniform float CLOUD_COVERAGE;
+
+float sg_cloud_fbm(vec2 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++) {
+    v += a * sg_noise2(p);
+    p = p * 2.03 + vec2(11.0, 7.0);
+    a *= 0.5;
+  }
+  return v;
+}
+
+// rd.y < 0.05 rejects below-horizon rays before paying for the fbm at all —
+// sky-hit rays are never far below horizontal anyway (see sg_march: anything
+// steeply downward hits the terrain's heightfield long before SG_MAX_DIST),
+// so this mostly just guards the horizon seam cheaply.
+float sg_cloud_mask(vec3 rd) {
+  if (rd.y < 0.05) return 0.0;
+  vec2 p = rd.xz / max(rd.y, 0.15) * 0.6 + vec2(iTime * 0.02, iTime * 0.01);
+  float n = sg_cloud_fbm(p);
+  float edge = 1.0 - clamp(CLOUD_COVERAGE, 0.0, 1.0);
+  return smoothstep(edge, edge + 0.25, n);
+}
+// @end
+
+// @component rocks "Weathered Rocks" "A 2-4 sphere smooth-blend near the pond's edge — the same smooth-min trick as the bouncing figure's body, but static. One radius controls how sharp vs. weathered the cluster reads."
+// @tune ROCK_ROUNDNESS 0.0 1.0 0.4 "how weathered/rounded the rock cluster reads"
+uniform float ROCK_ROUNDNESS;
+
+const vec2  SG_ROCK_XZ = vec2(2.75, 1.05);
+const float SG_ROCK_BOUND_R = 0.5;
+const float SG_ROCK_BOUND_MARGIN = 0.08;
+
+// Same bounding-sphere early-out as the character (see sg_character_sdf):
+// almost every march step is nowhere near this small static cluster, so
+// everywhere else only pays for the bound's own conservative distance.
+float sg_rocks_sdf(vec3 p, vec3 center) {
+  float toCenter = length(p - center);
+  if (toCenter > SG_ROCK_BOUND_R + SG_ROCK_BOUND_MARGIN) return toCenter - SG_ROCK_BOUND_R;
+
+  vec3 lp = p - center;
+  float k = mix(0.02, 0.16, clamp(ROCK_ROUNDNESS, 0.0, 1.0));
+  float d = sg_sphere(lp, vec3(0.0, 0.0, 0.0), 0.20);
+  d = sg_smin(d, sg_sphere(lp, vec3(0.26, -0.05, 0.08), 0.15), k);
+  d = sg_smin(d, sg_sphere(lp, vec3(-0.18, -0.09, -0.16), 0.13), k);
+  d = sg_smin(d, sg_sphere(lp, vec3(0.04, -0.11, 0.22), 0.10), k);
+  return d;
+}
+
+vec3 sg_rocks_normal(vec3 p, vec3 center) {
+  const float e = 0.0025;
+  vec2 h = vec2(e, 0.0);
+  return normalize(vec3(
+    sg_rocks_sdf(p + h.xyy, center) - sg_rocks_sdf(p - h.xyy, center),
+    sg_rocks_sdf(p + h.yxy, center) - sg_rocks_sdf(p - h.yxy, center),
+    sg_rocks_sdf(p + h.yyx, center) - sg_rocks_sdf(p - h.yyx, center)
+  ));
+}
+
+// Fixed world position: unlike the character the cluster never moves, so
+// this only needs the one-time terrain-height sample mainImage already
+// takes for the pond's own precompute.
+vec3 sg_rocks_center() {
+  return vec3(SG_ROCK_XZ.x, sg_terrain_height(SG_ROCK_XZ) + 0.10, SG_ROCK_XZ.y);
+}
+// @end
+
 // ---- scene wiring below: not itself a component, just the raymarch that
-// composes the four above and the probe-encode branch in mainImage. ----
+// composes the components above and the probe-encode branch in mainImage. ----
 
 const float SG_MAX_DIST = 20.0;
+const float SG_FOG_DIST = 6.0; // aerial-perspective falloff scale, tuned to the diorama's own depth (a few units), not the march's far clip
 
 struct SGHit { float t; float id; };
 
-SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter) {
+SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCenter) {
   float t = 0.05;
-  bool nearTerrain = true; // which candidate was closer last — decides the fallback below
+  float hitKind = COMP_TERRAIN; // which candidate was closest last — decides the fallback below
   for (int i = 0; i < 88; i++) {
     vec3 p = ro + rd * t;
     float dTerrain = p.y - sg_terrain_height(p.xz);
     float dChar = sg_character_sdf(p, charCenter);
-    nearTerrain = dTerrain <= dChar;
-    float d = min(dTerrain, dChar);
+    float dPond = sg_pond_sdf(p, pondWaterY);
+    float dRock = sg_rocks_sdf(p, rockCenter);
+
+    float d = dTerrain;
+    hitKind = COMP_TERRAIN;
+    if (dChar < d) { d = dChar; hitKind = COMP_CHARACTER; }
+    if (dPond < d) { d = dPond; hitKind = COMP_POND; }
+    if (dRock < d) { d = dRock; hitKind = COMP_ROCKS; }
+
     // Adaptive threshold (looser far away) — standard sphere-tracing
     // tolerance, needed here because dTerrain is a vertical-distance
     // approximation, not a true SDF, so it undershoots less predictably at
-    // grazing angles than the character's real SDF does.
+    // grazing angles than the other candidates' real SDFs do.
     if (d < max(0.002, t * 0.002)) {
-      if (!nearTerrain) return SGHit(t, COMP_CHARACTER);
+      if (hitKind != COMP_TERRAIN) return SGHit(t, hitKind);
       break; // terrain hit — refine below, the heightfield march overshoots on slopes
     }
     t += max(d * 0.5, 0.01);
     if (t > SG_MAX_DIST) return SGHit(SG_MAX_DIST, COMP_SKY);
   }
 
-  // A character hit that never converged inside the loop above (the
-  // non-uniform squash/stretch scaling underestimates true distance near
-  // the blend regions, so it can need more steps than a plain sphere would)
-  // — return it as-is rather than falling into the terrain-only bisection
-  // below, which would bisect the wrong surface entirely.
-  if (!nearTerrain) return SGHit(t, COMP_CHARACTER);
+  // A non-terrain hit that never converged inside the loop above (e.g. the
+  // character's non-uniform squash/stretch scaling underestimates true
+  // distance near its blend regions, so it can need more steps than a
+  // plain sphere would) — return it as-is rather than falling into the
+  // terrain-only bisection below, which would bisect the wrong surface.
+  if (hitKind != COMP_TERRAIN) return SGHit(t, hitKind);
 
   // Bisection refine: the coarse loop above stops somewhere past the true
   // surface (a heightfield's vertical distance isn't a real SDF), which
@@ -264,7 +417,10 @@ vec3 sg_light(vec3 pos, vec3 rd, vec3 N, vec3 matCol, float t) {
 
   vec3 col = matCol * (sky_col * amb + sun_col * diff) + sun_col * spec;
 
-  float fog = 1.0 - exp(-pow(t / SG_MAX_DIST, 2.0) * 3.0);
+  // Aerial perspective at diorama scale — the whole scene lives within a
+  // handful of units, so this fades out against SG_FOG_DIST, not the
+  // march's SG_MAX_DIST (which would barely register this close in).
+  float fog = 1.0 - exp(-t / SG_FOG_DIST);
   return mix(col, sg_sky_color(rd, iTime) * 0.9, clamp(fog, 0.0, 1.0));
 }
 
@@ -285,6 +441,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   float pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
 
   vec3 charCenter = sg_character_center(iTime);
+  float pondWaterY = sg_pond_water_y(SG_POND_XZ);
+  vec3 rockCenter = sg_rocks_center();
   vec3 target = mix(vec3(0.0, sg_terrain_height(SG_CHAR_XZ), 0.0), charCenter, 0.6);
   float radius = 3.6;
   vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
@@ -293,26 +451,66 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec3 up = cross(right, fwd);
   vec3 rd = normalize(fwd + uv.x * right * 1.35 + uv.y * up * 1.35);
 
-  SGHit hit = sg_march(ro, rd, charCenter);
+  SGHit hit = sg_march(ro, rd, charCenter, pondWaterY, rockCenter);
   vec3 col;
   float compId;
 
   if (hit.id == COMP_SKY) {
     col = sg_sky_color(rd, iTime);
     compId = COMP_SKY;
+
+    float cloudMask = sg_cloud_mask(rd);
+    if (cloudMask > 0.01) {
+      col = mix(col, vec3(0.97, 0.97, 1.0), cloudMask);
+      if (cloudMask > 0.35) compId = COMP_CLOUDS;
+    }
   } else {
     vec3 pos = ro + rd * hit.t;
-    vec3 N = (hit.id == COMP_TERRAIN) ? sg_terrain_normal(pos.xz, 0.02) : sg_character_normal(pos, charCenter);
-    vec3 matCol = (hit.id == COMP_TERRAIN)
-      ? sg_terrain_color(pos.xz, sg_terrain_height(pos.xz), N)
-      : vec3(0.86, 0.46, 0.22); // warm clay — the figure reads as one object at a glance
-    col = sg_light(pos, rd, N, matCol, hit.t);
+    vec3 N;
+    vec3 matCol;
+    float grassMask = 0.0;
+
+    if (hit.id == COMP_TERRAIN) {
+      N = sg_terrain_normal(pos.xz, 0.02);
+      float terrH = sg_terrain_height(pos.xz);
+      matCol = sg_terrain_color(pos.xz, terrH, N);
+      float height01 = clamp(terrH / SG_TERRAIN_HEIGHT_RNG, 0.0, 1.0);
+      float slope = 1.0 - clamp(N.y, 0.0, 1.0);
+      grassMask = sg_grass_mask(height01, slope);
+      if (grassMask > 0.02) matCol = sg_grass_shade(pos.xz, N, matCol, grassMask);
+    } else if (hit.id == COMP_CHARACTER) {
+      N = sg_character_normal(pos, charCenter);
+      matCol = vec3(0.86, 0.46, 0.22); // warm clay — the figure reads as one object at a glance
+    } else if (hit.id == COMP_POND) {
+      N = sg_pond_normal(pos.xz);
+      matCol = vec3(0.0); // unused below — the pond skips the terrestrial lighting model entirely
+    } else { // COMP_ROCKS
+      N = sg_rocks_normal(pos, rockCenter);
+      matCol = mix(vec3(0.40, 0.39, 0.37), vec3(0.62, 0.58, 0.52), clamp(ROCK_ROUNDNESS, 0.0, 1.0));
+    }
+
+    // Water is a planar reflection, not a diffuse-lit surface — running it
+    // through sg_light would double up the sky contribution it already
+    // samples directly.
+    col = (hit.id == COMP_POND) ? sg_pond_color(rd, N) : sg_light(pos, rd, N, matCol, hit.t);
     compId = hit.id;
 
     if (hit.id == COMP_TERRAIN) {
+      if (grassMask > 0.4) compId = COMP_GRASS;
+
       float shadowF = sg_shadow_factor(pos.xz);
       col = mix(col, col * 0.32, shadowF);
       if (shadowF > 0.45) compId = COMP_SHADOW;
+    }
+
+    // uProbeSel highlight: a fresnel rim-light on whichever component is
+    // currently selected in the probe panel, pulsing gently at ~1Hz. Skipped
+    // for sky/clouds above (no surface or normal to rim there) — this branch
+    // only ever runs for hit components with real geometry.
+    if (uProbeSel > 0.5 && abs(compId - uProbeSel) < 0.5) {
+      float fres = pow(1.0 - max(dot(N, -rd), 0.0), 2.5);
+      float pulse = 0.7 + 0.3 * sin(iTime * 6.283185);
+      col += vec3(0.30, 0.85, 1.0) * fres * pulse * 0.6;
     }
   }
 

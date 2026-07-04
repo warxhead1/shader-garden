@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, SITE_ROOT } from './browser.mjs';
 
 const routes = process.argv.slice(2);
 const DEFAULT_ROUTES = ['#/', '#/s/biome-rolling-hills', '#/edit', '#/edit?k=biome-rolling-hills', '#/garden'];
@@ -459,6 +459,9 @@ async function clickTransportButton(page, label) {
   check('(l) #/garden renders with >0 canvases and no console errors', canvases > 0 && errors.length === 0,
     'canvases=' + canvases + (errors.length ? ' errs=' + errors.join(' | ') : ''));
 
+  const backendBadge = await page.$eval('.badge-backend', (el) => el.textContent.trim()).catch(() => null);
+  check('(w) #/garden shows the WebGL2 backend badge', backendBadge === 'WebGL2', 'badge=' + backendBadge);
+
   async function probe(x, y) {
     await page.mouse.click(x, y);
     await sleep(300);
@@ -546,6 +549,39 @@ async function clickTransportButton(page, label) {
     check('(l) textarea fallback: caret lands on the expected line', caretLine === expectedLine, 'caret=' + caretLine);
   }
   await page.close();
+}
+
+// (w) scene richness (GARDEN-1): the file-order <-> COMP_* id invariant
+// scene.glsl's own header warns nothing enforces at build time — this is
+// that enforcement, run node-side (no browser) straight against the source.
+{
+  const { parseScene } = await import('../../site/js/organs/garden/parse.js');
+  const sceneSrc = readFileSync(path.join(SITE_ROOT, 'assets/garden/scene.glsl'), 'utf8');
+  const { components } = parseScene(sceneSrc);
+
+  check('(w) scene yields at least 8 probe-able components', components.length >= 8, 'count=' + components.length);
+  check('(w) every component has a non-empty name/blurb/source',
+    components.every((c) => c.name && c.blurb && c.source.trim().length > 0),
+    JSON.stringify(components.map((c) => c.id)));
+
+  const compConstRe = /const float (COMP_\w+)\s*=\s*([\d.]+);/g;
+  const compConsts = [];
+  let m;
+  while ((m = compConstRe.exec(sceneSrc))) compConsts.push({ name: m[1], value: Number(m[2]) });
+
+  check('(w) COMP_* constant count matches component count', compConsts.length === components.length,
+    'consts=' + compConsts.length + ' components=' + components.length);
+
+  // Each component's slug (e.g. "pond") must have a matching COMP_<SLUG>
+  // constant whose value is its 1-based file-order position — the exact
+  // invariant the probe readback depends on (id -> array index).
+  const order = components.map((c, i) => {
+    const wantName = 'COMP_' + c.id.toUpperCase();
+    const found = compConsts.find((cc) => cc.name === wantName);
+    return { slug: c.id, wantName, value: found ? found.value : null, expected: i + 1 };
+  });
+  check('(w) COMP_* values match file order (component i -> id i+1)',
+    order.every((o) => o.value === o.expected), JSON.stringify(order));
 }
 
 /* ---------- 6) ED-4: uniforms inspector + record + Run it + shader.compiled.v1 ---------- */

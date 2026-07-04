@@ -743,6 +743,7 @@ a:hover { text-decoration: underline; }
 /* ================= garden (GARDEN-0) ================= */
 
 .garden-hint { font-size: 0.82rem; }
+.garden-canvas { cursor: crosshair; } /* probing feels intentional, not incidental */
 
 .probe-panel {
   position: absolute;
@@ -753,6 +754,19 @@ a:hover { text-decoration: underline; }
   overflow: auto;
   background: var(--panel-strong);
   z-index: 3;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+/* Open/close (GARDEN-IDE): .probe-panel-enter is set on creation then
+   removed a couple rAFs later (panel.js); .probe-panel-exit is set right
+   before the animated destroy() path. The global prefers-reduced-motion
+   rule below already zeroes every transition-duration, so neither state
+   needs its own reduced-motion override. */
+.probe-panel.probe-panel-enter,
+.probe-panel.probe-panel-exit {
+  opacity: 0;
+  transform: translateY(0.5rem) scale(0.98);
 }
 .probe-head {
   display: flex;
@@ -776,6 +790,36 @@ a:hover { text-decoration: underline; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+.probe-source[hidden] { display: none; }
+/* highlight.js's read-only tinting — deliberately not CodeMirror's palette,
+   just enough contrast to skim comments/numbers/keywords apart. */
+.probe-source .gtok-comment { color: var(--muted); font-style: italic; }
+.probe-source .gtok-number  { color: var(--cyan); }
+.probe-source .gtok-keyword { color: #c4b5fd; font-weight: 600; }
+
+/* GARDEN-IDE: "Edit here" inline mini-editor (edit.js) — same .code-editor/
+   .pill/.diag-list classes the #/edit organ uses, just in a bounded box. */
+.component-editor-host[hidden] { display: none; }
+.component-editor {
+  display: flex;
+  flex-direction: column;
+  height: 16rem;
+  margin-bottom: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.component-editor-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raise);
+  flex: none;
+}
+
 .probe-tunes { display: flex; flex-direction: column; gap: 0.7rem; margin-bottom: 0.9rem; }
 .probe-tune-label {
   display: flex;

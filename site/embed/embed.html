@@ -1,0 +1,290 @@
+<!doctype html>
+<!--
+  Shader Garden — embed.html (SEED-4, V2_BLUEPRINT.md work item 22,
+  seed.md §3.1: "embed.html — human docs: copy-paste snippet generator,
+  attribute table, CSP notes").
+
+  Pure static doc page — no build step, no framework, zero dependency on
+  the SPA core (js/core/*, js/organs/*). It fetches two artifacts that are
+  ALREADY baked by the pipeline: ../assets/kernels.json (the kernel picker's
+  roster) and ./releases.json (the SRI ledger tools/bake_seed.py maintains).
+  Reading both is the entire "publishing flow": mint a release -> bake_seed.py
+  appends releases.json -> this page picks it up on next load, no manual
+  hash-copying step ever exists.
+
+  The generated snippet points at either the FLOATING alias
+  (`assets/seed/seed@1.js`/`seed.js` — auto-fixes, no SRI) or the latest
+  PINNED release (`assets/seed/seed@<x>.<y>.<z>.js` + integrity= — frozen
+  forever, verifiable) per seed.md §3.1's documented trade-off. Both paths
+  are exercised for real by tools/test/seed.mjs's embed.html clause: the
+  live preview on this page (a real <shader-seed>, not a mockup) must reach
+  "playing", and the exact copied text replayed verbatim on a blank page
+  must also reach "playing" — the same bar contract.html's clauses hold
+  every other seed surface to (accept line: "embed.html generates a
+  snippet that passes the conformance page").
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Embed a Shader Garden kernel</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0b0d12; color: #d7dee8; margin: 0; padding: 24px;
+    max-width: 860px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 32px 0 8px; color: #9fb3c8; }
+  p { color: #aab6c4; }
+  code, .mono { font: 12.5px/1.4 ui-monospace, monospace; }
+  a { color: #7ecbff; }
+  .panel {
+    background: #11141c; border: 1px solid #1e2330; border-radius: 8px;
+    padding: 16px; margin: 12px 0;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 8px 0; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #9fb3c8; }
+  select, input[type="text"] {
+    font: 13px ui-monospace, monospace; background: #0b0d12; color: #d7dee8;
+    border: 1px solid #2a3142; border-radius: 4px; padding: 5px 8px; min-width: 220px;
+  }
+  input[type="checkbox"] { accent-color: #7ecbff; }
+  .checkline { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: #d7dee8; }
+  textarea#snippet-output {
+    width: 100%; min-height: 76px; font: 12.5px/1.5 ui-monospace, monospace;
+    background: #0b0d12; color: #7ee787; border: 1px solid #2a3142; border-radius: 6px;
+    padding: 10px; resize: vertical; white-space: pre;
+  }
+  button {
+    font: 12.5px/1 ui-monospace, monospace; background: #1c2333; color: #d7dee8;
+    border: 1px solid #33405a; border-radius: 5px; padding: 7px 12px; cursor: pointer;
+  }
+  button:hover { background: #262f45; }
+  #sri-note { font-size: 12px; color: #8a95a5; margin-top: 6px; }
+  #preview-box { display: inline-block; width: 320px; }
+  shader-seed { width: 100%; aspect-ratio: 16/9; border-radius: 6px; overflow: hidden; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1e2330; vertical-align: top; }
+  th { color: #9fb3c8; font-weight: 600; }
+  td.attr { font: 12.5px ui-monospace, monospace; color: #ffd08a; white-space: nowrap; }
+  pre.csp { background: #0b0d12; border: 1px solid #1e2330; border-radius: 6px; padding: 12px; overflow-x: auto; }
+  .toast { display: none; color: #7ee787; font-size: 12px; margin-left: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Embed a Shader Garden kernel</h1>
+<p>
+  <code>&lt;shader-seed&gt;</code> plus one <code>&lt;script type="module"&gt;</code> plays an
+  admitted kernel on any third-party page — zero build step, zero backend, self-hostable
+  forever. Pick a kernel below to generate a copy-paste snippet.
+</p>
+
+<div class="panel">
+  <div class="row">
+    <label>Kernel
+      <select id="kernel-select"></select>
+    </label>
+    <label>Autoplay
+      <select id="autoplay-select">
+        <option value="visible" selected>visible (courtesy default)</option>
+        <option value="click">click</option>
+        <option value="off">off</option>
+      </select>
+    </label>
+    <label>Attribution
+      <select id="attribution-select">
+        <option value="hover" selected>hover</option>
+        <option value="always">always</option>
+        <option value="off">off</option>
+      </select>
+    </label>
+  </div>
+  <div class="row checkline">
+    <input type="checkbox" id="sri-toggle">
+    <label for="sri-toggle" style="flex-direction:row;">Pin this embed with Subresource Integrity (SRI)</label>
+  </div>
+  <div id="sri-note"></div>
+
+  <h2 style="margin-top:20px;">Snippet</h2>
+  <textarea id="snippet-output" readonly spellcheck="false"></textarea>
+  <div class="row">
+    <button id="copy-btn" type="button">Copy snippet</button>
+    <span class="toast" id="copy-toast">copied</span>
+  </div>
+
+  <h2>Live preview</h2>
+  <p style="margin-top:-4px;">This is the snippet above, actually running on this page.</p>
+  <div id="preview-box"></div>
+</div>
+
+<h2>Attribute reference</h2>
+<div class="panel">
+  <table>
+    <tr><th>Attribute</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td class="attr">kernel</td><td>—</td><td>Admitted kernel id. Resolves to <code>&lt;garden&gt;/&lt;id&gt;.json</code>. Wins priority over <code>src</code>/<code>href</code> if more than one is set.</td></tr>
+    <tr><td class="attr">src</td><td>—</td><td>Inline GLSL <code>mainImage</code> text. <strong>Ignored unless <code>unsafe</code> is present</strong> — un-admitted source is forced-click, never autoplays.</td></tr>
+    <tr><td class="attr">href</td><td>—</td><td>A garden share URL (<code>#/edit?src=&lt;b64url&gt;&amp;lang=glsl</code>). Same <code>unsafe</code> requirement as <code>src</code>.</td></tr>
+    <tr><td class="attr">unsafe</td><td>absent</td><td>Explicit acknowledgment that <code>src</code>/<code>href</code> is un-admitted source. Deliberately ugly to type.</td></tr>
+    <tr><td class="attr">garden</td><td><code>import.meta.url</code>'s directory</td><td>Base URL for kernel JSON + attribution deep links. Only needed if you've copied the seed script somewhere that isn't next to its JSON.</td></tr>
+    <tr><td class="attr">autoplay</td><td><code>visible</code></td><td><code>visible</code>: plays while on-screen. <code>click</code>: poster until a gesture. <code>off</code>: poster; only <code>play()</code> starts it. Reduced-motion and low battery both degrade toward <code>click</code> behavior regardless of this attribute.</td></tr>
+    <tr><td class="attr">poster</td><td>—</td><td>Static fallback/initial image URL. Omit it and the seed renders its own single-frame still.</td></tr>
+    <tr><td class="attr">speed</td><td><code>1</code></td><td>Clock multiplier, live-retunable. <code>0</code> freezes the clock at <code>t0</code>.</td></tr>
+    <tr><td class="attr">t0</td><td><code>0</code></td><td>Initial clock time in seconds; also the still-frame time when posterized.</td></tr>
+    <tr><td class="attr">mouse</td><td>—</td><td><code>"x,y,z,w"</code> — pins iMouse to a constant for drag-to-orbit kernels.</td></tr>
+    <tr><td class="attr">max-dpr</td><td><code>1.5</code></td><td>Devicepixelratio cap, clamped to <code>[0.5, 2]</code>. Embeds default lower than the main site (2) — it's decoration on someone else's page.</td></tr>
+    <tr><td class="attr">attribution</td><td><code>hover</code></td><td><code>hover</code>: chip fades in on hover/focus, or for 3s after a touch tap. <code>always</code>: persistent at 60% opacity. <code>off</code>: absent — Pillar 5 goodwill, no friction required.</td></tr>
+    <tr><td class="attr">integrity</td><td>—</td><td><code>"sha256-&lt;b64&gt;"</code> of the resolved GLSL text. A mismatch refuses to compile — zero-backend content pinning for hosts that don't want to trust the garden origin to stay honest about what it serves.</td></tr>
+  </table>
+</div>
+
+<h2>Host CSP</h2>
+<div class="panel">
+  <p>Minimum policy for a garden-hosted embed (<code>G</code> = the garden origin the script/JSON are served from):</p>
+  <pre class="csp">script-src  G;          # the seed module itself
+connect-src G;          # &lt;garden&gt;/&lt;id&gt;.json
+img-src     &lt;your own poster image origins, if any&gt;;</pre>
+  <p>
+    Not needed: <code>worker-src</code> (no workers), <code>style-src</code> additions (constructable
+    stylesheets, with a per-shadow-root <code>&lt;style&gt;</code> fallback), <code>unsafe-eval</code>
+    (never), any <code>frame-src</code> (no iframes — <code>&lt;shader-seed&gt;</code> is a custom
+    element precisely so you don't pay iframe weight). Self-hosting the seed script and kernel
+    JSON collapses everything to <code>'self'</code>.
+  </p>
+</div>
+
+<h2>SRI (Subresource Integrity)</h2>
+<div class="panel">
+  <p>
+    The floating URLs (<code>seed@1.js</code>, <code>seed.js</code>) receive fixes in place, so they
+    can't carry a fixed integrity hash. Pin a specific release
+    (<code>seed@&lt;x&gt;.&lt;y&gt;.&lt;z&gt;.js</code>) instead if you want to verify the bytes never
+    change under you — check the box above. Every pinned release's hash lives in the
+    machine-readable ledger this page reads:
+    <a href="releases.json">releases.json</a> — one <code>{version, file, sha384, bytes, date}</code>
+    entry per release, written by <code>tools/bake_seed.py</code> at mint time and re-verified against
+    the actual file bytes on every subsequent bake, so the hash this page hands you can never
+    silently drift from the file it describes.
+  </p>
+</div>
+
+<script type="module">
+const KERNELS_URL = '../assets/kernels.json';
+const RELEASES_URL = 'releases.json';
+const SEED_DIR_URL = new URL('../assets/seed/', location.href).href;
+
+const kernelSelect = document.getElementById('kernel-select');
+const autoplaySelect = document.getElementById('autoplay-select');
+const attributionSelect = document.getElementById('attribution-select');
+const sriToggle = document.getElementById('sri-toggle');
+const sriNote = document.getElementById('sri-note');
+const output = document.getElementById('snippet-output');
+const copyBtn = document.getElementById('copy-btn');
+const copyToast = document.getElementById('copy-toast');
+const previewBox = document.getElementById('preview-box');
+
+let latestRelease = null; // {version, file, sha384, bytes, date} | null
+
+async function loadData() {
+  const [kernelsRes, releasesRes] = await Promise.allSettled([
+    fetch(KERNELS_URL).then((r) => (r.ok ? r.json() : { kernels: [] })),
+    fetch(RELEASES_URL).then((r) => (r.ok ? r.json() : [])),
+  ]);
+  const kernels = kernelsRes.status === 'fulfilled' ? (kernelsRes.value.kernels || []) : [];
+  const releases = releasesRes.status === 'fulfilled' ? releasesRes.value : [];
+  latestRelease = releases.length ? releases[releases.length - 1] : null;
+  return kernels;
+}
+
+function populateKernels(kernels) {
+  kernelSelect.textContent = '';
+  for (const k of kernels) {
+    const opt = document.createElement('option');
+    opt.value = k.id;
+    opt.textContent = k.title ? `${k.id} — ${k.title}` : k.id;
+    kernelSelect.appendChild(opt);
+  }
+}
+
+// Builds the attribute list for the CURRENT form state — shared by the
+// textual snippet and the live preview, so they can never drift from each
+// other (one source of truth for "what attributes does this embed set").
+function currentAttrs() {
+  const attrs = { kernel: kernelSelect.value };
+  if (autoplaySelect.value !== 'visible') attrs.autoplay = autoplaySelect.value;
+  if (attributionSelect.value !== 'hover') attrs.attribution = attributionSelect.value;
+  return attrs;
+}
+
+function scriptUrl() {
+  if (sriToggle.checked && latestRelease) {
+    return new URL(latestRelease.file.split('/').pop(), SEED_DIR_URL).href;
+  }
+  return new URL('seed@1.js', SEED_DIR_URL).href;
+}
+
+function buildSnippet() {
+  const attrs = currentAttrs();
+  const url = scriptUrl();
+  const sri = sriToggle.checked && latestRelease
+    ? ` integrity="${latestRelease.sha384}" crossorigin="anonymous"`
+    : '';
+  const elAttrs = Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(' ');
+  return (
+    `<script type="module" src="${url}"${sri}></` + `script>\n` +
+    `<shader-seed ${elAttrs}></shader-seed>`
+  );
+}
+
+async function renderPreview() {
+  previewBox.textContent = '';
+  const attrs = currentAttrs();
+  try {
+    await import(scriptUrl());
+  } catch {
+    previewBox.textContent = '(preview unavailable — could not load the seed module)';
+    return;
+  }
+  const el = document.createElement('shader-seed');
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  previewBox.appendChild(el);
+}
+
+function regenerate() {
+  output.value = buildSnippet();
+  sriNote.textContent = sriToggle.checked
+    ? (latestRelease
+        ? `Pinned to ${latestRelease.version} (${latestRelease.file.split('/').pop()}).`
+        : 'No published release found yet — falling back to the floating URL.')
+    : 'Floating URL: auto-fixes in place, but can’t carry a fixed integrity hash.';
+  renderPreview();
+}
+
+kernelSelect.addEventListener('change', regenerate);
+autoplaySelect.addEventListener('change', regenerate);
+attributionSelect.addEventListener('change', regenerate);
+sriToggle.addEventListener('change', regenerate);
+
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(output.value);
+    copyToast.style.display = 'inline';
+    setTimeout(() => { copyToast.style.display = 'none'; }, 1500);
+  } catch {
+    output.focus();
+    output.select();
+  }
+});
+
+const kernels = await loadData();
+populateKernels(kernels);
+regenerate();
+
+// Exposed for tools/test/seed.mjs's embed.html clause — reading DOM state
+// through the same public surface a human would (select values + the
+// textarea) rather than reaching into module-private closures.
+window.__embedGenerator = { buildSnippet, currentAttrs, get latestRelease() { return latestRelease; } };
+</script>
+</body>
+</html>

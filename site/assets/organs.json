@@ -1,0 +1,65 @@
+{
+  "organs": [
+    {
+      "id": "gallery",
+      "entry": "js/organs/gallery/index.js",
+      "title": "Garden gallery",
+      "routes": ["/"],
+      "emits": [],
+      "consumes": [],
+      "caps": ["gpu"],
+      "payload": "surface"
+    },
+    {
+      "id": "viewer",
+      "entry": "js/organs/viewer/index.js",
+      "title": "Kernel viewer",
+      "routes": ["/s/:id"],
+      "emits": ["kernel.opened.v1", "shader.compiled.v1", "backend.selected.v1", "runtime.lost.v1", "composition.opened.v1"],
+      "consumes": [],
+      "caps": ["gpu", "clipboard"],
+      "payload": "surface"
+    },
+    {
+      "id": "editor",
+      "title": "Shader editor",
+      "entry": "js/editor/index.js",
+      "routes": ["/edit"],
+      "emits": ["shader.compiled.v1"],
+      "consumes": [],
+      "caps": ["gpu", "clipboard", "popups"],
+      "payload": "surface"
+    },
+    {
+      "id": "garden",
+      "title": "The garden",
+      "entry": "js/organs/garden/index.js",
+      "routes": ["/garden"],
+      "emits": ["backend.selected.v1", "runtime.lost.v1", "garden.probe.opened.v1"],
+      "consumes": [],
+      "caps": ["gpu"],
+      "payload": "surface"
+    },
+    {
+      "id": "provenance",
+      "title": "Kernel provenance",
+      "entry": "js/organs/provenance/index.js",
+      "routes": [],
+      "emits": [],
+      "consumes": ["kernel.opened.v1", "composition.opened.v1"],
+      "caps": [],
+      "payload": "panel"
+    },
+    {
+      "id": "anatomy",
+      "title": "Anatomy",
+      "entry": "js/organs/anatomy/index.js",
+      "routes": [],
+      "hotkey": "KeyA+Shift",
+      "emits": [],
+      "consumes": ["*"],
+      "caps": [],
+      "payload": "overlay"
+    }
+  ]
+}

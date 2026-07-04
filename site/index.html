@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shader Garden — GPU kernels grown by evolutionary search</title>
+  <meta name="description" content="A public gallery of FunSearch-evolved GPU kernels, rendered live in your browser on WebGPU or WebGL2.">
+  <meta name="theme-color" content="#0a0c10">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body data-route="gallery">
+
+  <!-- ================= #/ landing + gallery ================= -->
+  <main id="region-gallery" class="view" hidden>
+
+    <section class="hero">
+      <div id="hero-bg" class="hero-bg" aria-hidden="true"></div>
+      <div class="hero-veil" aria-hidden="true"></div>
+      <div class="hero-content">
+        <p class="eyebrow">evolutionary shader research</p>
+        <h1 class="hero-title">Shader Garden</h1>
+        <p class="hero-thesis">GPU kernels grown by evolutionary search — rendered live in your browser.</p>
+
+        <div class="hero-points">
+          <div class="point glass">
+            <h3>FunSearch island-model evolution</h3>
+            <p>Populations of shader programs mutate, compete, and migrate between islands. Only the strongest lineages survive.</p>
+          </div>
+          <div class="point glass">
+            <h3>Oracle-scored fitness</h3>
+            <p>Every candidate is rendered and graded by deterministic image oracles — no human in the scoring loop.</p>
+          </div>
+          <div class="point glass">
+            <h3>WebGPU / WebGL2 dual backend</h3>
+            <p>Kernels run natively on your GPU: WGSL on WebGPU where available, WebGL2 everywhere else — the badge always tells you which.</p>
+          </div>
+        </div>
+
+        <div class="hero-actions">
+          <button id="explore-btn" class="btn btn-primary" type="button">Browse the kernels</button>
+          <a class="btn btn-ghost" href="#/garden">Walk the garden</a>
+          <a class="btn btn-ghost" href="#/edit">Open the editor</a>
+        </div>
+      </div>
+      <div class="hero-fade" aria-hidden="true"></div>
+    </section>
+
+    <section id="gallery" class="gallery-section">
+      <header class="gallery-header">
+        <h2>The garden</h2>
+        <p class="muted">Every tile is a live kernel — click one to grow it full-screen.</p>
+      </header>
+      <div id="gallery-filters" class="gallery-filters" role="group" aria-label="Filter the garden">
+        <button type="button" class="filter-btn is-active" data-filter="all">All</button>
+        <button type="button" class="filter-btn" data-filter="composition">Compositions</button>
+        <button type="button" class="filter-btn" data-filter="channel-source">Channel sources</button>
+      </div>
+      <p id="gallery-status" class="gallery-status glass" hidden>germinating…</p>
+      <div id="gallery-grid" class="gallery-grid"></div>
+    </section>
+
+    <footer class="site-footer">
+      <p>grown by funsearch · rendered by your GPU</p>
+      <p><a data-repo-link href="#/" rel="noopener" target="_blank">source on GitHub</a></p>
+    </footer>
+  </main>
+
+  <!-- ================= #/s/<id> viewer ================= -->
+  <main id="region-viewer" class="view view-full" hidden></main>
+
+  <!-- ================= #/edit editor ================= -->
+  <main id="region-editor" class="view view-full" hidden></main>
+
+  <!-- ================= #/garden probe-able showcase ================= -->
+  <main id="region-garden" class="view view-full" hidden></main>
+
+  <!-- ================= layout region: panel docking (v2 substrate SUB-4) =================
+       Not an organ region — assets/layout.json's `placements` mount/unmount
+       panel organs here (e.g. provenance on /s/:id). Hidden whenever no
+       panel currently occupies it; core/loader.js owns the hidden toggle. -->
+  <aside id="region-side" class="layout-region-side" hidden></aside>
+
+  <!-- ================= overlay region: Shift+A anatomy (v2 substrate SUB-5) =================
+       Not a route region — core/boot.js's shared hotkey listener owns the
+       hidden toggle and the mount()/cleanup() lifecycle directly (overlay
+       organs are opened outside the loader's route/placement paths; see
+       ARCHITECTURE.md § Anatomy mode). Empty and hidden until Shift+A (or
+       organ.open.v1) fires; the anatomy module itself is not fetched until
+       then. -->
+  <div id="region-overlay" class="anatomy-overlay-region" hidden></div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/core/boot.js"></script>
+  <script type="module" src="js/sw-register.js"></script>
+</body>
+</html>

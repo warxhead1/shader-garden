@@ -1,0 +1,584 @@
+{
+  "generated": "2026-07-03T19:53:43Z",
+  "kernels": [
+    {
+      "id": "vault-d2fbd4e9",
+      "title": "Record-Store Milk Crate",
+      "description": "Handmade SDF raymarch of a record-store milk crate — drag to orbit.",
+      "domain": "demo",
+      "fitness": null,
+      "generation": null,
+      "run_id": null,
+      "author": "warxhead",
+      "origin": "handmade",
+      "language": "glsl",
+      "glsl": "// ===========================================================================\n//  Record-store milk crate  —  SDF raymarch, drag to orbit (iMouse).\n//\n//  Built to hold 12.5\" x 12.5\" record shaders for a \"dig through the vinyl\" site.\n//  SCALE:  1 world unit = 7 inches   (#define S below)\n//  Interior: 13\" (W) x 13\" (D) x 11\" (H)  -> a 12.5\" record gets 0.5\" of lift\n//            clearance side-to-side and peeks ~1.5\" above the rim.\n//\n//  RECORD MOUNT (for later): a record is a thin plane, 12.5\" tall x 12.5\" wide,\n//  facing +z (toward the viewer). In world units a record spans\n//     x,y in [-6.25, 6.25]*S = [-0.893, 0.893],  centered at y = 0,\n//  thin in z, slotted at successive z and lifted in +y to \"pull and view\".\n//  Front of crate = +z. The empty crate is modeled here; records drop in later.\n// ===========================================================================\n#define PI 3.14159265\n#define S  (1.0/7.0)          // world units per inch\n\nmat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }\n\nfloat sdBox(vec3 p, vec3 b){\n    vec3 q = abs(p) - b;\n    return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);\n}\n// square prism, infinite along the 3rd axis; cross-section half-size hxy in the 2 given coords\nfloat sdPrism(vec2 p, vec2 hxy){\n    vec2 d = abs(p) - hxy;\n    return length(max(d,0.0)) + min(max(d.x,d.y),0.0);\n}\nfloat hash21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }\n\n// baked text mask 256x72, 576 words\nconst uint TXT[576] = uint[](\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,3248484352u,2145380348u,2214338432u,4167437567u,58783745u,523390u,0u,0u,3250581504u,2145380348u,2214477760u,\n  4234546431u,126090755u,523519u,0u,0u,3246587904u,234905628u,815328u,241568796u,126029315u,7363u,0u,\n  0u,3246587904u,234905628u,974944u,241568796u,113248000u,7171u,0u,0u,3246587904u,234905628u,974944u,\n  1013386268u,213911296u,7183u,0u,0u,4286775296u,236972028u,33480800u,4167564316u,216008449u,523390u,0u,\n  0u,4286775296u,236971004u,67035232u,3764911132u,216008451u,261360u,0u,0u,3246587904u,234938396u,974944u,\n  6687772u,534775559u,7616u,0u,0u,3246587904u,234905628u,942304u,107351068u,2683504135u,7619u,0u,\n  0u,3246587904u,234907644u,817600u,2657487900u,942906883u,523719u,0u,0u,3246587904u,234907644u,933760u,\n  4234546716u,808582147u,523519u,0u,0u,0u,0u,1536u,1610612736u,8192u,24u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,4039114752u,4160778243u,1886588912u,1022u,0u,0u,0u,0u,4173332480u,4261474311u,\n  1895014387u,1022u,0u,0u,0u,0u,482344960u,234942470u,2029238323u,14u,0u,0u,\n  0u,0u,482344960u,117495808u,2029238320u,14u,0u,0u,0u,0u,2025848832u,117544960u,\n  2046015536u,14u,0u,0u,0u,0u,4039114752u,117545987u,1840455664u,1022u,0u,0u,\n  0u,0u,3233808384u,117545991u,1840451568u,510u,0u,0u,0u,0u,12582912u,117701646u,\n  1865616944u,14u,0u,0u,0u,0u,213909504u,100924942u,1731402803u,14u,0u,0u,\n  0u,0u,1019215872u,2651260423u,1731401779u,1022u,0u,0u,0u,0u,4173332480u,4228253191u,\n  1714665521u,1022u,0u,0u,0u,0u,3221225472u,536870912u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,2600468480u,3365162892u,132007427u,3834373063u,255615457u,121u,0u,0u,2600468480u,1771362716u,2161329670u,\n  881426504u,19297057u,73u,0u,0u,3120562176u,731236758u,3284616752u,1962442840u,253546544u,57u,0u,\n  0u,3992977408u,714436502u,3285992967u,3304686552u,255381553u,115u,0u,0u,1845493760u,1855417534u,2152817670u,\n  344490056u,23394849u,201u,0u,0u,1711276032u,3432401315u,2279554103u,4103700591u,524127201u,121u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,3254779904u,2130077891u,\n  1086839294u,806u,0u,0u,0u,0u,1728053248u,429320390u,3770702232u,372u,0u,0u,\n  0u,0u,1694498816u,410446304u,2697191320u,372u,0u,0u,0u,0u,1837105152u,434596327u,\n  2965626776u,477u,0u,0u,0u,0u,1870659584u,429353444u,4039137688u,477u,0u,0u,\n  0u,0u,3363831808u,435579703u,398973336u,217u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,\n  0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u\n);\n\n// sample baked front text (uv origin bottom-left). returns 0/1\nfloat textMask(vec2 uv){\n    if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0) return 0.0;\n    int x = clamp(int(uv.x*256.0), 0, 255);\n    int y = clamp(int((1.0-uv.y)*72.0), 0, 71);\n    int bit = y*256 + x;\n    uint word = TXT[bit>>5];\n    return float((word >> uint(bit & 31)) & 1u);\n}\n\n// ---- crate dimensions, in inches (evaluated in inch-space, then scaled by S) ----\nconst float WALL  = 0.45;\nconst vec3  IHALF = vec3(6.50, 5.50, 6.50);             // interior half (13 x 11 x 13)\nconst vec3  OHALF = vec3(6.95, 5.50, 6.95);             // exterior half (open top)\n// vertical bands (y, bottom of crate = -5.5, top = +5.5)\nconst float MIDC = 0.15, MIDH = 2.15;                   // diamond mesh band  (-2.0 .. +2.3)\nconst float TOPC = 3.40, TOPH = 1.10;                   // horizontal-rib band (+2.3 .. +4.5)\nconst float XWIN = 6.20;                                // carve window half (leaves corner posts)\n\nfloat g_id;   // material id from map()\n\n// diamond mesh carved through z (front/back walls), inside an (x,y) window\nfloat carveZ(vec3 P, float yc, float yh){\n    vec2 w = P.xy - vec2(0.0, yc);\n    float win = max(abs(w.x)-XWIN, abs(w.y)-yh);\n    vec2 r = rot(0.7854)*w;                              // 45° -> square holes become diamonds\n    vec2 id = clamp(floor(r/1.65 + 0.5), vec2(-12.0), vec2(12.0));\n    float hole = sdPrism(r - 1.65*id, vec2(0.60));\n    return max(hole, win);\n}\nfloat carveX(vec3 P, float yc, float yh){\n    vec2 w = P.zy - vec2(0.0, yc);\n    float win = max(abs(w.x)-XWIN, abs(w.y)-yh);\n    vec2 r = rot(0.7854)*w;\n    vec2 id = clamp(floor(r/1.65 + 0.5), vec2(-12.0), vec2(12.0));\n    float hole = sdPrism(r - 1.65*id, vec2(0.60));\n    return max(hole, win);\n}\n// horizontal rib slots in the top band (open gaps between bars)\nfloat slotsZ(vec3 P){\n    vec2 w = P.xy - vec2(0.0, TOPC);\n    float win = max(abs(w.x)-XWIN, abs(w.y)-TOPH);\n    float yy = w.y - 0.55*clamp(floor(w.y/0.55 + 0.5), -5.0, 5.0);\n    return max(abs(yy)-0.18, win);\n}\nfloat slotsX(vec3 P){\n    vec2 w = P.zy - vec2(0.0, TOPC);\n    float win = max(abs(w.x)-XWIN, abs(w.y)-TOPH);\n    float yy = w.y - 0.55*clamp(floor(w.y/0.55 + 0.5), -5.0, 5.0);\n    return max(abs(yy)-0.18, win);\n}\n// oblong handle hole near the top of front & back (carved through z)\nfloat handle(vec3 P){\n    vec2 w = P.xy - vec2(0.0, 4.05);\n    vec2 d = abs(w) - vec2(2.30, 0.45);\n    return min(max(d.x,d.y),0.0) + length(max(d,0.0)) - 0.35;\n}\n\n// crate SDF in inch-space\nfloat crateIn(vec3 P){\n    float outer = sdBox(P, OHALF) - 0.12;                // slight rounding for plastic\n    // cavity: closed bottom, open top\n    float cavTop = OHALF.y + 2.0, cavBot = -OHALF.y + WALL;\n    float inner = sdBox(P - vec3(0.0,(cavTop+cavBot)*0.5,0.0),\n                        vec3(IHALF.x, (cavTop-cavBot)*0.5, IHALF.z));\n    float shell = max(outer, -inner);\n\n    // overhanging top rim lip\n    float lipO = sdBox(P - vec3(0.0,4.95,0.0), vec3(OHALF.x+0.28, 0.55, OHALF.z+0.28)) - 0.1;\n    float lipI = sdBox(P - vec3(0.0,4.95,0.0), vec3(IHALF.x, 1.6, IHALF.z));\n    shell = min(shell, max(lipO, -lipI));\n\n    // raised nameplate plaques on the front (+z) and back (-z) solid base\n    float plaqF = sdBox(P - vec3(0.0,-3.65, OHALF.z), vec3(5.70,1.55,0.30)) - 0.04;\n    float plaqB = sdBox(P - vec3(0.0,-3.65,-OHALF.z), vec3(5.70,1.55,0.30)) - 0.04;\n    shell = min(shell, min(plaqF, plaqB));\n\n    // carve the mesh, rib slots and handle\n    float carve = carveZ(P, MIDC, MIDH);\n    carve = min(carve, carveX(P, MIDC, MIDH));\n    carve = min(carve, slotsZ(P));\n    carve = min(carve, slotsX(P));\n    carve = min(carve, handle(P));\n    shell = max(shell, -carve);\n    return shell;\n}\n\nfloat map(vec3 p){\n    float d = 1e9; g_id = 0.0;\n    float fl = p.y - (-OHALF.y*S);            // floor at crate bottom\n    if(fl < d){ d = fl; g_id = 0.0; }\n    float cr = S * crateIn(p / S);            // scale crate from inch-space\n    if(cr < d){ d = cr; g_id = 1.0; }\n    return d;\n}\n\nvec3 calcNormal(vec3 p){\n    vec2 e = vec2(0.0012, 0.0);\n    return normalize(vec3(\n        map(p+e.xyy)-map(p-e.xyy),\n        map(p+e.yxy)-map(p-e.yxy),\n        map(p+e.yyx)-map(p-e.yyx)));\n}\nfloat march(vec3 ro, vec3 rd, out float id){\n    float t = 0.02; id = -1.0;\n    for(int i=0;i<200;i++){\n        vec3 p = ro + t*rd;\n        float d = map(p);\n        if(d < 0.0008){ id = g_id; return t; }\n        t += d*0.7;\n        if(t > 16.0) break;\n    }\n    return -1.0;\n}\nfloat softShadow(vec3 ro, vec3 rd){\n    float res = 1.0, t = 0.04;\n    for(int i=0;i<48;i++){\n        float h = map(ro + rd*t);\n        if(h < 0.001) return 0.04;\n        res = min(res, 10.0*h/t);\n        t += clamp(h, 0.01, 0.10);\n        if(t > 7.0) break;\n    }\n    return clamp(res, 0.04, 1.0);\n}\nfloat ao(vec3 p, vec3 n){\n    float occ=0.0, sca=1.0;\n    for(int i=0;i<5;i++){\n        float hr = 0.01 + 0.10*float(i);\n        occ += (hr - map(p+n*hr))*sca; sca *= 0.72;\n    }\n    return clamp(1.0 - 1.5*occ, 0.0, 1.0);\n}\n\nvec3 background(vec3 rd){\n    float h = clamp(rd.y*0.5+0.5, 0.0, 1.0);\n    return mix(vec3(0.42,0.43,0.46), vec3(0.20,0.22,0.27), h);\n}\n\nvec3 material(vec3 p, vec3 n, float id){\n    if(id < 0.5){                                  // speckled concrete floor\n        vec2 g = p.xz*9.0;\n        float sp = hash21(floor(g)) + hash21(floor(g*3.1))*0.5;\n        vec3 c = vec3(0.60,0.59,0.575) + (sp-0.7)*0.10;\n        return c;\n    }\n    // red plastic crate (worn matte)\n    float wear = 0.85 + 0.15*hash21(floor(p.xz*40.0)+floor(p.y*40.0));\n    vec3 red = vec3(0.60,0.085,0.075) * wear;\n    red += 0.04*smoothstep(0.3,1.0,n.y);           // slight top sheen\n    // embossed warning text on the front (+z) nameplate plaque\n    vec3 P = p / S;                                // back to inch-space\n    if(P.z > 7.05 && n.z > 0.4 && P.y > -5.3 && P.y < -2.0){\n        vec2 tuv = vec2((P.x + 5.6)/11.2, (P.y + 5.20)/3.10);\n        float m = textMask(tuv);\n        red = mix(red, vec3(0.86,0.84,0.78), m*0.92); // raised cream lettering\n    }\n    return red;\n}\n\nvoid mainImage(out vec4 O, in vec2 fragCoord){\n    vec2 uv = (fragCoord - 0.5*iResolution.xy)/iResolution.y;\n\n    float yaw = 0.30 + 0.14*sin(0.12*iTime);\n    float pitch = 0.34;\n    if(iMouse.z > 0.0){\n        yaw   = -PI + 6.2832*(iMouse.x/iResolution.x);\n        pitch = mix(0.05, 1.30, clamp(iMouse.y/iResolution.y, 0.0, 1.0));\n    }\n    float rad = 5.4;\n    vec3 ta = vec3(0.0, -0.02, 0.0);\n    vec3 ro = ta + rad*vec3(sin(yaw)*cos(pitch), sin(pitch), cos(yaw)*cos(pitch));\n    vec3 ww = normalize(ta-ro);\n    vec3 uu = normalize(cross(ww, vec3(0,1,0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.9*ww);\n\n    vec3 key = normalize(vec3(-0.55, 0.72, 0.45));\n    vec3 col = background(rd);\n\n    float id;\n    float t = march(ro, rd, id);\n    if(t > 0.0){\n        vec3 p = ro + t*rd;\n        vec3 n = calcNormal(p);\n        vec3 base = material(p, n, id);\n\n        float dif = clamp(dot(n,key), 0.0, 1.0);\n        float sh  = softShadow(p + n*0.01, key);\n        float occ = ao(p, n);\n        vec3  amb = background(n)*0.7;\n        float spec = pow(max(dot(reflect(-key,n), -rd), 0.0), 32.0);\n        float fres = pow(1.0 - max(dot(n,-rd),0.0), 4.0);\n\n        col  = base*(amb*occ + vec3(1.0,0.96,0.9)*dif*sh*1.1);\n        col += vec3(1.0,0.97,0.9)*spec*sh*0.35*(id>0.5?1.0:0.0);\n        col += fres*0.06;\n        col = mix(col, background(rd), smoothstep(9.0,15.0,t));\n    }\n\n    col = (col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);   // ACES\n    col = clamp(col, 0.0, 1.0);\n    col *= 1.0 - 0.18*dot(uv,uv);                              // vignette\n    col = pow(col, vec3(0.4545));\n    O = vec4(col, 1.0);\n}\n",
+      "tags": [
+        "handmade",
+        "sdf",
+        "raymarch"
+      ],
+      "featured": true,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 1
+      }
+    },
+    {
+      "id": "biome-eroded-badlands",
+      "title": "Eroded Badlands — evolved biome",
+      "description": "FunSearch-evolved domain-warped turbulence with ochre sediment banding.",
+      "domain": "terrain",
+      "fitness": 0.9807,
+      "generation": null,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "shadertoy_evolved",
+      "language": "glsl",
+      "glsl": "// Eroded Badlands — evolved biome  (FunSearch fitness=0.9807)\n// Single-biome extraction of the evolved 5-biome terrain demo.\n// iMouse: click upper half to freeze time / scrub the camera.\n\nfloat _th(float n) { return fract(sin(n) * 43758.5453); }\nfloat _tv(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_th(i.x + i.y * 57.0),       _th(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_th(i.x + (i.y + 1.0) * 57.0), _th(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat biome_badlands(vec2 p) {\n    float v = 0.0, a = 0.55;\n    vec2 q = p * 1.3;\n    float w = 0.5;\n    for (int i = 0; i < 8; i++) {\n        float n = _tv(p + vec2(_tv(q) * w, _tv(q + vec2(31.7, 17.3)) * w));\n        v += a * (i == 0 ? abs(2.0 * n - 1.0) : n);\n        p *= 2.0; q *= 2.0; a *= 0.63;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\nfloat phase_reaction(float phi, float temp) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;\n    float m   = 2.0 * (0.5 - temp);\n    float mob = 1.0 + 0.6 * tanh(2.5 * (0.5 - temp));\n    return -dW + m * mob + 4.0 * phi * (1.0 - phi) * m;\n}\n\nconst float INV_SCALE  = 1.0 / 512.0;\nconst float HEIGHT_MIN = 40.0;\nconst float HEIGHT_MAX = 420.0;\nconst float HEIGHT_RNG = HEIGHT_MAX - HEIGHT_MIN;\n\nfloat terrain_height(vec2 xz) {\n    return HEIGHT_MIN + biome_badlands(xz * INV_SCALE) * HEIGHT_RNG;\n}\n\nvec3 terrain_normal(vec2 xz, float eps) {\n    float h0 = terrain_height(xz);\n    float hx = terrain_height(xz + vec2(eps, 0.0));\n    float hz = terrain_height(xz + vec2(0.0, eps));\n    return normalize(vec3(h0 - hx, eps, h0 - hz));\n}\n\nfloat march(vec3 ro, vec3 rd) {\n    float t    = 0.0;\n    float tmax = 8000.0;\n    float prev_dist = ro.y - terrain_height(ro.xz);\n\n    for (int i = 0; i < 120; i++) {\n        vec3  p    = ro + rd * t;\n        float h    = terrain_height(p.xz);\n        float dist = p.y - h;\n        if (dist < 0.5) break;\n        // Adaptive step: surface-safe but aggressive far away\n        t += max(dist * 0.55, 4.0);\n        if (t > tmax) return tmax;\n    }\n\n    // Binary refinement\n    float t0 = max(t - 80.0, 0.0), t1 = t;\n    for (int i = 0; i < 10; i++) {\n        float tm = (t0 + t1) * 0.5;\n        vec3  pm = ro + rd * tm;\n        if (pm.y < terrain_height(pm.xz)) t1 = tm; else t0 = tm;\n    }\n    return (t0 + t1) * 0.5;\n}\n\nvec3 biome_base_color(float height_01, float slope) {\n    // Badlands: ochre/tan banding\n    float band = fract(height_01 * 8.0);\n    vec3 col = mix(vec3(0.78, 0.52, 0.28), vec3(0.62, 0.40, 0.22), band);\n    col = mix(col, vec3(0.55, 0.45, 0.35), smoothstep(0.5, 0.9, slope));\n    return col;\n}\n\nvec3 material_color(vec2 xz, float height, vec3 N, float time) {\n    float height_01 = (height - HEIGHT_MIN) / HEIGHT_RNG;\n    float slope     = 1.0 - clamp(N.y, 0.0, 1.0);\n\n    vec3 col = biome_base_color(height_01, slope);\n\n    // Water at low elevation\n    float water = smoothstep(65.0, 55.0, height);\n    col = mix(col, vec3(0.08, 0.20, 0.38), water);\n\n    // Snow + ice from the Allen-Cahn phase kernel\n    float temp    = 0.4 + 0.3 * sin(time * 0.25);\n    float phi     = clamp(0.5 + 5.0 * phase_reaction(0.5, temp), 0.0, 1.0);\n    float ice_amt = phi * smoothstep(80.0, 160.0, height);\n    float snow = smoothstep(320.0, 370.0, height) * smoothstep(0.55, 0.35, slope);\n    vec3 snow_col = vec3(0.92, 0.94, 0.98);\n    vec3 ice_col  = mix(vec3(0.70, 0.85, 0.95), snow_col, 0.4);\n    col = mix(col, ice_col,  ice_amt * (1.0 - snow));\n    col = mix(col, snow_col, snow);\n\n    return col;\n}\n\nvec3 sky_color(vec3 rd) {\n    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);\n    vec3 horiz = vec3(0.70, 0.80, 0.90);\n    vec3 zenith = vec3(0.25, 0.45, 0.80);\n    return mix(horiz, zenith, t * t);\n}\n\nvec3 light_scene(vec3 pos, vec3 rd, vec3 N, vec2 xz, float height, float t, float time) {\n    vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n    vec3 sky_col = vec3(0.45, 0.65, 0.92);\n    vec3 sun_col = vec3(1.45, 1.15, 0.85);\n\n    vec3 mat_col = material_color(xz, height, N, time);\n\n    // Diffuse\n    float diff = max(dot(N, sun_dir), 0.0);\n    // Ambient sky (hemisphere)\n    float amb  = 0.35 + 0.35 * N.y;\n    // Specular (subtle)\n    vec3 H     = normalize(sun_dir - rd);\n    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.12;\n\n    vec3 col = mat_col * (sky_col * amb + sun_col * diff) + sun_col * spec;\n\n    // Aerial perspective / fog\n    float fog_dist = t * 0.00028;\n    float fog      = 1.0 - exp(-fog_dist * fog_dist);\n    vec3  fog_col  = sky_col * 0.85;\n    col = mix(col, fog_col, clamp(fog, 0.0, 1.0));\n\n    return col;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;\n\n    // Time: iMouse.y > 50% of screen height freezes\n    float use_time = (iMouse.y > iResolution.y * 0.5 && iMouse.z > 0.0)\n                     ? iMouse.x * 0.1\n                     : iTime;\n\n    // Camera: slow forward flight over the 5-biome strip\n    // Biome strip runs along Z: [0, 10240]\n    // iMouse.x can scrub position; default: auto-fly from Z=200 to Z=10000\n    float cam_z   = mod(use_time * 45.0 + 300.0, 9900.0);\n    float cam_x   = 1024.0 + 320.0 * sin(use_time * 0.04);\n    vec3 ro       = vec3(cam_x, 650.0, cam_z);\n\n    // Look ahead and slightly down\n    vec3 forward  = normalize(vec3(0.12 * sin(use_time * 0.05), -0.38, 1.0));\n    vec3 right    = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));\n    vec3 up       = cross(right, forward);\n    vec3 rd       = normalize(forward + uv.x * right * 1.6 + uv.y * up);\n\n    // Sky early-out\n    vec3 col;\n    if (rd.y > 0.01) {\n        col = sky_color(rd);\n        // Sun disc\n        vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n        float sun = pow(max(dot(rd, sun_dir), 0.0), 280.0);\n        col += vec3(1.4, 1.1, 0.8) * sun;\n    } else {\n        float t = march(ro, rd);\n\n        if (t > 7900.0) {\n            col = sky_color(rd);\n        } else {\n            vec3 pos    = ro + rd * t;\n            vec3 N      = terrain_normal(pos.xz, 4.0);\n            float height = terrain_height(pos.xz);\n            col = light_scene(pos, rd, N, pos.xz, height, t, use_time);\n        }\n    }\n\n    // Subtle vignette\n    vec2 vig_uv = fragCoord / iResolution.xy;\n    float vig   = 1.0 - 0.35 * dot(vig_uv - 0.5, vig_uv - 0.5) * 4.0;\n    col *= clamp(vig, 0.0, 1.0);\n\n    // Gamma\n    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));\n\n    fragColor = vec4(col, 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "terrain",
+        "biome"
+      ],
+      "featured": true,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 6,
+        "heavy": true
+      }
+    },
+    {
+      "id": "biome-mountain-peaks",
+      "title": "Mountain Peaks — evolved biome",
+      "description": "FunSearch-evolved 9-octave ridged Perlin with domain warp, flown over as a raymarched heightfield.",
+      "domain": "terrain",
+      "fitness": 0.9998,
+      "generation": null,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "shadertoy_evolved",
+      "language": "glsl",
+      "glsl": "// Mountain Peaks — evolved biome  (FunSearch fitness=0.9998)\n// Single-biome extraction of the evolved 5-biome terrain demo.\n// iMouse: click upper half to freeze time / scrub the camera.\n\nfloat _h_hash(vec2 p) {\n    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));\n    return fract(sin(p.x + p.y) * 43758.5453);\n}\nfloat _h_perlin(vec2 p) {\n    vec2 i = floor(p), f = fract(p);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_h_hash(i),          _h_hash(i + vec2(1.0, 0.0)), f.x),\n               mix(_h_hash(i + vec2(0.0, 1.0)), _h_hash(i + vec2(1.0, 1.0)), f.x), f.y);\n}\nfloat biome_mountain(vec2 p) {\n    vec2 w = vec2(_h_perlin(p * 1.2 + vec2(1.7, 9.2)), _h_perlin(p * 1.5 + vec2(8.3, 2.8)));\n    p += w * 0.31;\n    float v = 0.0, a = 0.55, w2 = 1.0;\n    vec2 o = vec2(3.9, 6.3);\n    for (int i = 0; i < 9; i++) {\n        float n = 1.0 - abs(2.0 * _h_perlin(p) - 1.0);\n        n = pow(n, 1.95);\n        v += a * n * w2;\n        w2 = clamp(n * 1.28, 0.35, 1.0);\n        p = p * 2.03 + o + w * 0.07;\n        a *= 0.47;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\nfloat phase_reaction(float phi, float temp) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;\n    float m   = 2.0 * (0.5 - temp);\n    float mob = 1.0 + 0.6 * tanh(2.5 * (0.5 - temp));\n    return -dW + m * mob + 4.0 * phi * (1.0 - phi) * m;\n}\n\nconst float INV_SCALE  = 1.0 / 512.0;\nconst float HEIGHT_MIN = 40.0;\nconst float HEIGHT_MAX = 420.0;\nconst float HEIGHT_RNG = HEIGHT_MAX - HEIGHT_MIN;\n\nfloat terrain_height(vec2 xz) {\n    return HEIGHT_MIN + biome_mountain(xz * INV_SCALE) * HEIGHT_RNG;\n}\n\nvec3 terrain_normal(vec2 xz, float eps) {\n    float h0 = terrain_height(xz);\n    float hx = terrain_height(xz + vec2(eps, 0.0));\n    float hz = terrain_height(xz + vec2(0.0, eps));\n    return normalize(vec3(h0 - hx, eps, h0 - hz));\n}\n\nfloat march(vec3 ro, vec3 rd) {\n    float t    = 0.0;\n    float tmax = 8000.0;\n    float prev_dist = ro.y - terrain_height(ro.xz);\n\n    for (int i = 0; i < 120; i++) {\n        vec3  p    = ro + rd * t;\n        float h    = terrain_height(p.xz);\n        float dist = p.y - h;\n        if (dist < 0.5) break;\n        // Adaptive step: surface-safe but aggressive far away\n        t += max(dist * 0.55, 4.0);\n        if (t > tmax) return tmax;\n    }\n\n    // Binary refinement\n    float t0 = max(t - 80.0, 0.0), t1 = t;\n    for (int i = 0; i < 10; i++) {\n        float tm = (t0 + t1) * 0.5;\n        vec3  pm = ro + rd * tm;\n        if (pm.y < terrain_height(pm.xz)) t1 = tm; else t0 = tm;\n    }\n    return (t0 + t1) * 0.5;\n}\n\nvec3 biome_base_color(float height_01, float slope) {\n    // Mountain: grey granite + dark ridge\n    vec3 col = mix(vec3(0.45, 0.40, 0.35), vec3(0.65, 0.60, 0.55), height_01);\n    col = mix(col, vec3(0.30, 0.28, 0.25), smoothstep(0.3, 0.8, slope));\n    return col;\n}\n\nvec3 material_color(vec2 xz, float height, vec3 N, float time) {\n    float height_01 = (height - HEIGHT_MIN) / HEIGHT_RNG;\n    float slope     = 1.0 - clamp(N.y, 0.0, 1.0);\n\n    vec3 col = biome_base_color(height_01, slope);\n\n    // Water at low elevation\n    float water = smoothstep(65.0, 55.0, height);\n    col = mix(col, vec3(0.08, 0.20, 0.38), water);\n\n    // Snow + ice from the Allen-Cahn phase kernel\n    float temp    = 0.4 + 0.3 * sin(time * 0.25);\n    float phi     = clamp(0.5 + 5.0 * phase_reaction(0.5, temp), 0.0, 1.0);\n    float ice_amt = phi * smoothstep(80.0, 160.0, height);\n    float snow = smoothstep(320.0, 370.0, height) * smoothstep(0.55, 0.35, slope);\n    vec3 snow_col = vec3(0.92, 0.94, 0.98);\n    vec3 ice_col  = mix(vec3(0.70, 0.85, 0.95), snow_col, 0.4);\n    col = mix(col, ice_col,  ice_amt * (1.0 - snow));\n    col = mix(col, snow_col, snow);\n\n    return col;\n}\n\nvec3 sky_color(vec3 rd) {\n    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);\n    vec3 horiz = vec3(0.70, 0.80, 0.90);\n    vec3 zenith = vec3(0.25, 0.45, 0.80);\n    return mix(horiz, zenith, t * t);\n}\n\nvec3 light_scene(vec3 pos, vec3 rd, vec3 N, vec2 xz, float height, float t, float time) {\n    vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n    vec3 sky_col = vec3(0.45, 0.65, 0.92);\n    vec3 sun_col = vec3(1.45, 1.15, 0.85);\n\n    vec3 mat_col = material_color(xz, height, N, time);\n\n    // Diffuse\n    float diff = max(dot(N, sun_dir), 0.0);\n    // Ambient sky (hemisphere)\n    float amb  = 0.35 + 0.35 * N.y;\n    // Specular (subtle)\n    vec3 H     = normalize(sun_dir - rd);\n    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.12;\n\n    vec3 col = mat_col * (sky_col * amb + sun_col * diff) + sun_col * spec;\n\n    // Aerial perspective / fog\n    float fog_dist = t * 0.00028;\n    float fog      = 1.0 - exp(-fog_dist * fog_dist);\n    vec3  fog_col  = sky_col * 0.85;\n    col = mix(col, fog_col, clamp(fog, 0.0, 1.0));\n\n    return col;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;\n\n    // Time: iMouse.y > 50% of screen height freezes\n    float use_time = (iMouse.y > iResolution.y * 0.5 && iMouse.z > 0.0)\n                     ? iMouse.x * 0.1\n                     : iTime;\n\n    // Camera: slow forward flight over the 5-biome strip\n    // Biome strip runs along Z: [0, 10240]\n    // iMouse.x can scrub position; default: auto-fly from Z=200 to Z=10000\n    float cam_z   = mod(use_time * 45.0 + 300.0, 9900.0);\n    float cam_x   = 1024.0 + 320.0 * sin(use_time * 0.04);\n    vec3 ro       = vec3(cam_x, 650.0, cam_z);\n\n    // Look ahead and slightly down\n    vec3 forward  = normalize(vec3(0.12 * sin(use_time * 0.05), -0.38, 1.0));\n    vec3 right    = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));\n    vec3 up       = cross(right, forward);\n    vec3 rd       = normalize(forward + uv.x * right * 1.6 + uv.y * up);\n\n    // Sky early-out\n    vec3 col;\n    if (rd.y > 0.01) {\n        col = sky_color(rd);\n        // Sun disc\n        vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n        float sun = pow(max(dot(rd, sun_dir), 0.0), 280.0);\n        col += vec3(1.4, 1.1, 0.8) * sun;\n    } else {\n        float t = march(ro, rd);\n\n        if (t > 7900.0) {\n            col = sky_color(rd);\n        } else {\n            vec3 pos    = ro + rd * t;\n            vec3 N      = terrain_normal(pos.xz, 4.0);\n            float height = terrain_height(pos.xz);\n            col = light_scene(pos, rd, N, pos.xz, height, t, use_time);\n        }\n    }\n\n    // Subtle vignette\n    vec2 vig_uv = fragCoord / iResolution.xy;\n    float vig   = 1.0 - 0.35 * dot(vig_uv - 0.5, vig_uv - 0.5) * 4.0;\n    col *= clamp(vig, 0.0, 1.0);\n\n    // Gamma\n    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));\n\n    fragColor = vec4(col, 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "terrain",
+        "biome"
+      ],
+      "featured": true,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 3,
+        "heavy": true
+      }
+    },
+    {
+      "id": "biome-river-valley",
+      "title": "River Valley — evolved biome",
+      "description": "FunSearch-evolved 6-octave offset FBM carving green meadows and river channels.",
+      "domain": "terrain",
+      "fitness": 0.9997,
+      "generation": null,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "shadertoy_evolved",
+      "language": "glsl",
+      "glsl": "// River Valley — evolved biome  (FunSearch fitness=0.9997)\n// Single-biome extraction of the evolved 5-biome terrain demo.\n// iMouse: click upper half to freeze time / scrub the camera.\n\nfloat _rh(float n) { return fract(sin(n) * 43758.5453); }\nfloat _rv(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_rh(i.x + i.y * 57.0),       _rh(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_rh(i.x + (i.y + 1.0) * 57.0), _rh(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat biome_valley(vec2 p) {\n    float v = 0.0, a = 0.5;\n    for (int i = 0; i < 6; i++) {\n        vec2 q = p + vec2(3.7 * float(i + 1), 2.3 * float(i + 1));\n        v += a * _rv(q);\n        p *= 2.05; a *= 0.48;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\nfloat phase_reaction(float phi, float temp) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;\n    float m   = 2.0 * (0.5 - temp);\n    float mob = 1.0 + 0.6 * tanh(2.5 * (0.5 - temp));\n    return -dW + m * mob + 4.0 * phi * (1.0 - phi) * m;\n}\n\nconst float INV_SCALE  = 1.0 / 512.0;\nconst float HEIGHT_MIN = 40.0;\nconst float HEIGHT_MAX = 420.0;\nconst float HEIGHT_RNG = HEIGHT_MAX - HEIGHT_MIN;\n\nfloat terrain_height(vec2 xz) {\n    return HEIGHT_MIN + biome_valley(xz * INV_SCALE) * HEIGHT_RNG;\n}\n\nvec3 terrain_normal(vec2 xz, float eps) {\n    float h0 = terrain_height(xz);\n    float hx = terrain_height(xz + vec2(eps, 0.0));\n    float hz = terrain_height(xz + vec2(0.0, eps));\n    return normalize(vec3(h0 - hx, eps, h0 - hz));\n}\n\nfloat march(vec3 ro, vec3 rd) {\n    float t    = 0.0;\n    float tmax = 8000.0;\n    float prev_dist = ro.y - terrain_height(ro.xz);\n\n    for (int i = 0; i < 120; i++) {\n        vec3  p    = ro + rd * t;\n        float h    = terrain_height(p.xz);\n        float dist = p.y - h;\n        if (dist < 0.5) break;\n        // Adaptive step: surface-safe but aggressive far away\n        t += max(dist * 0.55, 4.0);\n        if (t > tmax) return tmax;\n    }\n\n    // Binary refinement\n    float t0 = max(t - 80.0, 0.0), t1 = t;\n    for (int i = 0; i < 10; i++) {\n        float tm = (t0 + t1) * 0.5;\n        vec3  pm = ro + rd * tm;\n        if (pm.y < terrain_height(pm.xz)) t1 = tm; else t0 = tm;\n    }\n    return (t0 + t1) * 0.5;\n}\n\nvec3 biome_base_color(float height_01, float slope) {\n    // Valley: green meadow + river blue low\n    vec3 col = mix(vec3(0.12, 0.38, 0.18), vec3(0.30, 0.55, 0.22), height_01);\n    col = mix(col, vec3(0.22, 0.50, 0.42), smoothstep(0.9, 1.0, 1.0 - height_01));\n    return col;\n}\n\nvec3 material_color(vec2 xz, float height, vec3 N, float time) {\n    float height_01 = (height - HEIGHT_MIN) / HEIGHT_RNG;\n    float slope     = 1.0 - clamp(N.y, 0.0, 1.0);\n\n    vec3 col = biome_base_color(height_01, slope);\n\n    // Water at low elevation\n    float water = smoothstep(65.0, 55.0, height);\n    col = mix(col, vec3(0.08, 0.20, 0.38), water);\n\n    // Snow + ice from the Allen-Cahn phase kernel\n    float temp    = 0.4 + 0.3 * sin(time * 0.25);\n    float phi     = clamp(0.5 + 5.0 * phase_reaction(0.5, temp), 0.0, 1.0);\n    float ice_amt = phi * smoothstep(80.0, 160.0, height);\n    float snow = smoothstep(320.0, 370.0, height) * smoothstep(0.55, 0.35, slope);\n    vec3 snow_col = vec3(0.92, 0.94, 0.98);\n    vec3 ice_col  = mix(vec3(0.70, 0.85, 0.95), snow_col, 0.4);\n    col = mix(col, ice_col,  ice_amt * (1.0 - snow));\n    col = mix(col, snow_col, snow);\n\n    return col;\n}\n\nvec3 sky_color(vec3 rd) {\n    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);\n    vec3 horiz = vec3(0.70, 0.80, 0.90);\n    vec3 zenith = vec3(0.25, 0.45, 0.80);\n    return mix(horiz, zenith, t * t);\n}\n\nvec3 light_scene(vec3 pos, vec3 rd, vec3 N, vec2 xz, float height, float t, float time) {\n    vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n    vec3 sky_col = vec3(0.45, 0.65, 0.92);\n    vec3 sun_col = vec3(1.45, 1.15, 0.85);\n\n    vec3 mat_col = material_color(xz, height, N, time);\n\n    // Diffuse\n    float diff = max(dot(N, sun_dir), 0.0);\n    // Ambient sky (hemisphere)\n    float amb  = 0.35 + 0.35 * N.y;\n    // Specular (subtle)\n    vec3 H     = normalize(sun_dir - rd);\n    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.12;\n\n    vec3 col = mat_col * (sky_col * amb + sun_col * diff) + sun_col * spec;\n\n    // Aerial perspective / fog\n    float fog_dist = t * 0.00028;\n    float fog      = 1.0 - exp(-fog_dist * fog_dist);\n    vec3  fog_col  = sky_col * 0.85;\n    col = mix(col, fog_col, clamp(fog, 0.0, 1.0));\n\n    return col;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;\n\n    // Time: iMouse.y > 50% of screen height freezes\n    float use_time = (iMouse.y > iResolution.y * 0.5 && iMouse.z > 0.0)\n                     ? iMouse.x * 0.1\n                     : iTime;\n\n    // Camera: slow forward flight over the 5-biome strip\n    // Biome strip runs along Z: [0, 10240]\n    // iMouse.x can scrub position; default: auto-fly from Z=200 to Z=10000\n    float cam_z   = mod(use_time * 45.0 + 300.0, 9900.0);\n    float cam_x   = 1024.0 + 320.0 * sin(use_time * 0.04);\n    vec3 ro       = vec3(cam_x, 650.0, cam_z);\n\n    // Look ahead and slightly down\n    vec3 forward  = normalize(vec3(0.12 * sin(use_time * 0.05), -0.38, 1.0));\n    vec3 right    = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));\n    vec3 up       = cross(right, forward);\n    vec3 rd       = normalize(forward + uv.x * right * 1.6 + uv.y * up);\n\n    // Sky early-out\n    vec3 col;\n    if (rd.y > 0.01) {\n        col = sky_color(rd);\n        // Sun disc\n        vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n        float sun = pow(max(dot(rd, sun_dir), 0.0), 280.0);\n        col += vec3(1.4, 1.1, 0.8) * sun;\n    } else {\n        float t = march(ro, rd);\n\n        if (t > 7900.0) {\n            col = sky_color(rd);\n        } else {\n            vec3 pos    = ro + rd * t;\n            vec3 N      = terrain_normal(pos.xz, 4.0);\n            float height = terrain_height(pos.xz);\n            col = light_scene(pos, rd, N, pos.xz, height, t, use_time);\n        }\n    }\n\n    // Subtle vignette\n    vec2 vig_uv = fragCoord / iResolution.xy;\n    float vig   = 1.0 - 0.35 * dot(vig_uv - 0.5, vig_uv - 0.5) * 4.0;\n    col *= clamp(vig, 0.0, 1.0);\n\n    // Gamma\n    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));\n\n    fragColor = vec4(col, 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "terrain",
+        "biome"
+      ],
+      "featured": true,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 2
+      }
+    },
+    {
+      "id": "biome-rolling-hills",
+      "title": "Rolling Hills — evolved biome",
+      "description": "FunSearch-evolved quintic FBM with shear producing soft grassy hills.",
+      "domain": "terrain",
+      "fitness": 0.9994,
+      "generation": 32,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "shadertoy_evolved",
+      "language": "glsl",
+      "glsl": "// Rolling Hills — evolved biome  (FunSearch fitness=0.9994)\n// Single-biome extraction of the evolved 5-biome terrain demo.\n// iMouse: click upper half to freeze time / scrub the camera.\n\nfloat _hh(float n) { return fract(sin(n) * 43758.5453); }\nfloat _hn(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * f * (10.0 - 15.0 * f + 6.0 * f * f);\n    return mix(mix(_hh(i.x + i.y * 57.0),       _hh(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_hh(i.x + (i.y + 1.0) * 57.0), _hh(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat biome_hills(vec2 p) {\n    float v = 0.0, a = 0.58;\n    for (int i = 0; i < 5; i++) {\n        v += a * _hn(p);\n        p = vec2(p.x * 1.78 + p.y * 0.35, p.x * 0.35 + p.y * 1.78);\n        a *= 0.53;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\nfloat phase_reaction(float phi, float temp) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;\n    float m   = 2.0 * (0.5 - temp);\n    float mob = 1.0 + 0.6 * tanh(2.5 * (0.5 - temp));\n    return -dW + m * mob + 4.0 * phi * (1.0 - phi) * m;\n}\n\nconst float INV_SCALE  = 1.0 / 512.0;\nconst float HEIGHT_MIN = 40.0;\nconst float HEIGHT_MAX = 420.0;\nconst float HEIGHT_RNG = HEIGHT_MAX - HEIGHT_MIN;\n\nfloat terrain_height(vec2 xz) {\n    return HEIGHT_MIN + biome_hills(xz * INV_SCALE) * HEIGHT_RNG;\n}\n\nvec3 terrain_normal(vec2 xz, float eps) {\n    float h0 = terrain_height(xz);\n    float hx = terrain_height(xz + vec2(eps, 0.0));\n    float hz = terrain_height(xz + vec2(0.0, eps));\n    return normalize(vec3(h0 - hx, eps, h0 - hz));\n}\n\nfloat march(vec3 ro, vec3 rd) {\n    float t    = 0.0;\n    float tmax = 8000.0;\n    float prev_dist = ro.y - terrain_height(ro.xz);\n\n    for (int i = 0; i < 120; i++) {\n        vec3  p    = ro + rd * t;\n        float h    = terrain_height(p.xz);\n        float dist = p.y - h;\n        if (dist < 0.5) break;\n        // Adaptive step: surface-safe but aggressive far away\n        t += max(dist * 0.55, 4.0);\n        if (t > tmax) return tmax;\n    }\n\n    // Binary refinement\n    float t0 = max(t - 80.0, 0.0), t1 = t;\n    for (int i = 0; i < 10; i++) {\n        float tm = (t0 + t1) * 0.5;\n        vec3  pm = ro + rd * tm;\n        if (pm.y < terrain_height(pm.xz)) t1 = tm; else t0 = tm;\n    }\n    return (t0 + t1) * 0.5;\n}\n\nvec3 biome_base_color(float height_01, float slope) {\n    // Hills: grass + dark soil on slopes\n    vec3 col = mix(vec3(0.45, 0.62, 0.22), vec3(0.28, 0.42, 0.18), height_01);\n    col = mix(col, vec3(0.30, 0.24, 0.18), smoothstep(0.4, 0.7, slope));\n    return col;\n}\n\nvec3 material_color(vec2 xz, float height, vec3 N, float time) {\n    float height_01 = (height - HEIGHT_MIN) / HEIGHT_RNG;\n    float slope     = 1.0 - clamp(N.y, 0.0, 1.0);\n\n    vec3 col = biome_base_color(height_01, slope);\n\n    // Water at low elevation\n    float water = smoothstep(65.0, 55.0, height);\n    col = mix(col, vec3(0.08, 0.20, 0.38), water);\n\n    // Snow + ice from the Allen-Cahn phase kernel\n    float temp    = 0.4 + 0.3 * sin(time * 0.25);\n    float phi     = clamp(0.5 + 5.0 * phase_reaction(0.5, temp), 0.0, 1.0);\n    float ice_amt = phi * smoothstep(80.0, 160.0, height);\n    float snow = smoothstep(320.0, 370.0, height) * smoothstep(0.55, 0.35, slope);\n    vec3 snow_col = vec3(0.92, 0.94, 0.98);\n    vec3 ice_col  = mix(vec3(0.70, 0.85, 0.95), snow_col, 0.4);\n    col = mix(col, ice_col,  ice_amt * (1.0 - snow));\n    col = mix(col, snow_col, snow);\n\n    return col;\n}\n\nvec3 sky_color(vec3 rd) {\n    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);\n    vec3 horiz = vec3(0.70, 0.80, 0.90);\n    vec3 zenith = vec3(0.25, 0.45, 0.80);\n    return mix(horiz, zenith, t * t);\n}\n\nvec3 light_scene(vec3 pos, vec3 rd, vec3 N, vec2 xz, float height, float t, float time) {\n    vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n    vec3 sky_col = vec3(0.45, 0.65, 0.92);\n    vec3 sun_col = vec3(1.45, 1.15, 0.85);\n\n    vec3 mat_col = material_color(xz, height, N, time);\n\n    // Diffuse\n    float diff = max(dot(N, sun_dir), 0.0);\n    // Ambient sky (hemisphere)\n    float amb  = 0.35 + 0.35 * N.y;\n    // Specular (subtle)\n    vec3 H     = normalize(sun_dir - rd);\n    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.12;\n\n    vec3 col = mat_col * (sky_col * amb + sun_col * diff) + sun_col * spec;\n\n    // Aerial perspective / fog\n    float fog_dist = t * 0.00028;\n    float fog      = 1.0 - exp(-fog_dist * fog_dist);\n    vec3  fog_col  = sky_col * 0.85;\n    col = mix(col, fog_col, clamp(fog, 0.0, 1.0));\n\n    return col;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;\n\n    // Time: iMouse.y > 50% of screen height freezes\n    float use_time = (iMouse.y > iResolution.y * 0.5 && iMouse.z > 0.0)\n                     ? iMouse.x * 0.1\n                     : iTime;\n\n    // Camera: slow forward flight over the 5-biome strip\n    // Biome strip runs along Z: [0, 10240]\n    // iMouse.x can scrub position; default: auto-fly from Z=200 to Z=10000\n    float cam_z   = mod(use_time * 45.0 + 300.0, 9900.0);\n    float cam_x   = 1024.0 + 320.0 * sin(use_time * 0.04);\n    vec3 ro       = vec3(cam_x, 650.0, cam_z);\n\n    // Look ahead and slightly down\n    vec3 forward  = normalize(vec3(0.12 * sin(use_time * 0.05), -0.38, 1.0));\n    vec3 right    = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));\n    vec3 up       = cross(right, forward);\n    vec3 rd       = normalize(forward + uv.x * right * 1.6 + uv.y * up);\n\n    // Sky early-out\n    vec3 col;\n    if (rd.y > 0.01) {\n        col = sky_color(rd);\n        // Sun disc\n        vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n        float sun = pow(max(dot(rd, sun_dir), 0.0), 280.0);\n        col += vec3(1.4, 1.1, 0.8) * sun;\n    } else {\n        float t = march(ro, rd);\n\n        if (t > 7900.0) {\n            col = sky_color(rd);\n        } else {\n            vec3 pos    = ro + rd * t;\n            vec3 N      = terrain_normal(pos.xz, 4.0);\n            float height = terrain_height(pos.xz);\n            col = light_scene(pos, rd, N, pos.xz, height, t, use_time);\n        }\n    }\n\n    // Subtle vignette\n    vec2 vig_uv = fragCoord / iResolution.xy;\n    float vig   = 1.0 - 0.35 * dot(vig_uv - 0.5, vig_uv - 0.5) * 4.0;\n    col *= clamp(vig, 0.0, 1.0);\n\n    // Gamma\n    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));\n\n    fragColor = vec4(col, 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "terrain",
+        "biome"
+      ],
+      "featured": true,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 1
+      }
+    },
+    {
+      "id": "biome-volcanic-plateau",
+      "title": "Volcanic Plateau — evolved biome",
+      "description": "FunSearch-evolved ridged FBM with rotated octaves and warp; lava pools glow at low elevation.",
+      "domain": "terrain",
+      "fitness": 0.9876,
+      "generation": null,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "shadertoy_evolved",
+      "language": "glsl",
+      "glsl": "// Volcanic Plateau — evolved biome  (FunSearch fitness=0.9876)\n// Single-biome extraction of the evolved 5-biome terrain demo.\n// iMouse: click upper half to freeze time / scrub the camera.\n\nfloat _vh(float n) { return fract(sin(n) * 43758.5453); }\nfloat _vn(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_vh(i.x + i.y * 57.0),       _vh(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_vh(i.x + (i.y + 1.0) * 57.0), _vh(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat _vr(vec2 x) { float n = _vn(x); return 1.0 - abs(2.0 * n - 1.0); }\nfloat biome_volcanic(vec2 p) {\n    float v = 0.0, a = 0.6;\n    for (int i = 0; i < 6; i++) {\n        v += a * _vr(p);\n        p = vec2(p.x * 0.883 - p.y * 0.469, p.x * 0.469 + p.y * 0.883) * 2.1;\n        a *= 0.58;\n    }\n    vec2 q = vec2(_vn(p), _vn(p + vec2(5.2, 1.3)));\n    float ww = 0.3 * _vn(p * 0.6 + 0.6 * q * 1.2);\n    float s = 0.0, sa = 0.4;\n    for (int i = 0; i < 4; i++) {\n        s += sa * _vn(p);\n        p = p * 2.0 + vec2(1.7, 0.9);\n        sa *= 0.5;\n    }\n    return clamp(v * 0.75 + ww * 0.12 + s * 0.13, 0.0, 1.0);\n}\n\nfloat phase_reaction(float phi, float temp) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;\n    float m   = 2.0 * (0.5 - temp);\n    float mob = 1.0 + 0.6 * tanh(2.5 * (0.5 - temp));\n    return -dW + m * mob + 4.0 * phi * (1.0 - phi) * m;\n}\n\nconst float INV_SCALE  = 1.0 / 512.0;\nconst float HEIGHT_MIN = 40.0;\nconst float HEIGHT_MAX = 420.0;\nconst float HEIGHT_RNG = HEIGHT_MAX - HEIGHT_MIN;\n\nfloat terrain_height(vec2 xz) {\n    return HEIGHT_MIN + biome_volcanic(xz * INV_SCALE) * HEIGHT_RNG;\n}\n\nvec3 terrain_normal(vec2 xz, float eps) {\n    float h0 = terrain_height(xz);\n    float hx = terrain_height(xz + vec2(eps, 0.0));\n    float hz = terrain_height(xz + vec2(0.0, eps));\n    return normalize(vec3(h0 - hx, eps, h0 - hz));\n}\n\nfloat march(vec3 ro, vec3 rd) {\n    float t    = 0.0;\n    float tmax = 8000.0;\n    float prev_dist = ro.y - terrain_height(ro.xz);\n\n    for (int i = 0; i < 120; i++) {\n        vec3  p    = ro + rd * t;\n        float h    = terrain_height(p.xz);\n        float dist = p.y - h;\n        if (dist < 0.5) break;\n        // Adaptive step: surface-safe but aggressive far away\n        t += max(dist * 0.55, 4.0);\n        if (t > tmax) return tmax;\n    }\n\n    // Binary refinement\n    float t0 = max(t - 80.0, 0.0), t1 = t;\n    for (int i = 0; i < 10; i++) {\n        float tm = (t0 + t1) * 0.5;\n        vec3  pm = ro + rd * tm;\n        if (pm.y < terrain_height(pm.xz)) t1 = tm; else t0 = tm;\n    }\n    return (t0 + t1) * 0.5;\n}\n\nvec3 biome_base_color(float height_01, float slope) {\n    // Volcanic: dark basalt, orange lava low\n    vec3 col = mix(vec3(0.80, 0.35, 0.10), vec3(0.18, 0.15, 0.14), height_01);\n    col = mix(col, vec3(0.12, 0.10, 0.09), smoothstep(0.4, 0.9, slope));\n    return col;\n}\n\nvec3 material_color(vec2 xz, float height, vec3 N, float time) {\n    float height_01 = (height - HEIGHT_MIN) / HEIGHT_RNG;\n    float slope     = 1.0 - clamp(N.y, 0.0, 1.0);\n\n    vec3 col = biome_base_color(height_01, slope);\n\n    // Water at low elevation\n    float water = smoothstep(65.0, 55.0, height);\n    col = mix(col, vec3(0.08, 0.20, 0.38), water);\n\n    // Lava at low elevation\n    float lava = smoothstep(100.0, 60.0, height);\n    vec3 lava_col = mix(vec3(0.9, 0.4, 0.0), vec3(1.0, 0.8, 0.0),\n                        0.5 + 0.5 * sin(time * 1.2 + xz.x * 0.01 + xz.y * 0.01));\n    col = mix(col, lava_col, lava * 0.8);\n\n    // Snow + ice from the Allen-Cahn phase kernel\n    float temp    = 0.4 + 0.3 * sin(time * 0.25);\n    float phi     = clamp(0.5 + 5.0 * phase_reaction(0.5, temp), 0.0, 1.0);\n    float ice_amt = phi * smoothstep(80.0, 160.0, height);\n    float snow = smoothstep(320.0, 370.0, height) * smoothstep(0.55, 0.35, slope);\n    vec3 snow_col = vec3(0.92, 0.94, 0.98);\n    vec3 ice_col  = mix(vec3(0.70, 0.85, 0.95), snow_col, 0.4);\n    col = mix(col, ice_col,  ice_amt * (1.0 - snow));\n    col = mix(col, snow_col, snow);\n\n    return col;\n}\n\nvec3 sky_color(vec3 rd) {\n    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);\n    vec3 horiz = vec3(0.70, 0.80, 0.90);\n    vec3 zenith = vec3(0.25, 0.45, 0.80);\n    return mix(horiz, zenith, t * t);\n}\n\nvec3 light_scene(vec3 pos, vec3 rd, vec3 N, vec2 xz, float height, float t, float time) {\n    vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n    vec3 sky_col = vec3(0.45, 0.65, 0.92);\n    vec3 sun_col = vec3(1.45, 1.15, 0.85);\n\n    vec3 mat_col = material_color(xz, height, N, time);\n\n    // Diffuse\n    float diff = max(dot(N, sun_dir), 0.0);\n    // Ambient sky (hemisphere)\n    float amb  = 0.35 + 0.35 * N.y;\n    // Specular (subtle)\n    vec3 H     = normalize(sun_dir - rd);\n    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.12;\n\n    vec3 col = mat_col * (sky_col * amb + sun_col * diff) + sun_col * spec;\n\n    // Aerial perspective / fog\n    float fog_dist = t * 0.00028;\n    float fog      = 1.0 - exp(-fog_dist * fog_dist);\n    vec3  fog_col  = sky_col * 0.85;\n    col = mix(col, fog_col, clamp(fog, 0.0, 1.0));\n\n    return col;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;\n\n    // Time: iMouse.y > 50% of screen height freezes\n    float use_time = (iMouse.y > iResolution.y * 0.5 && iMouse.z > 0.0)\n                     ? iMouse.x * 0.1\n                     : iTime;\n\n    // Camera: slow forward flight over the 5-biome strip\n    // Biome strip runs along Z: [0, 10240]\n    // iMouse.x can scrub position; default: auto-fly from Z=200 to Z=10000\n    float cam_z   = mod(use_time * 45.0 + 300.0, 9900.0);\n    float cam_x   = 1024.0 + 320.0 * sin(use_time * 0.04);\n    vec3 ro       = vec3(cam_x, 650.0, cam_z);\n\n    // Look ahead and slightly down\n    vec3 forward  = normalize(vec3(0.12 * sin(use_time * 0.05), -0.38, 1.0));\n    vec3 right    = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));\n    vec3 up       = cross(right, forward);\n    vec3 rd       = normalize(forward + uv.x * right * 1.6 + uv.y * up);\n\n    // Sky early-out\n    vec3 col;\n    if (rd.y > 0.01) {\n        col = sky_color(rd);\n        // Sun disc\n        vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n        float sun = pow(max(dot(rd, sun_dir), 0.0), 280.0);\n        col += vec3(1.4, 1.1, 0.8) * sun;\n    } else {\n        float t = march(ro, rd);\n\n        if (t > 7900.0) {\n            col = sky_color(rd);\n        } else {\n            vec3 pos    = ro + rd * t;\n            vec3 N      = terrain_normal(pos.xz, 4.0);\n            float height = terrain_height(pos.xz);\n            col = light_scene(pos, rd, N, pos.xz, height, t, use_time);\n        }\n    }\n\n    // Subtle vignette\n    vec2 vig_uv = fragCoord / iResolution.xy;\n    float vig   = 1.0 - 0.35 * dot(vig_uv - 0.5, vig_uv - 0.5) * 4.0;\n    col *= clamp(vig, 0.0, 1.0);\n\n    // Gamma\n    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));\n\n    fragColor = vec4(col, 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "terrain",
+        "biome"
+      ],
+      "featured": true,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 3,
+        "heavy": true
+      }
+    },
+    {
+      "id": "vault-61990596",
+      "title": "Latent-Heat Phase Map — evolved gen 21",
+      "description": "FunSearch-evolved latent-heat Allen-Cahn kernel with oscillating curvature term.",
+      "domain": "latent",
+      "fitness": 0.6507,
+      "generation": 21,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float reaction(float phi, float temp, float lap_T) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;\n    float m = 2.0 * (0.5 - temp);\n    float iface = phi * (1.0 - phi);\n    // Interface sharpening: stronger response at phase boundary\n    float amp = 1.0 + 4.5 * iface;\n    // Nonlinear thermal suppression: stronger when lap_T > 0 (latent heat in)\n    float thermal_mod = 1.0 - 0.15 * lap_T + 0.03 * lap_T * lap_T;\n    // Interface-localized latent heat coupling: self-regulating equilibrium\n    float thermal_coupling = -0.7 * iface * lap_T;\n    return (amp * (-dW + m)) * max(0.05, thermal_mod) + thermal_coupling;\n}\n// FunSearch latent-heat Allen-Cahn kernel visualizer.\n// phi  = x-axis,  temp = y-axis,  lap_T = 0.3*sin(iTime).\n// Same colour convention as the phase kernel.\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = fragCoord / iResolution.xy;\n    float phi   = uv.x;\n    float temp  = uv.y;\n    float lap_T = 0.3 * sin(iTime * 0.8);   // oscillating curvature term\n\n    float r = reaction(phi, temp, lap_T);\n\n    float t = clamp(r / 4.0 + 0.5, 0.0, 1.0);\n    vec3 col = mix(vec3(0.05, 0.25, 0.85), vec3(0.95, 0.95, 0.95), t * 2.0 - clamp(t * 2.0 - 1.0, 0.0, 1.0));\n    col = mix(col, vec3(0.85, 0.1, 0.05), max(t * 2.0 - 1.0, 0.0));\n\n    // Subtle pulse showing lap_T variation\n    float pulse = abs(lap_T) * 0.12;\n    col += vec3(pulse * 0.4, pulse * 0.1, -pulse * 0.2);\n\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "latent"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "phase-allen-cahn-demo",
+      "title": "Allen-Cahn Ice — 5-biome flight",
+      "description": "Camera flight across all five evolved biomes with Allen-Cahn phase-kernel ice/snow dynamics (single-pass).",
+      "domain": "phase",
+      "fitness": 1.0,
+      "generation": 16,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "shadertoy_evolved",
+      "language": "glsl",
+      "glsl": "// =============================================================================\n// FunSearch-Evolved Terrain Demo — Shadertoy Edition\n// =============================================================================\n//\n// Paste this entire file into shadertoy.com → New Shader → paste → Compile.\n//\n// What is FunSearch?\n//   FunSearch (Romera-Paredes et al., 2023) is a LLM+evolutionary search that\n//   discovers novel mathematical programs by iteratively mutating and evaluating\n//   code. The five terrain biome functions below were discovered by running\n//   FunSearch against a fitness metric that rewards heightfield diversity,\n//   fractal dimension, and realistic erosion patterns. The Allen-Cahn phase\n//   kernel was evolved to match GPU-measured ice/water phase transition dynamics.\n//\n// Five evolved biomes:\n//   0 — mountain_peaks    (fitness=0.9998) 9-octave ridged Perlin + domain warp\n//   1 — volcanic_plateau  (fitness=0.9876) ridged FBM + rotated octaves\n//   2 — eroded_badlands   (fitness=0.9807) domain-warped turbulence\n//   3 — river_valley      (fitness=0.9997) 6-octave offset FBM\n//   4 — rolling_hills     (fitness=0.9994) quintic FBM + shear\n//\n// Allen-Cahn phase kernel (fitness=1.0) animates ice↔water transitions.\n//\n// Camera: slow forward flight over a 5-biome strip (each 2048m wide along Z).\n// iMouse.x: scrub camera forward position manually.\n// iMouse.y > 0.5*iResolution.y: freeze time.\n//\n// Controls: move mouse left/right to scrub through the terrain.\n// =============================================================================\n\n// ---------------------------------------------------------------------------\n// Biome 0: mountain_peaks  (fitness=0.9998)\n// 9-octave ridged Perlin with domain warp\n// ---------------------------------------------------------------------------\nfloat _h_hash(vec2 p) {\n    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));\n    return fract(sin(p.x + p.y) * 43758.5453);\n}\nfloat _h_perlin(vec2 p) {\n    vec2 i = floor(p), f = fract(p);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_h_hash(i),          _h_hash(i + vec2(1.0, 0.0)), f.x),\n               mix(_h_hash(i + vec2(0.0, 1.0)), _h_hash(i + vec2(1.0, 1.0)), f.x), f.y);\n}\nfloat biome_mountain(vec2 p) {\n    vec2 w = vec2(_h_perlin(p * 1.2 + vec2(1.7, 9.2)), _h_perlin(p * 1.5 + vec2(8.3, 2.8)));\n    p += w * 0.31;\n    float v = 0.0, a = 0.55, w2 = 1.0;\n    vec2 o = vec2(3.9, 6.3);\n    for (int i = 0; i < 9; i++) {\n        float n = 1.0 - abs(2.0 * _h_perlin(p) - 1.0);\n        n = pow(n, 1.95);\n        v += a * n * w2;\n        w2 = clamp(n * 1.28, 0.35, 1.0);\n        p = p * 2.03 + o + w * 0.07;\n        a *= 0.47;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\n// ---------------------------------------------------------------------------\n// Biome 1: volcanic_plateau  (fitness=0.9876)\n// Ridged FBM with rotated octaves + warp\n// ---------------------------------------------------------------------------\nfloat _vh(float n) { return fract(sin(n) * 43758.5453); }\nfloat _vn(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_vh(i.x + i.y * 57.0),       _vh(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_vh(i.x + (i.y + 1.0) * 57.0), _vh(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat _vr(vec2 x) { float n = _vn(x); return 1.0 - abs(2.0 * n - 1.0); }\nfloat biome_volcanic(vec2 p) {\n    float v = 0.0, a = 0.6;\n    for (int i = 0; i < 6; i++) {\n        v += a * _vr(p);\n        p = vec2(p.x * 0.883 - p.y * 0.469, p.x * 0.469 + p.y * 0.883) * 2.1;\n        a *= 0.58;\n    }\n    vec2 q = vec2(_vn(p), _vn(p + vec2(5.2, 1.3)));\n    float ww = 0.3 * _vn(p * 0.6 + 0.6 * q * 1.2);\n    float s = 0.0, sa = 0.4;\n    for (int i = 0; i < 4; i++) {\n        s += sa * _vn(p);\n        p = p * 2.0 + vec2(1.7, 0.9);\n        sa *= 0.5;\n    }\n    return clamp(v * 0.75 + ww * 0.12 + s * 0.13, 0.0, 1.0);\n}\n\n// ---------------------------------------------------------------------------\n// Biome 2: eroded_badlands  (fitness=0.9807)\n// Domain-warped turbulence\n// ---------------------------------------------------------------------------\nfloat _th(float n) { return fract(sin(n) * 43758.5453); }\nfloat _tv(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_th(i.x + i.y * 57.0),       _th(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_th(i.x + (i.y + 1.0) * 57.0), _th(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat biome_badlands(vec2 p) {\n    float v = 0.0, a = 0.55;\n    vec2 q = p * 1.3;\n    float w = 0.5;\n    for (int i = 0; i < 8; i++) {\n        float n = _tv(p + vec2(_tv(q) * w, _tv(q + vec2(31.7, 17.3)) * w));\n        v += a * (i == 0 ? abs(2.0 * n - 1.0) : n);\n        p *= 2.0; q *= 2.0; a *= 0.63;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\n// ---------------------------------------------------------------------------\n// Biome 3: river_valley  (fitness=0.9997)\n// 6-octave offset FBM\n// ---------------------------------------------------------------------------\nfloat _rh(float n) { return fract(sin(n) * 43758.5453); }\nfloat _rv(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * (3.0 - 2.0 * f);\n    return mix(mix(_rh(i.x + i.y * 57.0),       _rh(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_rh(i.x + (i.y + 1.0) * 57.0), _rh(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat biome_valley(vec2 p) {\n    float v = 0.0, a = 0.5;\n    for (int i = 0; i < 6; i++) {\n        vec2 q = p + vec2(3.7 * float(i + 1), 2.3 * float(i + 1));\n        v += a * _rv(q);\n        p *= 2.05; a *= 0.48;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\n// ---------------------------------------------------------------------------\n// Biome 4: rolling_hills  (fitness=0.9994)\n// Quintic FBM + shear\n// ---------------------------------------------------------------------------\nfloat _hh(float n) { return fract(sin(n) * 43758.5453); }\nfloat _hn(vec2 x) {\n    vec2 i = floor(x), f = fract(x);\n    f = f * f * f * (10.0 - 15.0 * f + 6.0 * f * f);\n    return mix(mix(_hh(i.x + i.y * 57.0),       _hh(i.x + 1.0 + i.y * 57.0),       f.x),\n               mix(_hh(i.x + (i.y + 1.0) * 57.0), _hh(i.x + 1.0 + (i.y + 1.0) * 57.0), f.x), f.y);\n}\nfloat biome_hills(vec2 p) {\n    float v = 0.0, a = 0.58;\n    for (int i = 0; i < 5; i++) {\n        v += a * _hn(p);\n        p = vec2(p.x * 1.78 + p.y * 0.35, p.x * 0.35 + p.y * 1.78);\n        a *= 0.53;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n\n// ---------------------------------------------------------------------------\n// Allen-Cahn phase kernel  (fitness=1.0)\n// Returns reaction term: positive = growing ice, negative = melting\n// ---------------------------------------------------------------------------\nfloat phase_reaction(float phi, float temp) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;\n    float m   = 2.0 * (0.5 - temp);\n    float mob = 1.0 + 0.6 * tanh(2.5 * (0.5 - temp));\n    return -dW + m * mob + 4.0 * phi * (1.0 - phi) * m;\n}\n\n// ---------------------------------------------------------------------------\n// Terrain dispatch\n// World layout: 5 biomes side-by-side along Z axis, each 2048m wide\n//   Z in [0,     2048) → biome 0: mountain_peaks\n//   Z in [2048,  4096) → biome 1: volcanic_plateau\n//   Z in [4096,  6144) → biome 2: eroded_badlands\n//   Z in [6144,  8192) → biome 3: river_valley\n//   Z in [8192, 10240) → biome 4: rolling_hills\n// ---------------------------------------------------------------------------\nconst float TILE_SZ    = 2048.0;\nconst float INV_SCALE  = 1.0 / 512.0;  // world→noise: [0,2048] → [0,4]\nconst float HEIGHT_MIN = 40.0;\nconst float HEIGHT_MAX = 420.0;\nconst float HEIGHT_RNG = HEIGHT_MAX - HEIGHT_MIN;\n\n// Returns biome index (0..4) and blend factor for seam smoothing\nint biome_tile(float z) {\n    return clamp(int(floor(z / TILE_SZ)), 0, 4);\n}\n\nfloat raw_biome(int id, vec2 p) {\n    if      (id == 0) return biome_mountain(p);\n    else if (id == 1) return biome_volcanic(p);\n    else if (id == 2) return biome_badlands(p);\n    else if (id == 3) return biome_valley(p);\n    else              return biome_hills(p);\n}\n\nfloat terrain_height(vec2 xz) {\n    // Tile-local [0,1] coordinate\n    float local_z = mod(xz.y, TILE_SZ);\n    int   id      = biome_tile(xz.y);\n    vec2  p       = xz * INV_SCALE;\n    float h       = raw_biome(id, p);\n\n    // Blend seam: 100m transition at tile boundaries\n    float blend_w = 100.0;\n    float seam_t  = local_z / TILE_SZ;  // 0=start, 1=end of tile\n    if (seam_t > 1.0 - blend_w / TILE_SZ && id < 4) {\n        float t    = (seam_t - (1.0 - blend_w / TILE_SZ)) / (blend_w / TILE_SZ);\n        t          = t * t * (3.0 - 2.0 * t);  // smoothstep\n        vec2  p2   = xz * INV_SCALE;\n        float h2   = raw_biome(id + 1, p2);\n        h          = mix(h, h2, t);\n    }\n\n    return HEIGHT_MIN + h * HEIGHT_RNG;\n}\n\n// ---------------------------------------------------------------------------\n// Normal (3-tap finite difference)\n// ---------------------------------------------------------------------------\nvec3 terrain_normal(vec2 xz, float eps) {\n    float h0 = terrain_height(xz);\n    float hx = terrain_height(xz + vec2(eps, 0.0));\n    float hz = terrain_height(xz + vec2(0.0, eps));\n    return normalize(vec3(h0 - hx, eps, h0 - hz));\n}\n\n// ---------------------------------------------------------------------------\n// Heightfield raymarcher\n// ---------------------------------------------------------------------------\nfloat march(vec3 ro, vec3 rd) {\n    float t    = 0.0;\n    float tmax = 8000.0;\n    float prev_dist = ro.y - terrain_height(ro.xz);\n\n    for (int i = 0; i < 120; i++) {\n        vec3  p    = ro + rd * t;\n        float h    = terrain_height(p.xz);\n        float dist = p.y - h;\n        if (dist < 0.5) break;\n        // Adaptive step: surface-safe but aggressive far away\n        t += max(dist * 0.55, 4.0);\n        if (t > tmax) return tmax;\n    }\n\n    // Binary refinement\n    float t0 = max(t - 80.0, 0.0), t1 = t;\n    for (int i = 0; i < 10; i++) {\n        float tm = (t0 + t1) * 0.5;\n        vec3  pm = ro + rd * tm;\n        if (pm.y < terrain_height(pm.xz)) t1 = tm; else t0 = tm;\n    }\n    return (t0 + t1) * 0.5;\n}\n\n// ---------------------------------------------------------------------------\n// Material / coloring\n// ---------------------------------------------------------------------------\nvec3 biome_base_color(int id, float height_01, float slope, vec2 xz) {\n    vec3 col;\n    if (id == 0) {\n        // Mountain: grey granite + dark ridge\n        col = mix(vec3(0.45, 0.40, 0.35), vec3(0.65, 0.60, 0.55), height_01);\n        col = mix(col, vec3(0.30, 0.28, 0.25), smoothstep(0.3, 0.8, slope));\n    } else if (id == 1) {\n        // Volcanic: dark basalt, orange lava low\n        col = mix(vec3(0.80, 0.35, 0.10), vec3(0.18, 0.15, 0.14), height_01);\n        col = mix(col, vec3(0.12, 0.10, 0.09), smoothstep(0.4, 0.9, slope));\n    } else if (id == 2) {\n        // Badlands: ochre/tan banding\n        float band = fract(height_01 * 8.0);\n        col = mix(vec3(0.78, 0.52, 0.28), vec3(0.62, 0.40, 0.22), band);\n        col = mix(col, vec3(0.55, 0.45, 0.35), smoothstep(0.5, 0.9, slope));\n    } else if (id == 3) {\n        // Valley: green meadow + river blue low\n        col = mix(vec3(0.12, 0.38, 0.18), vec3(0.30, 0.55, 0.22), height_01);\n        col = mix(col, vec3(0.22, 0.50, 0.42), smoothstep(0.9, 1.0, 1.0 - height_01));\n    } else {\n        // Hills: grass + dark soil on slopes\n        col = mix(vec3(0.45, 0.62, 0.22), vec3(0.28, 0.42, 0.18), height_01);\n        col = mix(col, vec3(0.30, 0.24, 0.18), smoothstep(0.4, 0.7, slope));\n    }\n    return col;\n}\n\nvec3 material_color(vec2 xz, float height, vec3 N, float time) {\n    int   id       = biome_tile(xz.y);\n    float height_01 = (height - HEIGHT_MIN) / HEIGHT_RNG;\n    float slope    = 1.0 - clamp(N.y, 0.0, 1.0);\n\n    vec3 col = biome_base_color(id, height_01, slope, xz);\n\n    // Water at low elevation (valleys + base)\n    float water = smoothstep(65.0, 55.0, height);\n    col = mix(col, vec3(0.08, 0.20, 0.38), water);\n\n    // Lava for volcanic biome at low elevation\n    if (id == 1) {\n        float lava = smoothstep(100.0, 60.0, height);\n        vec3 lava_col = mix(vec3(0.9, 0.4, 0.0), vec3(1.0, 0.8, 0.0),\n                            0.5 + 0.5 * sin(time * 1.2 + xz.x * 0.01 + xz.y * 0.01));\n        col = mix(col, lava_col, lava * 0.8);\n    }\n\n    // Snow + ice from Allen-Cahn phase kernel\n    float temp   = 0.4 + 0.3 * sin(time * 0.25);\n    float phi    = clamp(0.5 + 5.0 * phase_reaction(0.5, temp), 0.0, 1.0);\n    float ice_amt = phi * smoothstep(80.0, 160.0, height);\n    // Snow: high slopes + high elevation\n    float snow = smoothstep(320.0, 370.0, height) * smoothstep(0.55, 0.35, slope);\n    vec3 snow_col = vec3(0.92, 0.94, 0.98);\n    vec3 ice_col  = mix(vec3(0.70, 0.85, 0.95), snow_col, 0.4);\n    col = mix(col, ice_col,  ice_amt * (1.0 - snow));\n    col = mix(col, snow_col, snow);\n\n    return col;\n}\n\n// ---------------------------------------------------------------------------\n// Lighting\n// ---------------------------------------------------------------------------\nvec3 sky_color(vec3 rd) {\n    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);\n    vec3 horiz = vec3(0.70, 0.80, 0.90);\n    vec3 zenith = vec3(0.25, 0.45, 0.80);\n    return mix(horiz, zenith, t * t);\n}\n\nvec3 light_scene(vec3 pos, vec3 rd, vec3 N, vec2 xz, float height, float t, float time) {\n    vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n    vec3 sky_col = vec3(0.45, 0.65, 0.92);\n    vec3 sun_col = vec3(1.45, 1.15, 0.85);\n\n    vec3 mat_col = material_color(xz, height, N, time);\n\n    // Diffuse\n    float diff = max(dot(N, sun_dir), 0.0);\n    // Ambient sky (hemisphere)\n    float amb  = 0.35 + 0.35 * N.y;\n    // Specular (subtle)\n    vec3 H     = normalize(sun_dir - rd);\n    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.12;\n\n    vec3 col = mat_col * (sky_col * amb + sun_col * diff) + sun_col * spec;\n\n    // Aerial perspective / fog\n    float fog_dist = t * 0.00028;\n    float fog      = 1.0 - exp(-fog_dist * fog_dist);\n    vec3  fog_col  = sky_col * 0.85;\n    col = mix(col, fog_col, clamp(fog, 0.0, 1.0));\n\n    return col;\n}\n\n// ---------------------------------------------------------------------------\n// Main entry point\n// ---------------------------------------------------------------------------\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;\n\n    // Time: iMouse.y > 50% of screen height freezes\n    float use_time = (iMouse.y > iResolution.y * 0.5 && iMouse.z > 0.0)\n                     ? iMouse.x * 0.1\n                     : iTime;\n\n    // Camera: slow forward flight over the 5-biome strip\n    // Biome strip runs along Z: [0, 10240]\n    // iMouse.x can scrub position; default: auto-fly from Z=200 to Z=10000\n    float cam_z   = mod(use_time * 45.0 + 300.0, 9900.0);\n    float cam_x   = 1024.0 + 320.0 * sin(use_time * 0.04);\n    vec3 ro       = vec3(cam_x, 650.0, cam_z);\n\n    // Look ahead and slightly down\n    vec3 forward  = normalize(vec3(0.12 * sin(use_time * 0.05), -0.38, 1.0));\n    vec3 right    = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));\n    vec3 up       = cross(right, forward);\n    vec3 rd       = normalize(forward + uv.x * right * 1.6 + uv.y * up);\n\n    // Sky early-out\n    vec3 col;\n    if (rd.y > 0.01) {\n        col = sky_color(rd);\n        // Sun disc\n        vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));\n        float sun = pow(max(dot(rd, sun_dir), 0.0), 280.0);\n        col += vec3(1.4, 1.1, 0.8) * sun;\n    } else {\n        float t = march(ro, rd);\n\n        if (t > 7900.0) {\n            col = sky_color(rd);\n        } else {\n            vec3 pos    = ro + rd * t;\n            vec3 N      = terrain_normal(pos.xz, 4.0);\n            float height = terrain_height(pos.xz);\n            col = light_scene(pos, rd, N, pos.xz, height, t, use_time);\n        }\n    }\n\n    // Subtle vignette\n    vec2 vig_uv = fragCoord / iResolution.xy;\n    float vig   = 1.0 - 0.35 * dot(vig_uv - 0.5, vig_uv - 0.5) * 4.0;\n    col *= clamp(vig, 0.0, 1.0);\n\n    // Gamma\n    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));\n\n    fragColor = vec4(col, 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "phase",
+        "terrain",
+        "demo"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 5,
+        "heavy": true
+      }
+    },
+    {
+      "id": "vault-91e87215",
+      "title": "Allen-Cahn Phase Map — evolved gen 16",
+      "description": "FunSearch-evolved Allen-Cahn reaction term mapped over (phi, temp) space.",
+      "domain": "phase",
+      "fitness": 1.0,
+      "generation": 16,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float reaction(float phi, float temp) {\n    float dW = phi * phi * (4.0 * phi - 6.0) + 2.0 * phi;  // W'(phi)\n    float m = 2.0 * (0.5 - temp);                            // >0 when cold\n    float mobility = 1.0 + 0.6 * tanh(2.5 * (0.5 - temp)); // tanh temperature response\n    return -dW + m * mobility + 4.0 * phi * (1.0 - phi) * m;  // bulk + interface terms\n}\n// FunSearch Allen-Cahn phase kernel visualizer.\n// Maps the (phi, temp) parameter space to a colour-coded heatmap.\n// phi  = x-axis (0→1),  temp = y-axis (0→1).\n// Positive reaction → red (growing phase), negative → blue (shrinking),\n// near-zero → white.\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = fragCoord / iResolution.xy;\n    float phi  = uv.x;          // phase field  [0, 1]\n    float temp = uv.y;          // temperature  [0, 1]\n\n    float r = reaction(phi, temp);\n\n    // Map signed reaction value to colour:  -3..+3 → blue..white..red\n    float t = clamp(r / 3.0 + 0.5, 0.0, 1.0);\n    vec3 col = mix(vec3(0.1, 0.3, 0.9), vec3(0.95, 0.95, 0.95), t * 2.0 - clamp(t * 2.0 - 1.0, 0.0, 1.0));\n    col = mix(col, vec3(0.9, 0.15, 0.1), max(t * 2.0 - 1.0, 0.0));\n\n    // Grid lines at phi=0.5, temp=0.5\n    float grid = step(0.995, abs(sin(uv.x * 3.14159))) * 0.18\n               + step(0.995, abs(sin(uv.y * 3.14159))) * 0.18;\n    col = mix(col, vec3(0.0), grid);\n\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "phase",
+        "channel-source"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 1
+      }
+    },
+    {
+      "id": "vault-1289d510",
+      "title": "Gyroid — reference",
+      "description": "Eikonal-valid gyroid SDF reference oracle.",
+      "domain": "sdf",
+      "fitness": null,
+      "generation": null,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    float s = 2.0;\n    float g = sin(s*x)*cos(s*y) + sin(s*y)*cos(s*z) + sin(s*z)*cos(s*x);\n    return g / (s * 1.7320508);\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    float t = iTime * 0.4 + 1.2;\n    vec3 ro = vec3(3.0*cos(t), 0.8*3.0, 3.0*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "reference",
+        "gyroid"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 1
+      }
+    },
+    {
+      "id": "vault-20074725",
+      "title": "Cloud Blobs — reference",
+      "description": "Min-union sphere blobs reference oracle.",
+      "domain": "sdf",
+      "fitness": null,
+      "generation": null,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    float d  = sqrt(x*x+y*y+z*z) - 0.5;\n    float d2 = sqrt((x-0.8)*(x-0.8)+y*y+z*z) - 0.4;\n    float d3 = sqrt((x+0.7)*(x+0.7)+(y-0.5)*(y-0.5)+z*z) - 0.35;\n    float d4 = sqrt((x-0.3)*(x-0.3)+(y+0.6)*(y+0.6)+(z-0.4)*(z-0.4)) - 0.3;\n    float d5 = sqrt((x+0.5)*(x+0.5)+y*y+(z-0.6)*(z-0.6)) - 0.32;\n    return min(min(min(min(d,d2),d3),d4),d5);\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    float t = iTime * 0.4 + 1.2;\n    vec3 ro = vec3(4.5*cos(t), 0.8*4.5, 4.5*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "reference",
+        "cloud"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 1
+      }
+    },
+    {
+      "id": "vault-34039f7b",
+      "title": "Gyroid — evolved gen 7",
+      "description": "FunSearch-evolved twisted gyroid SDF, raymarched with orbit camera.",
+      "domain": "sdf",
+      "fitness": 0.9022,
+      "generation": 7,
+      "run_id": "01KT8CVT",
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    float s = 3.0;\n    float k = 0.3;\n    float angle = k * z;\n    float xw = x * cos(angle) - y * sin(angle);\n    float yw = x * sin(angle) + y * cos(angle);\n    float f = sin(s * xw) * cos(s * yw) + sin(s * yw) * cos(s * z) + sin(s * z) * cos(s * xw);\n    float grad = s * 1.8;\n    return abs(f) / grad - 0.08;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    // Camera: drag horizontally to orbit, vertically to zoom; idle auto-spins.\n    float t = iTime * 0.4 + 1.2;\n    float cr = 3.0;\n    if (iMouse.z > 0.0) {\n        t = (iMouse.x / iResolution.x) * 6.2831853 + 1.2;\n        cr = 3.0 * (0.45 + 1.4 * clamp(iMouse.y / iResolution.y, 0.0, 1.0));\n    }\n    vec3 ro = vec3(cr*cos(t), 0.8*3.0, cr*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "gyroid"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [
+          "vault-083b2660"
+        ],
+        "oracle": null,
+        "eval_run_id": "01KT8CVT",
+        "preadmit": null,
+        "gen_diff": {
+          "prev_generation": 2,
+          "fitness_delta": 0.0204,
+          "lines_added": 8,
+          "lines_removed": 12,
+          "similarity": 0.811
+        }
+      },
+      "cost": {
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "vault-394ae1b5",
+      "title": "Torus Knot — reference (fast48)",
+      "description": "Exact parametric (2,3) torus-knot distance, 48-sample fast variant.",
+      "domain": "sdf",
+      "fitness": null,
+      "generation": null,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    const float R = 0.6, rm = 0.35, tube = 0.15;\n    const float pi2 = 6.28318530, p = 2.0, q = 3.0;\n    float best_d = 1e9, best_t = 0.0;\n    for (int i = 0; i < 48; i++) {\n        float t = pi2 * float(i) / 48.0;\n        float rr = R + rm*cos(q*t);\n        float kx = rr*cos(p*t), ky = rr*sin(p*t), kz = rm*sin(q*t);\n        float dx = x-kx, dy = y-ky, dz = z-kz;\n        float d = sqrt(dx*dx+dy*dy+dz*dz);\n        if (d < best_d) { best_d = d; best_t = t; }\n    }\n    float arc_dense = pi2 / (p * 200.0);\n    for (int i = -12; i <= 12; i++) {\n        float t = best_t + float(i)*arc_dense;\n        float rr = R + rm*cos(q*t);\n        float kx = rr*cos(p*t), ky = rr*sin(p*t), kz = rm*sin(q*t);\n        float dx = x-kx, dy = y-ky, dz = z-kz;\n        float d = sqrt(dx*dx+dy*dy+dz*dz);\n        if (d < best_d) best_d = d;\n    }\n    return best_d - tube;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    float t = iTime * 0.4 + 1.2;\n    vec3 ro = vec3(2.0*cos(t), 0.8*2.0, 2.0*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "reference",
+        "torus-knot"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 2
+      }
+    },
+    {
+      "id": "vault-462c7d48",
+      "title": "Gyroid — evolved gen 3",
+      "description": "FunSearch-evolved twisted gyroid SDF, raymarched with orbit camera.",
+      "domain": "sdf",
+      "fitness": 0.9088,
+      "generation": 3,
+      "run_id": "01KT8CC4",
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    // Domain-warped gyroid approximation\n    float tx = x + 0.2 * sin(4.0 * y + z * 0.5);\n    float ty = y + 0.2 * sin(4.0 * z + x * 0.5);\n    float tz = z + 0.2 * sin(4.0 * x + y * 0.5);\n    \n    float s = 2.8;\n    float f = sin(s * tx) * cos(s * ty) \n            + sin(s * ty) * cos(s * tz) \n            + sin(s * tz) * cos(s * tx);\n    \n    float grad = s * 1.7320508;\n    return abs(f) / grad - 0.12;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    float t = iTime * 0.4 + 1.2;\n    vec3 ro = vec3(3.0*cos(t), 0.8*3.0, 3.0*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "gyroid"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [
+          "vault-98688191"
+        ],
+        "oracle": null,
+        "eval_run_id": "01KT8CC4",
+        "preadmit": null,
+        "gen_diff": {
+          "prev_generation": 0,
+          "fitness_delta": 0.0441,
+          "lines_added": 12,
+          "lines_removed": 4,
+          "similarity": 0.822
+        }
+      },
+      "cost": {
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "vault-99da2102",
+      "title": "Scherk Surface — evolved gen 4",
+      "description": "FunSearch-evolved Scherk minimal-surface SDF, raymarched.",
+      "domain": "sdf",
+      "fitness": 0.9407,
+      "generation": 4,
+      "run_id": "01KSY5RE",
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    // Scherk's first minimal surface: exp(z)*cos(y) = cos(x)\n    float zc = max(min(z, 2.2), -2.2);\n    float ez = exp(zc);\n    float cx = cos(x), cy = cos(y), sy = sin(y);\n    float f = ez * cy - cx;\n    // Analytical gradient: df/dx = -sin(x), df/dy = -ez*sin(y), df/dz = ez*cos(y)\n    float grad2 = sin(x)*sin(x) + ez*sy*sy + ez*ez;\n    float thickness = 0.082;\n    return abs(f) / sqrt(max(grad2, 0.004)) - thickness;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    float t = iTime * 0.4 + 1.2;\n    vec3 ro = vec3(2.2*cos(t), 0.8*2.2, 2.2*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "scherk-first"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [
+          "vault-57b81624"
+        ],
+        "oracle": null,
+        "eval_run_id": "01KSY5RE",
+        "preadmit": null,
+        "gen_diff": {
+          "prev_generation": 2,
+          "fitness_delta": 0.0019,
+          "lines_added": 8,
+          "lines_removed": 5,
+          "similarity": 0.854
+        }
+      },
+      "cost": {
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "vault-a2974d11",
+      "title": "Torus Knot SDF — evolved gen 17",
+      "description": "FunSearch-evolved arc-length-aware torus-knot SDF (600-sample two-pass).",
+      "domain": "sdf",
+      "fitness": 0.9999,
+      "generation": 17,
+      "run_id": "sdf_results_",
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    const float R = 0.6, rm = 0.35, tube = 0.15;\n    const float pi2 = 6.28318530;\n    const float p = 2.0, q = 3.0;\n    \n    // Arc-length aware sampling: more samples where curvature is high\n    // (2,3) knot has 3-fold symmetry + faster arc in XZ plane\n    const int BASE_SAMPLES = 600;\n    \n    float best_d = 1e9;\n    float best_t = 0.0;\n    \n    // Two-pass: coarse scan then local refinement\n    for (int i = 0; i < BASE_SAMPLES; i++) {\n        float t = pi2 * float(i) / float(BASE_SAMPLES);\n        float ct3 = cos(q * t), st3 = sin(q * t);\n        float ct2 = cos(p * t), st2 = sin(p * t);\n        float rr = R + rm * ct3;\n        float kx = rr * ct2;\n        float ky = rr * st2;\n        float kz = rm * st3;\n        float d = sqrt((x-kx)*(x-kx) + (y-ky)*(y-ky) + (z-kz)*(z-kz));\n        if (d < best_d) { best_d = d; best_t = t; }\n    }\n    \n    // Local refinement with arc-length density correction\n    float arc_dense = pi2 / (p * 200.0); // denser near curvature\n    for (int i = -12; i <= 12; i++) {\n        float t = best_t + float(i) * arc_dense;\n        float ct3 = cos(q * t), st3 = sin(q * t);\n        float ct2 = cos(p * t), st2 = sin(p * t);\n        float rr = R + rm * ct3;\n        float kx = rr * ct2;\n        float ky = rr * st2;\n        float kz = rm * st3;\n        float d = sqrt((x-kx)*(x-kx) + (y-ky)*(y-ky) + (z-kz)*(z-kz));\n        if (d < best_d) best_d = d;\n    }\n    \n    return best_d - tube;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    float t = iTime * 0.4 + 1.2;\n    vec3 ro = vec3(3.5*cos(t), 0.8*3.5, 3.5*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "sdf"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": "sdf_results_",
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 11,
+        "heavy": true
+      }
+    },
+    {
+      "id": "vault-d5a844a9",
+      "title": "Gyroid — evolved gen 9",
+      "description": "FunSearch-evolved twisted gyroid SDF, raymarched with orbit camera.",
+      "domain": "sdf",
+      "fitness": 0.8726,
+      "generation": 9,
+      "run_id": "01KT3J6P",
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sdf(vec3 pos) {\n    float x = pos.x, y = pos.y, z = pos.z;\n    // Domain twist for richer structure\n    float a = 0.1 * z;\n    float ca = cos(a), sa = sin(a);\n    float xw = x*ca - y*sa;\n    float yw = x*sa + y*ca;\n\n    // Multi-scale gyroid: coarse + fine blended\n    float s1 = 3.0, s2 = 5.0;\n    float f1 = sin(s1*xw)*cos(s1*yw) + sin(s1*yw)*cos(s1*z) + sin(s1*z)*cos(s1*xw);\n    float f2 = sin(s2*xw)*cos(s2*yw) + sin(s2*yw)*cos(s2*z) + sin(s2*z)*cos(s2*xw);\n    \n    // Lipschitz-normalised signed distance (gradient bound = s*sqrt(3))\n    float d1 = abs(f1) / (s1 * 1.7320508);\n    float d2 = abs(f2) / (s2 * 1.7320508);\n    \n    // Smooth union of two scales\n    float k = 0.08;\n    float h = max(k - abs(d1 - d2), 0.0) / k;\n    float d = min(d1, d2) - h*h*k*0.25;\n    \n    return d - 0.1;\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5*iResolution.xy) / iResolution.y;\n    float t = iTime * 0.4 + 1.2;\n    vec3 ro = vec3(3.0*cos(t), 0.8*3.0, 3.0*sin(t));\n    vec3 ww = normalize(-ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));\n    vec3 vv = cross(uu, ww);\n    vec3 rd = normalize(uv.x*uu + uv.y*vv + 1.7*ww);\n\n    float d = 0.001, max_d = 12.0;\n    for (int i = 0; i < 96; i++) {\n        float h = sdf(ro + d*rd);\n        if (abs(h) < 0.0015*d || d > max_d) break;\n        d += h * 0.75;\n    }\n\n    vec3 col = vec3(0.04, 0.02, 0.07);\n    if (d < max_d) {\n        vec3 p = ro + d*rd;\n        float e = 0.001;\n        vec3 n = normalize(vec3(\n            sdf(p+vec3(e,0,0)) - sdf(p-vec3(e,0,0)),\n            sdf(p+vec3(0,e,0)) - sdf(p-vec3(0,e,0)),\n            sdf(p+vec3(0,0,e)) - sdf(p-vec3(0,0,e))\n        ));\n        vec3 ld = normalize(vec3(1.5, 2.0, -0.5));\n        float diff = max(dot(n, ld), 0.0);\n        float spec = pow(max(dot(reflect(-ld, n), -rd), 0.0), 48.0) * 0.7;\n        col = vec3(0.15, 0.55, 0.85)*diff + spec + vec3(0.08, 0.04, 0.12)*(1.0-diff);\n        col *= exp(-d * 0.12);\n    }\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "gyroid"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [
+          "vault-eca5be9d"
+        ],
+        "oracle": null,
+        "eval_run_id": "01KT3J6P",
+        "preadmit": null,
+        "gen_diff": {
+          "prev_generation": 0,
+          "fitness_delta": 0.0181,
+          "lines_added": 21,
+          "lines_removed": 4,
+          "similarity": 0.747
+        }
+      },
+      "cost": {
+        "avg_ms": 1
+      }
+    },
+    {
+      "id": "vault-994278f5",
+      "title": "SPH Kernel Curve — evolved gen 31",
+      "description": "FunSearch-evolved SPH smoothing kernel W(r,h) plotted with compact-support cutoff.",
+      "domain": "sph",
+      "fitness": 0.9455,
+      "generation": 31,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float sph_kernel(float r, float h) {\n    float q = r / h;\n    if (q >= 1.0) return 0.0;\n    float m = 1.0 - q;\n    float sigma = 1536.0 / (478.0 * 3.14159265 * h * h * h);\n    float poly = 1.0 + 5.0 * q + 10.0 * q * q + 10.0 * q * q * q + \n                 5.0 * q * q * q * q + q * q * q * q * q;\n    float m5 = m * m; m5 *= m5 * m;\n    return sigma * m5 * poly;\n}\n// FunSearch SPH kernel visualizer.\n// Plots W(r, h=1) as a function of r/h.\n// x-axis: r/h ∈ [0, 1.2],  y-axis: normalised W value.\n// The compact support cutoff at r/h = 1 is marked with a dashed line.\n\nfloat sampleW(float rh) {\n    float h = 1.0;\n    return sph_kernel(rh * h, h);\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = fragCoord / iResolution.xy;\n    vec3 col = vec3(0.08, 0.08, 0.12);\n\n    float rh_range = 1.3;\n    float rh = uv.x * rh_range;\n\n    // Evaluate the curve value at this column\n    float W_here = sampleW(rh);\n    float W_max  = sampleW(0.0);\n    float W_norm = (W_max > 0.0) ? W_here / W_max : 0.0;\n\n    // Plot curve: draw band around the normalised value\n    float curve_y = W_norm;\n    float dist = abs(uv.y - curve_y);\n    float line_w = 2.0 / iResolution.y;\n    col = mix(vec3(0.2, 0.75, 0.95), col, smoothstep(0.0, line_w * 2.0, dist));\n\n    // Fill under the curve\n    if (uv.y < curve_y) {\n        col = mix(col, vec3(0.1, 0.35, 0.55), 0.35);\n    }\n\n    // Dashed vertical at r/h = 1.0\n    float cutoff_x = 1.0 / rh_range;\n    float cx = abs(uv.x - cutoff_x);\n    float dash = step(0.5, fract(uv.y * 14.0));\n    col = mix(col, vec3(0.95, 0.65, 0.1), dash * (1.0 - smoothstep(0.0, 3.0 / iResolution.x, cx)));\n\n    // Axis labels (grid lines)\n    col = mix(col, vec3(0.35), step(uv.y, 0.012) + step(uv.x, 0.012 * iResolution.y / iResolution.x));\n\n    fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "sph"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 2
+      }
+    },
+    {
+      "id": "vault-d8432ca0",
+      "title": "Rolling Hills — evolved gen 32",
+      "description": "FunSearch-evolved rolling-hills heightfield, quintic FBM with shear.",
+      "domain": "terrain",
+      "fitness": 0.9994,
+      "generation": 32,
+      "run_id": null,
+      "author": "funsearch-autobench",
+      "origin": "vault",
+      "language": "glsl",
+      "glsl": "float _rh_hash(float n) { return fract(sin(n) * 43758.5453); }\nfloat _rh_vnoise(vec2 x) {\n    vec2 i = floor(x); vec2 f = fract(x); f = f*f*f*(10.0 - 15.0*f + 6.0*f*f);\n    float n00 = _rh_hash(i.x + i.y * 57.0); float n10 = _rh_hash(i.x + 1.0 + i.y * 57.0);\n    float n01 = _rh_hash(i.x + (i.y+1.0) * 57.0); float n11 = _rh_hash(i.x + 1.0 + (i.y+1.0) * 57.0);\n    return mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y);\n}\nfloat terrain(vec2 p) {\n    float v = 0.0, a = 0.58;\n    for (int i = 0; i < 5; i++) {\n        v += a * _rh_vnoise(p);\n        p = vec2(p.x * 1.78 + p.y * 0.35, p.x * 0.35 + p.y * 1.78);\n        a *= 0.53;\n    }\n    return clamp(v, 0.0, 1.0);\n}\n// FunSearch: biome=rolling_hills, fitness=0.9994\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord * 2.0 - iResolution.xy) / iResolution.y;\n    vec3 ro = vec3(1024.0 + 300.0*sin(iTime*0.1), 450.0, iTime*10.0);\n    vec3 ta = ro + vec3(0.0, -160.0, 500.0);\n    vec3 ww = normalize(ta - ro);\n    vec3 uu = normalize(cross(ww, vec3(0.0,1.0,0.0)));\n    vec3 rd = normalize(uv.x*uu + uv.y*cross(uu,ww) + 1.4*ww);\n    vec3 sun = normalize(vec3(0.6, 0.4, 0.3));\n    vec3 col = mix(vec3(0.3,0.5,0.82), vec3(0.9,0.8,0.7), pow(max(dot(rd,sun),0.0),4.0));\n    float t = 5.0;\n    for (int i = 0; i < 80; i++) {\n        vec3 p = ro + rd*t;\n        float h = terrain(p.xz * 0.0025) * 360.0 + 40.0;\n        float diff = p.y - h;\n        if (diff < 0.5 || t > 3500.0) break;\n        t += max(diff * 0.6, 3.0);\n    }\n    if (t < 3490.0) {\n        vec3 p = ro + rd*t;\n        vec2 xz = p.xz * 0.0025;\n        float e = 0.01;\n        vec3 n = normalize(vec3(terrain(xz-vec2(e,0.0))-terrain(xz+vec2(e,0.0)),\n                                2.0*e,\n                                terrain(xz-vec2(0.0,e))-terrain(xz+vec2(0.0,e))));\n        float h = terrain(xz)*360.0+40.0;\n        float slope = 1.0 - n.y;\n        vec3 mat = mix(vec3(0.28,0.46,0.18), vec3(0.38,0.30,0.22), clamp(slope*2.0,0.0,1.0));\n        mat = mix(mat, vec3(0.88,0.94,0.98), smoothstep(305.0,375.0,h));\n        mat = mix(mat, vec3(0.18,0.32,0.54), smoothstep(80.0,52.0,h));\n        col = mat*(max(dot(n,sun),0.0)*vec3(1.35,1.1,0.85)+max(n.y,0.0)*vec3(0.1,0.16,0.26));\n        col = mix(col, vec3(0.52,0.66,0.84), 1.0-exp(-t*0.00022));\n    }\n    fragColor = vec4(pow(clamp(col,0.0,1.0), vec3(0.4545)), 1.0);\n}\n",
+      "tags": [
+        "evolved",
+        "rolling-hills"
+      ],
+      "featured": false,
+      "lineage": {
+        "parents": [],
+        "oracle": null,
+        "eval_run_id": null,
+        "preadmit": null,
+        "gen_diff": null
+      },
+      "cost": {
+        "avg_ms": 4,
+        "heavy": true
+      }
+    }
+  ]
+}

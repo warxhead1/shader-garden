@@ -1,0 +1,21 @@
+{
+  "specversion": "1.0",
+  "id": "01JZFIXTURE0COMP3PHASEMTN0",
+  "source": "/autobench/composition_oracle",
+  "type": "kernel.composition.ready.v1",
+  "datacontenttype": "application/json",
+  "time": "2026-07-03T00:00:00Z",
+  "x_shader_garden_composition_id": "phase-into-mountain-peaks",
+  "x_shader_garden_note": "FIXTURE — no live nervous-autobench run emits kernel.composition.ready.v1 yet (COMP-3, v2 blueprint item 26). Authored by hand to structurally validate against nervous-bus/schemas/kernel.composition.ready.v1.json and to exercise tools/bake_compositions.py end to end against two REAL evolved kernels already in site/assets/kernels.json (vault-91e87215, biome-mountain-peaks). `x_shader_garden_*` keys are this bridge's own extension — legal because the schema's top-level object has no additionalProperties:false (only `data` does); a real autobench emitter does not need to send them, see this repo's COMP-3 report for the exact ask.",
+  "data": {
+    "terrain_domain": "terrain",
+    "reaction_domain": "phase",
+    "terrain_fitness": 0.9998,
+    "reaction_fitness": 1.0,
+    "composition_fitness": 0.9421,
+    "gate_threshold": 0.85,
+    "ready": true,
+    "terrain_run_id": "biome-mountain-peaks",
+    "reaction_run_id": "vault-91e87215"
+  }
+}

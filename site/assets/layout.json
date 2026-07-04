@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "regions": {
+    "side": { "el": "#region-side" }
+  },
+  "placements": [
+    { "organ": "provenance", "region": "side", "when": ["/s/:id"] }
+  ],
+  "prefs": {
+    "editor_modes": ["glsl", "wgsl"],
+    "editor_default_mode": "glsl",
+    "provenance_collapsed": false
+  }
+}

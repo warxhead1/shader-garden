@@ -1,0 +1,51 @@
+<!doctype html>
+<!--
+  Foreign-origin embed fixture for tools/test/seed.mjs (SEED-1 acceptance).
+  Served from its own tools/test/fixtures/foreign-seed/ static root, on a
+  different port than the "garden" (site/) server — a different origin,
+  simulating a real third-party page embedding <shader-seed>. Everything the
+  seed needs comes from ?origin= — this file never hardcodes a garden URL.
+
+  Query params:
+    origin     required — the garden's assets/seed/ base URL, e.g.
+               "http://127.0.0.1:PORT/assets/seed/". The module script and
+               the seed's default `garden` resolution (import.meta.url) both
+               point here, so no `garden` attribute is set on the element —
+               this exercises the zero-config default resolution path.
+    kernel     kernel id (default: biome-rolling-hills)
+    offscreen  "1" pushes the element far below the fold so it never
+               intersects on load (zero-GL-context acceptance)
+    count      number of <shader-seed> elements to insert, all the same
+               kernel (default 1) — used for the fetch-dedup check
+-->
+<html>
+<head><meta charset="utf-8"><title>foreign embed fixture</title></head>
+<body style="margin:0">
+<script>
+  var params = new URLSearchParams(location.search);
+  var origin = params.get('origin');
+  var kernel = params.get('kernel') || 'biome-rolling-hills';
+  var offscreen = params.get('offscreen') === '1';
+  var count = Number(params.get('count') || '1');
+
+  if (offscreen) {
+    var spacer = document.createElement('div');
+    spacer.style.height = '4000px';
+    document.body.appendChild(spacer);
+  }
+
+  for (var i = 0; i < count; i++) {
+    var seed = document.createElement('shader-seed');
+    seed.id = i === 0 ? 'seed' : 'seed-' + i;
+    seed.setAttribute('kernel', kernel);
+    seed.style.width = '480px';
+    document.body.appendChild(seed);
+  }
+
+  var script = document.createElement('script');
+  script.type = 'module';
+  script.src = origin + 'seed@1.js';
+  document.head.appendChild(script);
+</script>
+</body>
+</html>

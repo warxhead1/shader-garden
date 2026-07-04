@@ -1,0 +1,25 @@
+name: Seed freeze check
+
+# V2_BLUEPRINT.md item 16 / seed.md §3.1: a shipped, pinned
+# site/assets/seed/seed@<x>.<y>.<z>.js is immutable once merged. GitHub
+# Pages "immutable" is a repo policy, not a server feature — this workflow
+# is that policy's enforcement. See tools/check_seed_freeze.py for the
+# actual diff logic (also self-testable offline: `python3
+# tools/check_seed_freeze.py --selftest`).
+
+on:
+  pull_request:
+    paths:
+      - 'site/assets/seed/**'
+
+jobs:
+  seed-freeze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for a base-ref diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fail if a shipped pinned seed file was modified, deleted, or renamed
+        run: python3 tools/check_seed_freeze.py --base "origin/${{ github.base_ref }}" --head HEAD

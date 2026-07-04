@@ -1,0 +1,23 @@
+[
+  {
+    "version": "1.1.0",
+    "file": "assets/seed/seed@1.1.0.js",
+    "sha384": "sha384-CFXd6th4zGQPhuojOoGJ1IemhXBTgalRIjeNBa9koKsdYppbPjx0aZLZhzYufMpz",
+    "bytes": 27534,
+    "date": "2026-07-03T20:36:44Z"
+  },
+  {
+    "version": "1.2.0",
+    "file": "assets/seed/seed@1.2.0.js",
+    "sha384": "sha384-LnGwwM+kgUzKYgLplvOxf9fYfER8tIs1W4T7wclNcANeMSV00OooLySjqW8ljvp1",
+    "bytes": 37305,
+    "date": "2026-07-03T21:44:14Z"
+  },
+  {
+    "version": "1.3.0",
+    "file": "assets/seed/seed@1.3.0.js",
+    "sha384": "sha384-19YmWh9xH5krTrdrS7Z5aWAXkRsi5iIN3RYUDMzd4tqe+bBshCVYkeRt5ZqcEaXU",
+    "bytes": 39812,
+    "date": "2026-07-03T22:29:10Z"
+  }
+]

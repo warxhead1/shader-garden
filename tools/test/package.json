@@ -1,0 +1,19 @@
+{
+  "name": "shader-garden-tests",
+  "private": true,
+  "type": "module",
+  "description": "Headless verification harness for the site. Not deployed; the site itself stays dependency-free.",
+  "scripts": {
+    "smoke": "node smoke.mjs",
+    "admission-sac": "node admission-sac.mjs",
+    "shots": "node shots.mjs",
+    "perf": "node perf.mjs",
+    "comp0": "node comp0.mjs",
+    "layout": "node layout.mjs",
+    "loader": "node loader.mjs",
+    "anatomy": "node anatomy.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "25.3.0"
+  }
+}

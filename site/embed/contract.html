@@ -1,0 +1,343 @@
+<!doctype html>
+<!--
+  Shader Garden — <shader-seed> conformance page (SEED-2/SEED-3,
+  V2_BLUEPRINT.md items 16 & 20 / seed.md §2.5: "A conformance page
+  site/embed/contract.html renders one seed per contract clause and asserts
+  events/DOM with inline script; CI runs it headless. The contract is
+  executable, not prose-only.")
+
+  Loads the BAKED artifact (site/assets/seed/seed@1.js), same as a real
+  embed would, and exercises: default autoplay, autoplay="click"/"off",
+  live-retune attributes (never rebuild), the speed="0" freeze, the
+  pause/posterize/reset imperative API + their events, an unknown-kernel
+  failure, the MAX_LIVE=4 concurrency budget with a real 6th seed (SEED-2,
+  clauses A-H), and (SEED-3, clauses I-O) the src=/href=+unsafe tier's
+  refuse-without-unsafe / forced-click / sg-admit(OK|CE) verdicts,
+  `integrity` match+mismatch, and the attribution chip's deep link + mode.
+
+  tools/test/seed.mjs drives this page headless and reads
+  window.__conformanceFailed; also asserts the no-rebuild-on-context-loss
+  policy itself (needs WEBGL_lose_context, a page-level trick this page
+  can't reach on its own) and the viewer's "Copy embed code" snippet.
+  Opening it directly in a browser also works — results render into
+  #results as plain text.
+
+  NOT re-covered here (already covered by tools/test/seed.mjs's own
+  fixture): prefers-reduced-motion, the foreign-origin fetch-exactly-once
+  proof, and the embed button's live snippet.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>shader-seed conformance</title>
+<style>
+  body { font: 13px/1.4 ui-monospace, monospace; background: #0b0d12; color: #d7dee8; margin: 0; padding: 16px; }
+  shader-seed { width: 220px; display: inline-block; margin: 4px; vertical-align: top; }
+  #results { white-space: pre-wrap; margin-top: 16px; padding: 12px; background: #11141c; border-radius: 6px; }
+  .pass { color: #7ee787; }
+  .fail { color: #ff7b72; }
+</style>
+</head>
+<body>
+<h1>shader-seed conformance (SEED-2 + SEED-3)</h1>
+<div id="clauses"></div>
+<pre id="results">running…</pre>
+<script type="module">
+import '../assets/seed/seed@1.js';
+import { compress } from '../js/share.js';
+
+const KERNEL = 'biome-rolling-hills';
+// Tiny, deterministic fixtures for the unsafe tier — not one of the baked
+// kernels, so these clauses never touch assets/seed/ at all.
+const SAFE_GLSL = 'void mainImage(out vec4 c, in vec2 fragCoord) { c = vec4(fract(iTime), 0.0, 0.0, 1.0); }';
+const BROKEN_GLSL = 'void mainImage(out vec4 c, in vec2 fragCoord) { c = vec4(1.0 0.0, 0.0, 1.0); }';
+const clauses = document.getElementById('clauses');
+const results = [];
+let done = false;
+
+function log(name, ok, detail) {
+  results.push({ name, ok, detail });
+}
+
+function mk(attrs) {
+  const el = document.createElement('shader-seed');
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  clauses.appendChild(el);
+  return el;
+}
+
+function once(el, name) {
+  return new Promise((resolve) => el.addEventListener(name, (e) => resolve(e.detail), { once: true }));
+}
+
+// Same as once(), but resolves null instead of hanging forever if an event
+// that legitimately might not fire (e.g. a starved sg-admit under SwiftShader
+// contention from the many already-playing seeds in earlier clauses) doesn't
+// show up in time.
+function onceTimeout(el, name, timeout = 10000) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), timeout);
+    el.addEventListener(name, (e) => { clearTimeout(t); resolve(e.detail); }, { once: true });
+  });
+}
+
+function waitFor(fn, timeout = 8000) {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    (function poll() {
+      if (fn()) return resolve(true);
+      if (performance.now() - t0 > timeout) return resolve(false);
+      requestAnimationFrame(poll);
+    })();
+  });
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function poster(el) {
+  return el.shadowRoot.querySelector('.poster');
+}
+
+async function run() {
+  // A — default autoplay="visible": sg-ready then playing.
+  {
+    const el = mk({ kernel: KERNEL });
+    const ready = await once(el, 'sg-ready');
+    const played = await waitFor(() => el.state === 'playing');
+    log('A: default autoplay reaches playing', played, 'state=' + el.state);
+    log('A: sg-ready detail has backend webgl2', ready.backend === 'webgl2', JSON.stringify(ready));
+  }
+
+  // B — autoplay="click": stays poster; click is a gesture; sg-play reason.
+  {
+    const el = mk({ kernel: KERNEL, autoplay: 'click' });
+    await waitFor(() => el.state === 'poster' || el.state === 'playing');
+    const stayedPoster = el.state === 'poster';
+    const playPromise = once(el, 'sg-play');
+    poster(el).click();
+    const playDetail = await playPromise;
+    const played = await waitFor(() => el.state === 'playing');
+    log('B: autoplay=click starts on poster', stayedPoster);
+    log('B: click reaches playing', played);
+    log('B: sg-play reason=gesture on click', playDetail && playDetail.reason === 'gesture', JSON.stringify(playDetail));
+  }
+
+  // C — autoplay="off": stays poster forever; API play() reason=api.
+  {
+    const el = mk({ kernel: KERNEL, autoplay: 'off' });
+    await sleep(400);
+    const stillPoster = el.state === 'poster';
+    const playPromise = once(el, 'sg-play');
+    el.play();
+    const playDetail = await playPromise;
+    const played = await waitFor(() => el.state === 'playing');
+    log('C: autoplay=off never self-starts', stillPoster);
+    log('C: play() API reaches playing', played);
+    log('C: sg-play reason=api from play()', playDetail && playDetail.reason === 'api', JSON.stringify(playDetail));
+  }
+
+  // D — live retune: changing speed/t0/mouse/max-dpr never rebuilds
+  // (state never drops back to idle/loading; no second sg-ready).
+  {
+    const el = mk({ kernel: KERNEL });
+    await waitFor(() => el.state === 'playing');
+    let sawRebuild = false;
+    let readyCount = 0;
+    el.addEventListener('sg-ready', () => readyCount++);
+    const watch = setInterval(() => {
+      if (el.state === 'idle' || el.state === 'loading') sawRebuild = true;
+    }, 20);
+    el.setAttribute('speed', '2');
+    el.setAttribute('mouse', '0.5,0.5,0,0');
+    el.setAttribute('max-dpr', '5'); // out-of-range, must clamp not throw
+    el.setAttribute('t0', '1.5');
+    await sleep(500);
+    clearInterval(watch);
+    log('D: live attrs never drop through idle/loading', !sawRebuild);
+    log('D: live attrs never re-fire sg-ready', readyCount === 0, 'count=' + readyCount);
+    log('D: still playing after retune', el.state === 'playing', 'state=' + el.state);
+  }
+
+  // E — speed="0" freezes the clock at t0; speed="1" (default) advances it
+  // in real time. Reads the runtime clock directly rather than pixel-diffing
+  // the canvas — a raymarched kernel's on-screen delta over a short window
+  // depends on camera framing/content (flaky under headless SwiftShader
+  // contention with 4+ concurrent contexts from clauses A-D); the clock is
+  // the actual thing `speed` controls, and is a deterministic signal.
+  {
+    const frozen = mk({ kernel: KERNEL, speed: '0', t0: '0.3' });
+    const moving = mk({ kernel: KERNEL, speed: '1' });
+    await waitFor(() => frozen.state === 'playing' && moving.state === 'playing');
+    const clock = (el) => el._runtime && el._runtime.getClock();
+    const ft0 = clock(frozen).time;
+    const mt0 = clock(moving).time;
+    await sleep(800);
+    const ft1 = clock(frozen).time;
+    const mt1 = clock(moving).time;
+    log('E: speed=0 pins the clock at t0', ft0 === 0.3 && ft1 === 0.3, `ft0=${ft0} ft1=${ft1}`);
+    log('E: speed=1 (default) advances the clock in real time', mt1 - mt0 > 0.5, `mt0=${mt0.toFixed(3)} mt1=${mt1.toFixed(3)}`);
+  }
+
+  // F — imperative API: pause()/posterize()/reset(), each event's reason.
+  {
+    const el = mk({ kernel: KERNEL });
+    await waitFor(() => el.state === 'playing');
+    const pausePromise = once(el, 'sg-pause');
+    el.pause();
+    const pauseDetail = await pausePromise;
+    log('F: pause() -> state=paused', el.state === 'paused', 'state=' + el.state);
+    log('F: sg-pause reason=api', pauseDetail && pauseDetail.reason === 'api', JSON.stringify(pauseDetail));
+    const posterPromise = once(el, 'sg-poster');
+    el.posterize();
+    const posterDetail = await posterPromise;
+    log('F: posterize() -> state=poster', el.state === 'poster', 'state=' + el.state);
+    log('F: sg-poster reason=api', posterDetail && posterDetail.reason === 'api', JSON.stringify(posterDetail));
+    log('F: posterize() disposes (backend=null)', el.backend === null, 'backend=' + el.backend);
+    el.play();
+    await waitFor(() => el.state === 'playing');
+    el.reset();
+    log('F: reset() after replay does not throw', true);
+  }
+
+  // G — unknown kernel id fails to poster with sg-error{not-found}.
+  {
+    const el = mk({ kernel: 'does-not-exist-kernel-xyz' });
+    const errPromise = once(el, 'sg-error');
+    const errDetail = await errPromise;
+    log('G: unknown kernel -> sg-error fires', !!errDetail, JSON.stringify(errDetail));
+    log('G: settles on poster (not blank canvas)', el.state === 'error', 'state=' + el.state);
+  }
+
+  // H — MAX_LIVE=4 + LRU: 6 seeds, all visible, never >4 playing at once.
+  {
+    const seeds = [];
+    for (let i = 0; i < 6; i++) {
+      seeds.push(mk({ kernel: KERNEL, style: 'width:90px' }));
+    }
+    await sleep(2500); // let the ladder settle
+    const states = seeds.map((s) => s.state);
+    const playingCount = states.filter((s) => s === 'playing').length;
+    log('H: 6 seeds never exceed MAX_LIVE=4 playing', playingCount <= 4, JSON.stringify(states));
+    log('H: at least one seed was budget-evicted to poster', states.includes('poster'), JSON.stringify(states));
+  }
+
+  // I — src= without unsafe is refused outright: poster + sg-error{unadmitted}.
+  {
+    const el = mk({ src: SAFE_GLSL });
+    const errDetail = await once(el, 'sg-error');
+    log('I: src without unsafe -> sg-error unadmitted', errDetail && errDetail.code === 'unadmitted', JSON.stringify(errDetail));
+    log('I: settles on the poster box', el.shadowRoot.querySelector('.poster').hidden === false);
+  }
+
+  // J — src=+unsafe: forced-click (never autoplays), sg-admit OK once the
+  // live compile survives the 60-frame window, static_findings always [].
+  {
+    const el = mk({ src: SAFE_GLSL, unsafe: '' });
+    await sleep(500);
+    const neverAutoplayed = el.state !== 'playing';
+    const admitPromise = onceTimeout(el, 'sg-admit');
+    poster(el).click();
+    const played = await waitFor(() => el.state === 'playing');
+    const admit = await admitPromise;
+    log('J: unsafe src= never self-starts', neverAutoplayed);
+    log('J: a click plays unsafe src=', played);
+    log('J: sg-admit verdict=OK safe=true after the survive window', admit && admit.verdict === 'OK' && admit.safe === true, JSON.stringify(admit));
+    log('J: sg-admit static_findings is [] (never absent)', !!admit && Array.isArray(admit.static_findings) && admit.static_findings.length === 0);
+  }
+
+  // K — href=+unsafe: the share.js deflate-raw/base64url format, decoded and
+  // played the same way as src=.
+  {
+    const b64 = await compress(SAFE_GLSL);
+    const el = mk({ href: '#/edit?src=' + b64 + '&lang=glsl', unsafe: '' });
+    await sleep(500);
+    const admitPromise = onceTimeout(el, 'sg-admit');
+    poster(el).click();
+    const played = await waitFor(() => el.state === 'playing');
+    const admit = await admitPromise;
+    log('K: unsafe href= decodes and plays on click', played);
+    log('K: sg-admit fires for the href tier too', admit && admit.verdict === 'OK', JSON.stringify(admit));
+  }
+
+  // L — a compile failure in unsafe source: sg-error{compile} + sg-admit CE.
+  {
+    const el = mk({ src: BROKEN_GLSL, unsafe: '' });
+    const admitPromise = onceTimeout(el, 'sg-admit');
+    const errPromise = once(el, 'sg-error');
+    poster(el).click();
+    const errDetail = await errPromise;
+    const admit = await admitPromise;
+    log('L: broken unsafe src -> sg-error compile', errDetail && errDetail.code === 'compile', JSON.stringify(errDetail));
+    log('L: sg-admit verdict=CE safe=false for the failed compile', admit && admit.verdict === 'CE' && admit.safe === false, JSON.stringify(admit));
+  }
+
+  // M — integrity: mismatch refuses (poster + sg-error{integrity}); a
+  // correct sha256-<b64> of the resolved GLSL text still plays on click.
+  {
+    const badEl = mk({ src: SAFE_GLSL, unsafe: '', integrity: 'sha256-not-the-right-hash' });
+    const badErr = await once(badEl, 'sg-error');
+    log('M: integrity mismatch -> sg-error integrity', badErr && badErr.code === 'integrity', JSON.stringify(badErr));
+
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(SAFE_GLSL)));
+    let bin = '';
+    for (const b of digest) bin += String.fromCharCode(b);
+    const goodHash = 'sha256-' + btoa(bin);
+    const goodEl = mk({ src: SAFE_GLSL, unsafe: '', integrity: goodHash });
+    await sleep(400);
+    const stillPoster = goodEl.state === 'poster';
+    poster(goodEl).click();
+    const goodPlayed = await waitFor(() => goodEl.state === 'playing');
+    log('M: a correct integrity hash still plays on click', stillPoster && goodPlayed);
+  }
+
+  // N — attribution chip: kernel= tier deep-links to #/s/<id>; attribution="off"
+  // sets the CSS hook that hides it.
+  {
+    const el = mk({ kernel: KERNEL });
+    await waitFor(() => el.state === 'playing');
+    const chip = el.shadowRoot.querySelector('.chip');
+    const href = chip && chip.getAttribute('href');
+    log('N: attribution chip deep-links to #/s/<kernel-id>', !!href && href.includes('#/s/' + KERNEL), href);
+
+    const off = mk({ kernel: KERNEL, attribution: 'off' });
+    await waitFor(() => off.state === 'playing');
+    log('N: attribution="off" sets data-attribution=off', off.shadowRoot.querySelector('.wrap').dataset.attribution === 'off');
+  }
+
+  // O — attribution chip: unsafe src= deep-links to a working #/edit share
+  // link (compressed on the fly), independently decodable back to the source.
+  {
+    const el = mk({ src: SAFE_GLSL, unsafe: '' });
+    await waitFor(() => el.state === 'poster' || el.state === 'playing');
+    const ok = await waitFor(() => {
+      const chip = el.shadowRoot.querySelector('.chip');
+      return chip && /#\/edit\?src=.+&lang=glsl/.test(chip.getAttribute('href') || '');
+    }, 4000);
+    log('O: unsafe src= attribution chip builds a #/edit share link', ok, el.shadowRoot.querySelector('.chip').getAttribute('href'));
+  }
+
+  done = true;
+  render();
+}
+
+function render() {
+  const failed = results.some((r) => !r.ok);
+  const lines = results.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.detail ? ' (' + r.detail + ')' : ''}`);
+  lines.push('');
+  lines.push(failed ? 'FAILURES ABOVE' : 'all-PASS');
+  document.getElementById('results').textContent = lines.join('\n');
+  window.__conformanceResults = results;
+  window.__conformanceFailed = failed;
+  window.__conformanceDone = true;
+}
+
+run().catch((err) => {
+  log('UNCAUGHT: ' + (err && err.message || err), false);
+  done = true;
+  render();
+});
+</script>
+</body>
+</html>

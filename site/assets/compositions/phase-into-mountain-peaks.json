@@ -1,0 +1,30 @@
+{
+  "id": "phase-into-mountain-peaks",
+  "title": "Allen-Cahn Phase Map — evolved gen 16 → Mountain Peaks — evolved biome (evolved composition)",
+  "description": "COMP-3 evolved composition, baked from a kernel.composition.ready.v1 artifact (01JZFIXTURE0COMP3PHASEMTN0). Pass 1 renders \"Allen-Cahn Phase Map — evolved gen 16\" (fitness 1.0) into an offscreen buffer as a channel source; pass 2 renders \"Mountain Peaks — evolved biome\" (fitness 0.9998) to the screen with that buffer bound as iChannel0. Composition oracle scored the pair 0.9421 against a 0.85 gate (ready=true).",
+  "domain": "composite",
+  "passes": [
+    {
+      "kernel": "vault-91e87215",
+      "target": "bufferA"
+    },
+    {
+      "kernel": "biome-mountain-peaks",
+      "target": "screen",
+      "channels": [
+        "bufferA"
+      ]
+    }
+  ],
+  "provenance": {
+    "oracle": "/autobench/composition_oracle",
+    "event_id": "01JZFIXTURE0COMP3PHASEMTN0",
+    "terrain_domain": "terrain",
+    "reaction_domain": "phase",
+    "terrain_fitness": 0.9998,
+    "reaction_fitness": 1.0,
+    "composition_fitness": 0.9421,
+    "gate_threshold": 0.85,
+    "ready": true
+  }
+}

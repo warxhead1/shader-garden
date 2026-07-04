@@ -1,0 +1,80 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  editor-bundle-diff:
+    # ED-2: site/js/vendor/cm-editor.bundle.js is committed, not CI-built
+    # (ARCHITECTURE.md / tools/editor-bundle/README.md) — this job is the
+    # drift guard: esbuild is deterministic given the pinned lockfile, so a
+    # rebuild that doesn't byte-match the committed chunk means vendor/ or
+    # package-lock.json changed without the chunk being regenerated.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install bundle tooling
+        working-directory: tools/editor-bundle
+        run: npm ci --no-fund --no-audit
+
+      - name: Rebuild the CodeMirror vendor chunk
+        working-directory: tools/editor-bundle
+        run: node build.mjs
+
+      - name: Fail on drift vs the committed chunk
+        run: git diff --exit-code -- site/js/vendor/cm-editor.bundle.js
+
+  upload:
+    needs: editor-bundle-diff
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Substitute repo placeholder
+        run: sed -i "s|OWNER_REPO_PLACEHOLDER|${{ github.repository }}|g" site/js/share.js
+
+      - name: Stamp service-worker cache version
+        # Every deploy byte-changes sw.js so returning clients' SW update check
+        # fires and the versioned precache is rebuilt (see site/sw.js VERSION).
+        run: sed -i "s|SW_BUILD_PLACEHOLDER|${{ github.sha }}|g" site/sw.js
+
+      - name: Check budgets
+        run: python3 tools/check_budgets.py
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: upload
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

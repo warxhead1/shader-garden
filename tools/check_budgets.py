@@ -15,7 +15,20 @@ FILES = [
     ("site/js/core/layout.js", 150, None),
     # PERF-0 (2026-07-03): +30 LOC for the adaptive-quality ladder — raised
     # 90 -> 120 deliberately, noted in the ED-3+PERF-0 commit message.
-    ("site/js/core/runtime-host.js", 120, None),
+    # 120 -> 132: PERF-2 (2026-07-04) — maxDpr passthrough to the webgl2
+    # tryWebgl2() helper, plus an EMA over onPerf's ~1Hz ms samples and an
+    # opts.onPerf callback so a mount (the garden) can show an honest
+    # ms/frame + renderScale HUD.
+    # 132 -> 145: GARDEN-1 — rebuild(overrides) lets a caller (the garden
+    # organ's editing seam) permanently pin a mount onto a specific backend.
+    # Both raises land in the same wave-2 merge. Actual 135/145.
+    # 145 -> 180: PERF-3 (2026-07-04) — a circuit breaker on onLost:'rebuild'
+    # (MAX_LOSS_REBUILDS/LOSS_WINDOW_MS, the loss-counter state, and the
+    # onContextLost handler's tripped/give-up branch) — fixes a cold-boot
+    # stall where a context that loses immediately on every rebuild retried
+    # forever with nothing to observe it. Lands on top of GARDEN-1's cap in
+    # this cherry-pick. Actual 168/180. Raised deliberately.
+    ("site/js/core/runtime-host.js", 180, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.
@@ -94,11 +107,24 @@ FILES = [
     ("site/assets/organs.json", None, 4096),
     # COMP-0 (v2 §7.5, item 23): iChannel plumbing + render-to-texture.
     # post-ADM-A baseline was 350/350 LOC each; budget is baseline + 120/130.
-    ("site/js/runtime/webgl2.js", 470, None),
-    ("site/js/runtime/webgpu.js", 480, None),
+    # 470 -> 480: PERF-2 — constructor takes an optional {maxDpr} so a
+    # per-mount cap (e.g. the garden's raymarch) can pin tighter than the
+    # site-wide DEFAULT_DPR_CAP. Actual 472/480. Raised deliberately.
+    ("site/js/runtime/webgl2.js", 480, None),
+    # 480 -> 580: GARDEN-1 (garden-webgpu wave 2) — setUniforms()'s WGSL
+    # equivalent (a custom-uniform bank + name registry) and readPixel()
+    # (the offscreen probe-readback primitive: a second rgba8unorm pipeline
+    # + copyTextureToBuffer/mapAsync path), both needed to run GARDEN-0's
+    # scene on this backend at all. Actual 565/580. Raised deliberately,
+    # this commit.
+    ("site/js/runtime/webgpu.js", 580, None),
     # wrap.js also rolls up into the admission aggregate below (net -30 from
     # runtimes, per the admission budget); this row is the COMP-0 hard cap.
-    ("site/js/runtime/wrap.js", 70, None),
+    # 70 -> 115: GARDEN-1 adds the `@sg-uniforms` directive parser
+    # (wgCustomUniformNames) + accessor-function generator (genCustomAccessors)
+    # that wrapWgsl() now injects — webgpu.js's WGSL side of setUniforms().
+    # Actual 108/115. Raised deliberately, this commit.
+    ("site/js/runtime/wrap.js", 115, None),
     # COMP-1 (v2 §7.3 item 24): DAG validation shared by the composition
     # player and admission's SG-S08 rule — kept OUT of the admission
     # aggregate below (its byte budget was already near its COMP-0 cap) since
@@ -134,7 +160,15 @@ AGGREGATES = [
     # resolution, same shape as the WGSL manifest fetch already there).
     # Combined at merge: actual 681 LOC / 26809 bytes; caps raised to
     # 700 LOC / 27648 bytes for headroom. Raised deliberately, this merge.
-    ("site/js/core/*.js", 700, 27648),
+    # Wave-2 merge: PERF-2 (EMA/onPerf/maxDpr) + GARDEN-1 (rebuild
+    # overrides) land in runtime-host.js together — each fit the old caps
+    # alone, the union doesn't. Actual 699 LOC / 27924 bytes; raised to
+    # 730 / 29184 for headroom. Raised deliberately, this merge.
+    # 730 -> 750 LOC / 29184 -> 30720 bytes: PERF-3's onLost:'rebuild'
+    # circuit breaker (see runtime-host.js's own cap comment) cherry-picked
+    # on top of the wave-2 union above. Actual 729 LOC / 29934 bytes.
+    # Raised deliberately.
+    ("site/js/core/*.js", 750, 30720),
     # 31744 -> 35840 bytes: ADM-C (V2_BLUEPRINT.md item 13) adds the GLSL
     # sacrificial worker path (sac-worker.js) and the full report.js UI
     # (badge hover legend, findings, preview, timing strip, copy button) —
@@ -152,9 +186,24 @@ AGGREGATES = [
     # admitComposition()/runCompositionWorker() (SG-S08 + per-pass SG-Sxx +
     # the composed sacrificial watchdog). Actual at merge: 1093 LOC / 49426
     # bytes; caps raised for headroom. Raised deliberately, this commit.
-    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 51200),
+    # 51200 -> 53248 bytes: GARDEN-1's wrap.js growth (see its own row above)
+    # rolls up into this aggregate; LOC stays under the existing cap.
+    # Actual 1137 LOC / 51763 bytes. Raised deliberately, this commit.
+    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 53248),
     # GARDEN-0 (v2 §8.29): the whole organ, one cap — parse/probe/panel/index.
-    ("site/js/organs/garden/*.js", 700, None),
+    # 700 -> 1150: GARDEN-IDE "depth" wave — component tray + keyboard nav
+    # (tray.js), the static connections analyzer (connections.js, has its own
+    # node-only unit test outside this budget), per-component cost chips via
+    # an explicit stub-and-time Measure action (measure.js), and terrain
+    # stage/variant fetching (variants.js) + the probe panel's stage selector
+    # and in-panel connections block. Four genuinely new surfaces landed
+    # together, not bloat on the existing single-probe path (that path's own
+    # tests in garden.mjs stay green — see the commit this shipped with).
+    # Actual at merge: 1099/1150. Raised deliberately, this commit.
+    # Wave-2 merge: the IDE spine (above), PERF-2's quality selector/HUD,
+    # and GARDEN-1's dual-source mount + async probe land in this organ
+    # together — each fit alone, the union doesn't. Actual 1253/1300.
+    ("site/js/organs/garden/*.js", 1300, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

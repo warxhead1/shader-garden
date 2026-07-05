@@ -460,7 +460,8 @@ Both runtimes present the same surface, so callers swap them freely:
 
 ```js
 // webgl2.js
-new GL2Runtime(canvas)          // throws when WebGL2 is unavailable
+new GL2Runtime(canvas, {maxDpr?}) // throws when WebGL2 unavailable; maxDpr overrides
+                                 // the site-wide DEFAULT_DPR_CAP for this instance (PERF-2)
 rt.setShader(glslSrc, channels) // -> { ok, log, messages }; channels (0-4, COMP-0) declares
                                  // iChannel0.. (C11: omitted entirely when 0); a failed compile
                                  // keeps the previous program running
@@ -470,8 +471,10 @@ rt.getClock()                   // the shared clock: { time, dt, frame, mouse, r
 rt.seek(t) / rt.step(dt?)       // scrub / manual single-frame advance while stopped, then redraw (ED-3)
 rt.setRenderScale(s)            // multiplier on the DPR-capped buffer size, clamped [0.25, 2] (PERF-0)
 rt.setUniforms({name: n})       // named float uniforms beyond the fixed five — GARDEN-0's
-                                 // @tune sliders + probe toggle (GL2 only; merges, persists
-                                 // across setShader(), unknown names silently ignored)
+                                 // @tune sliders + probe toggle; merges, persists across
+                                 // setShader(), unknown names silently ignored. Both backends
+                                 // (WGSL side: wrap.js's `@sg-uniforms` directive + a fixed
+                                 // 16-float bank — see § "The Garden" below)
 rt.setChannels([tex, ...])      // COMP-0: bind up to 4 WebGLTextures as iChannel0..
 rt.createTarget(w, h, {feedback}) // COMP-0: offscreen render target; feedback:true ping-pongs
 rt.renderTo(target, t)          // COMP-0: renderOnce's off-screen sibling
@@ -603,6 +606,91 @@ The backend badge (`badge-backend` + `badge-fps`, wired by `dom.js`'s
 `wirePerf`) always renders `<fps> fps · <scale>x`, e.g. `31 fps · 0.75x` — the
 honesty pillar: whatever quality level is actually rendering, the badge says
 so, ladder-driven or user-chosen.
+
+### Per-mount DPR cap + an honest ms/frame HUD (PERF-2)
+
+PERF-0's `1.5` DPR cap is site-wide; a fullscreen raymarch is a different
+animal from a thumbnail-sized kernel, so `GL2Runtime`'s constructor now takes
+an optional `{maxDpr}` (defaults to the module's `DEFAULT_DPR_CAP`), plumbed
+through `runtimeHost(host, opts)`'s own `opts.maxDpr` -> its internal
+`tryWebgl2()` helper. The garden (`organs/garden/index.js`) is the one mount
+that overrides it: `GARDEN_MAX_DPR = 1` (CSS-pixel density, no DPR multiplier
+at all) — an 88-step, 4-distance-field-per-step raymarch at native DPR on a
+HiDPI/4K display is exactly the "quite shite fps" complaint that motivated
+this whole track: `1.5` still means 2.25x the pixel count of `1`.
+
+`runtimeHost()` also grew an `opts.onPerf` callback, fired from the same
+~1 Hz `onPerf` tap `wirePerf`'s fps badge already uses. It carries an EMA
+(`emaMs = emaMs*0.8 + perf.ms*0.2`) alongside the raw `{fps, ms}` and the
+ladder's current `renderScale` — a smoother number than the raw per-second
+average, for a compact always-on readout (`badge-perf`, e.g. `12.4 ms ·
+0.75x`) next to the garden's existing fps badge. Same honesty rule as
+PERF-0's badge: it always reflects whatever is actually rendering.
+
+### Garden quality selector (PERF-2)
+
+The garden topbar gained a quality `<select>` (Auto/Low/Medium/High,
+persisted to `localStorage['sg.garden.quality']`). **Auto** is exactly
+PERF-0's pre-existing adaptive ladder — unset, it behaves byte-identically to
+every garden render before this feature shipped. **Low/Medium/High** each
+pin two things at once: a fixed `renderScale` (`0.5`/`0.75`/`1` — calling
+`setRenderScale()` disables the ladder for that mount per its own contract,
+so switching back to Auto goes through `rh.rebuild()` instead of trying to
+resurrect ladder state runtime-host already tore down) and a shader-side
+`SG_QUALITY` uniform (`0`/`1`/`2`) applied via the runtime's existing custom-
+uniform channel — no new plumbing, no recompile. `scene.glsl`'s `SG_QUALITY`
+scales `sg_march`'s step count (88/66/44) and `sg_cloud_fbm`'s octave count
+(3/2/1) via an early `break` inside each function's still-fixed-bound loop —
+High hits the exact same loop bounds every pre-PERF-2 render used, so nothing
+changes when the uniform goes unused. The garden organ sets this uniform
+explicitly on every build (including a context-loss rebuild, where a fresh
+`GL2Runtime` starts with no custom uniforms at all), so "never set" never
+actually reaches a live frame.
+
+### Terrain-ceiling march skip + garden perf harness (PERF-2)
+
+Independent of the quality selector, `sg_march` gained an exact (not
+approximated) early-out: once a ray is strictly ascending (`rd.y > 0`) and
+already above the highest point the current `TERRAIN_SCALE` can ever
+produce, the terrain heightfield — a 5-octave noise call, the single most
+expensive thing in the march, evaluated unconditionally every step — is
+analytically unreachable for the rest of that ray, so it's skipped rather
+than computed and discarded. Verified pixel-identical (0/921600 bytes
+differing) against the pre-optimization scene at five fixed `iTime` samples.
+`tools/test/garden-perf.mjs` is the dedicated forced-sync harness for this
+scene (perf.mjs only covers baked `kernels.json` entries, and the garden
+isn't one) — same SwiftShader-headless ordinal caveat as perf.mjs applies;
+it measures each `SG_QUALITY` level, not the terrain skip in isolation.
+
+### onLost:'rebuild' circuit breaker (PERF-3)
+
+`runtimeHost()`'s automatic-rebuild policy (`onLost:'rebuild'`, the default —
+see § "Adaptive quality" above) had no bound: a freshly (re)built WebGL2
+context that itself loses immediately drove `onContextLost` straight back
+into another `build()` with nothing to stop it. Empirically reproducible
+against a cold `#/garden` boot on this project's own headless SwiftShader
+setup — a completely isolated `#/garden`-only page load reproduces
+`WebGL: CONTEXT_LOST_WEBGL` on essentially every fresh context, no
+cross-organ interference required. On a machine busy enough that WebGL2
+context setup itself gets slow, "lose, rebuild, lose again" could compound
+into an effectively unbounded stall with no exception, no rejection, and
+nothing left to observe it — confirmed directly: with the breaker removed,
+a deterministic repro (force `WEBGL_lose_context` on every canvas the
+instant it's created) drove over 2,300 rebuild attempts in 8 seconds with
+no sign of stopping.
+
+`MAX_LOSS_REBUILDS` (5) caps consecutive losses inside a `LOSS_WINDOW_MS`
+(5000) sliding window; tripping it disposes the runtime and settles into a
+stable failed state (`backend: null`, `ok: false`, an explanatory `log`)
+instead of retrying forever. The window resets on its own once real time
+passes without another loss, so sparse genuine driver hiccups over a long
+session never approach the cap — only a rapid burst does. `onLost:'release'`
+and a caller-supplied `onLost` function are unaffected (each already runs
+exactly once per loss); only the plain-string `'rebuild'` policy retries
+automatically, so only it needed bounding.
+`tools/test/runtime-host-loss.mjs` is the regression test — same
+`WEBGL_lose_context` technique, asserting the breaker trips within a bounded
+number of attempts rather than coercing real driver flakiness.
 
 ### Transport controls (ED-3)
 

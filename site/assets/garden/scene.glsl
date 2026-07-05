@@ -24,6 +24,16 @@ uniform float uProbeSel; // 0 = nothing selected, otherwise a COMP_* id — the 
 // this branch (that's the probe panel's job), so it defaults to 0 and every pixel
 // below is byte-identical to before whenever nothing is selected.
 
+// PERF-2: 0 = Low, 1 = Medium, 2 = High. Scales sg_march's step count and
+// sg_cloud_fbm's octave count (see both below) — the garden organ
+// (js/organs/garden/index.js's applyQualityUniform()) sets this explicitly
+// on every build, including a fresh context-loss rebuild, so "never set"
+// never actually reaches a live frame. High (2) hits the exact same fixed
+// loop bounds (88 steps, 3 octaves) every render used before this uniform
+// existed — Low/Medium only add an early exit, they don't change either
+// loop's own iteration math.
+uniform float SG_QUALITY;
+
 const float COMP_SKY       = 1.0;
 const float COMP_TERRAIN   = 2.0;
 const float COMP_CHARACTER = 3.0;
@@ -284,8 +294,12 @@ vec3 sg_grass_shade(vec2 xz, inout vec3 N, vec3 baseCol, float mask) {
 uniform float CLOUD_COVERAGE;
 
 float sg_cloud_fbm(vec2 p) {
+  // PERF-2: fixed 3-octave loop bound unchanged (High == pre-SG_QUALITY
+  // behavior); Low/Medium just exit after fewer octaves.
+  int octaves = SG_QUALITY < 0.5 ? 1 : (SG_QUALITY < 1.5 ? 2 : 3);
   float v = 0.0, a = 0.5;
   for (int i = 0; i < 3; i++) {
+    if (i >= octaves) break;
     v += a * sg_noise2(p);
     p = p * 2.03 + vec2(11.0, 7.0);
     a *= 0.5;
@@ -357,11 +371,30 @@ const float SG_FOG_DIST = 6.0; // aerial-perspective falloff scale, tuned to the
 struct SGHit { float t; float id; };
 
 SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCenter) {
+  // PERF-2: fixed 88-step loop bound unchanged (High == pre-SG_QUALITY
+  // behavior); Low/Medium exit after fewer steps, same fallback path a ray
+  // that legitimately exhausts 88 steps already takes below.
+  int maxSteps = SG_QUALITY < 0.5 ? 44 : (SG_QUALITY < 1.5 ? 66 : 88);
+  // PERF-2, exact (not an approximation): the heightfield's per-step noise
+  // (sg_terrain_height, 5 octaves) is the single most expensive call in this
+  // march, and it runs unconditionally every step even for sky rays. Once a
+  // ray is strictly ascending (rd.y > 0) and already above the highest point
+  // this frame's TERRAIN_SCALE can ever produce, terrain is analytically
+  // unreachable for the rest of the march — dTerrain would only ever grow
+  // from here, so skipping straight to a sentinel is not a visual
+  // approximation, it's the same "terrain isn't the nearest surface"
+  // conclusion the real computation would reach, without paying for it.
+  // CONTRACT: this bound assumes sg_biome_hills() stays within [0,1] (the
+  // pristine body and both shipped terrain variants clamp to that). An
+  // edited terrain body exceeding 1.0 will see ascending rays skip terrain
+  // that is actually reachable — clamp your biome function, not this ceil.
+  float terrainCeil = SG_TERRAIN_HEIGHT_RNG * max(TERRAIN_SCALE, 0.05) + 0.02;
   float t = 0.05;
   float hitKind = COMP_TERRAIN; // which candidate was closest last — decides the fallback below
   for (int i = 0; i < 88; i++) {
+    if (i >= maxSteps) break;
     vec3 p = ro + rd * t;
-    float dTerrain = p.y - sg_terrain_height(p.xz);
+    float dTerrain = (rd.y > 0.0 && p.y > terrainCeil) ? 1.0e4 : (p.y - sg_terrain_height(p.xz));
     float dChar = sg_character_sdf(p, charCenter);
     float dPond = sg_pond_sdf(p, pondWaterY);
     float dRock = sg_rocks_sdf(p, rockCenter);

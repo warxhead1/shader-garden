@@ -35,7 +35,12 @@ export async function mountComponentEditor({ component, initialBody, originalBod
   const statusPill = el('span', 'pill', 'unchanged');
   const revertBtn = el('button', 'btn btn-small btn-ghost', 'Revert');
   revertBtn.type = 'button';
-  statusRow.append(statusPill, revertBtn);
+  // GARDEN-1: live recompile always goes through webgl2.js's synchronous
+  // setShader (see index.js's onEditHere, which rebuilds a WebGPU-backed
+  // mount onto WebGL2 before this module ever mounts) — true regardless of
+  // which backend was rendering a moment ago, so this is unconditional.
+  const backendNote = el('span', 'muted component-editor-note', 'editing runs on WebGL2');
+  statusRow.append(statusPill, backendNote, revertBtn);
 
   const { adapter, kind } = await createDocAdapter(initialBody, (body) => scheduleRecompile(body));
   await adapter.setLanguage(glslMode); // no-op on the textarea fallback

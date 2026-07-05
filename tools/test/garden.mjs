@@ -34,6 +34,19 @@
 //   (f) "Open in editor" exports the CURRENT (edited) full scene.
 //   (g) probing cursor affordance, read-only syntax tinting, panel
 //       enter-transition settles.
+//   (h) the component tray lists all 8 components; clicking one opens its
+//       probe panel — no pixel-hunting the canvas required.
+//   (i) a connections link (connections.js's graph, rendered in-panel and
+//       in the tray) navigates to the referenced component, scrolled to and
+//       flashing the relevant source line.
+//   (j) the terrain stage selector swaps variant bodies through the same
+//       splice/recompile path edits use; heavy variants are marked; pristine
+//       reselect restores the original exactly.
+//   (k) the tray's explicit Measure action fills per-component cost chips,
+//       honest "—" for the un-stubbable foundations (sky, terrain).
+//   (l) the REAL CodeMirror path (not the forced textarea fallback every
+//       other check in this file uses) can open a component's inline editor
+//       and recompile a change, when the vendor chunk is actually built.
 // Prints "all-PASS" and exits 0 only if every check passed.
 import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
 
@@ -151,6 +164,20 @@ async function armSpies(page) {
       };
     }).catch(() => {});
   });
+}
+
+// GARDEN-IDE work item 1: clicks a tray item by its visible component name —
+// the whole point of the tray is not needing a canvas pixel oracle, so the
+// new tray/connections/variant/measure tests below navigate this way instead
+// of smoke.mjs's own screen-point probe() helper.
+async function clickTrayItem(page, name) {
+  await page.waitForSelector('.garden-tray-item', { timeout: 8000 });
+  const items = await page.$$('.garden-tray-item');
+  for (const item of items) {
+    const text = await item.$eval('.garden-tray-item-name', (el) => el.childNodes[0].textContent.trim());
+    if (text === name) { await item.click(); return true; }
+  }
+  return false;
 }
 
 async function openCharacterEditor(page, errors) {
@@ -374,6 +401,164 @@ async function openCharacterEditor(page, errors) {
   check('(g) the panel finished its enter transition (opacity settles to 1)', panelOpacity === 1, 'opacity=' + panelOpacity);
 
   check('(g) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (h)+(i) tray navigation + connections graph navigation ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+
+  const trayCount = await page.$$eval('.garden-tray-item', (n) => n.length);
+  check('(h) the tray lists all 8 components', trayCount === 8, 'count=' + trayCount);
+
+  check('(h) clicking a tray item opens its probe panel — no canvas pixel-hunting',
+    await clickTrayItem(page, 'Weathered Rocks'));
+  await sleep(300);
+  const rocksTitle = await page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
+  check('(h) the opened panel is the clicked component', rocksTitle === 'Weathered Rocks', 'got ' + rocksTitle);
+
+  // Real-scene ground truth (see tools/test/garden-connections.mjs): rocks
+  // calls sg_terrain_height, so its panel's "Uses" list names the terrain
+  // component by its display name, not its parse.js id.
+  const usesLink = await page.$$eval('.probe-conn-link', (nodes) => nodes.find((n) => n.textContent === 'Rolling Hills (evolved)')?.textContent || null);
+  check('(i) the in-panel connections block names the real used component', usesLink === 'Rolling Hills (evolved)');
+
+  await page.evaluate(() => {
+    const link = [...document.querySelectorAll('.probe-conn-link')].find((n) => n.textContent === 'Rolling Hills (evolved)');
+    link?.click();
+  });
+  await sleep(300);
+  const terrainTitle = await page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
+  check('(i) clicking a connection navigates to the referenced component', terrainTitle === 'Rolling Hills (evolved)', 'got ' + terrainTitle);
+  const hitLines = await page.$$eval('.probe-source .gline-hit', (n) => n.length);
+  check('(i) the target source is scrolled to and flashes the relevant line', hitLines > 0, 'hitLines=' + hitLines);
+
+  check('(h)+(i) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (l) the REAL CodeMirror path (not the forced textarea fallback the rest of this file uses) ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+  await clickTrayItem(page, 'Bouncing Figure');
+  await sleep(300);
+  await page.click('.probe-panel .btn:not(.probe-edit-link)'); // "Edit here"
+  await page.waitForSelector('.component-editor .cm-editor, .component-editor .code-editor', { timeout: 8000 });
+  await sleep(400);
+
+  const kind = await page.evaluate(() => (document.querySelector('.component-editor .cm-editor') ? 'cm' : 'textarea'));
+  console.log(`(l) editor kind on this run: ${kind}`);
+
+  if (kind === 'cm') {
+    await page.click('.component-editor .cm-content'); // the container swallows keystrokes — this is the real interactive surface
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyA');
+    await page.keyboard.up('Control');
+    await page.keyboard.press('Backspace');
+    const meta = await characterComponent(page);
+    await page.keyboard.type(meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.66'), { delay: 2 });
+    await sleep(900);
+
+    const statusPill = await page.$eval('.component-editor-status .pill', (el) => el.textContent).catch(() => null);
+    check('(l) a real CodeMirror edit debounce-recompiles and reports ok', statusPill === 'ok', 'pill=' + statusPill);
+    const scene = await getCurrentFullScene(page);
+    check('(l) the CodeMirror-path edit actually landed in the exported scene', scene.includes('0.66'));
+  } else {
+    console.log('(l) SKIP: site/js/vendor/cm-editor.bundle.js not built in this checkout — textarea fallback only');
+  }
+  check('(l) no console errors on the real CodeMirror path', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (j) terrain stage/variant selector ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+
+  await clickTrayItem(page, 'Rolling Hills (evolved)');
+  await page.waitForSelector('.probe-stage-btn', { timeout: 8000 }).catch(() => {});
+  const stageBtns = await page.$$eval('.probe-stage-btn', (n) => n.map((b) => ({ text: b.textContent, variant: b.dataset.variant, active: b.classList.contains('probe-stage-active') })));
+  check('(j) the terrain panel shows all three stages', stageBtns.length === 3, JSON.stringify(stageBtns.map((b) => b.variant)));
+  check('(j) the pristine stage is active on a fresh open', stageBtns.find((b) => b.variant === 'rolling-hills')?.active === true);
+  check('(j) the heavy variant is marked and applies only on explicit click',
+    stageBtns.find((b) => b.variant === 'mountain-peaks')?.text.startsWith('\u26a1') === true,
+    JSON.stringify(stageBtns.map((b) => b.text)));
+
+  // River Valley: the cheap non-pristine stage. Applying it must go through
+  // the SAME splice/recompile/export path a hand edit uses -- proven via the
+  // real production round-trip (the refreshed "Open in editor" href).
+  await page.click('.probe-stage-btn[data-variant="river-valley"]');
+  await sleep(800); // fetch + recompile + href refresh
+  const riverScene = await getCurrentFullScene(page);
+  const RIVER_TOKEN = 'vec2(3.7 * float(i + 1)'; // river-valley.glsl's staggered octave offset -- absent from the pristine body
+  check('(j) selecting River Valley splices its body into the exported scene', riverScene.includes(RIVER_TOKEN));
+  const riverActive = await page.$eval('.probe-stage-btn[data-variant="river-valley"]', (b) => b.classList.contains('probe-stage-active'));
+  check('(j) the applied stage becomes the active one', riverActive === true);
+  const paneShowsRiver = await page.$eval('.probe-source', (el) => el.textContent.includes('vec2(3.7 * float(i + 1)'));
+  check('(j) the read-only source pane re-renders to the variant body', paneShowsRiver === true);
+
+  // Back to pristine: the editedBodies entry must clear, so the export is
+  // byte-identical to never having touched the stage row.
+  await page.click('.probe-stage-btn[data-variant="rolling-hills"]');
+  await sleep(800);
+  const pristineScene = await getCurrentFullScene(page);
+  check('(j) reselecting the pristine stage restores the original exactly', !pristineScene.includes(RIVER_TOKEN));
+
+  const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
+  check('(j) canvas is still rendering after two stage swaps (fps badge live)', (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
+  check('(j) no console errors across stage swaps', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (k) explicit per-component cost measurement ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-tray-measure', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+
+  const chipsBefore = await page.$$eval('.garden-tray-chip', (n) => n.map((c) => c.textContent));
+  check('(k) chips are empty before Measure is ever clicked (never automatic)', chipsBefore.every((t) => t === ''), JSON.stringify(chipsBefore));
+
+  await page.click('.garden-tray-measure');
+  // SwiftShader compiles the 6 stubbed scenes serially -- poll the button's
+  // busy label instead of guessing a sleep.
+  let done = false;
+  for (let i = 0; i < 120 && !done; i++) {
+    await sleep(500);
+    done = await page.$eval('.garden-tray-measure', (b) => b.textContent === 'Measure' && !b.disabled);
+  }
+  check('(k) the Measure pass completes and re-enables the button', done);
+
+  const chips = await page.$$eval('.garden-tray-item', (items) => items.map((it) => ({
+    name: it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim(),
+    chip: it.querySelector('.garden-tray-chip').textContent,
+  })));
+  check('(k) every component got a chip', chips.length === 8 && chips.every((c) => c.chip !== ''), JSON.stringify(chips));
+  const skyChip = chips.find((c) => c.name.toLowerCase().includes('sky'))?.chip;
+  const terrainChip = chips.find((c) => c.name === 'Rolling Hills (evolved)')?.chip;
+  check('(k) sky and terrain report an honest dash, not a fake number', skyChip === '\u2014' && terrainChip === '\u2014', 'sky=' + skyChip + ' terrain=' + terrainChip);
+  check('(k) at least one stubbable component reports a real ms figure', chips.some((c) => /^\d+(\.\d+)?ms$/.test(c.chip)), JSON.stringify(chips.map((c) => c.chip)));
+
+  const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
+  check('(k) the scene renders on after measurement (exact restore)', (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
+  check('(k) no console errors during measurement', errors.length === 0, errors.join(' | '));
   await page.close();
 }
 

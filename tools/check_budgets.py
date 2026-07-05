@@ -154,7 +154,11 @@ AGGREGATES = [
     # resolution, same shape as the WGSL manifest fetch already there).
     # Combined at merge: actual 681 LOC / 26809 bytes; caps raised to
     # 700 LOC / 27648 bytes for headroom. Raised deliberately, this merge.
-    ("site/js/core/*.js", 700, 27648),
+    # Wave-2 merge: PERF-2 (EMA/onPerf/maxDpr) + GARDEN-1 (rebuild
+    # overrides) land in runtime-host.js together — each fit the old caps
+    # alone, the union doesn't. Actual 699 LOC / 27924 bytes; raised to
+    # 730 / 29184 for headroom. Raised deliberately, this merge.
+    ("site/js/core/*.js", 730, 29184),
     # 31744 -> 35840 bytes: ADM-C (V2_BLUEPRINT.md item 13) adds the GLSL
     # sacrificial worker path (sac-worker.js) and the full report.js UI
     # (badge hover legend, findings, preview, timing strip, copy button) —
@@ -186,7 +190,10 @@ AGGREGATES = [
     # together, not bloat on the existing single-probe path (that path's own
     # tests in garden.mjs stay green — see the commit this shipped with).
     # Actual at merge: 1099/1150. Raised deliberately, this commit.
-    ("site/js/organs/garden/*.js", 1150, None),
+    # Wave-2 merge: the IDE spine (above), PERF-2's quality selector/HUD,
+    # and GARDEN-1's dual-source mount + async probe land in this organ
+    # together — each fit alone, the union doesn't. Actual 1253/1300.
+    ("site/js/organs/garden/*.js", 1300, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

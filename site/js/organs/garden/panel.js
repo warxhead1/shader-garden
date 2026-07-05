@@ -37,6 +37,10 @@ const EXIT_MS = 260;
  *     // most components have none, so the row is opt-in, never a placeholder).
  *     // onSelect(variant) resolves to the applied body text, or null if the
  *     // variant failed to load/compile (the row then stays as it was).
+ *   setOrigin: (attribution: {kind, sourceKernel?, note?, firstCommit?}) => void,
+ *     // wave-4 §3 — renders the Origin block once attribution.js's fetch
+ *     // resolves (index.js calls this the same way it calls setStages).
+ *     // A no-op past the first real call or a null attribution.
  *   destroy: (opts?: { animate?: boolean }) => void,
  * }}
  */
@@ -53,6 +57,14 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
 
   const panelBody = el('div', 'probe-body');
   panelBody.append(el('p', 'probe-blurb', component.blurb));
+
+  // Wave-4 §3 (attribution): a stable anchor so the async-resolved Origin
+  // block (setOrigin, below) always lands between the blurb and the
+  // connections block, regardless of which of the two async fetches
+  // (attribution.js vs. the connections block above, which is synchronous
+  // anyway) settles first.
+  const originAnchor = document.createComment('probe-origin-anchor');
+  panelBody.append(originAnchor);
 
   // GARDEN-IDE work item 2: this component's own edge of the connections
   // graph (connections.js, computed once in index.js) — same data the tray
@@ -151,6 +163,32 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
     panelBody.insertBefore(stagesRow, source);
   }
 
+  // Wave-4 §3: the Origin block — kind ("Evolved" or "Hand-authored") plus,
+  // for an evolved component, a deep-link into #/s/<sourceKernel> (the
+  // EXISTING provenance organ already renders that kernel's real fitness/
+  // lineage there — this panel never duplicates that data, only points at
+  // it). Never throws while attribution.js's fetch is in flight: index.js
+  // only calls this once the promise resolves, and a component with no
+  // attribution.json entry at all just never gets a block.
+  let originSection = null;
+  function setOrigin(attribution) {
+    if (!attribution || originSection) return;
+    originSection = el('div', 'probe-origin');
+    if (attribution.kind === 'evolved') {
+      originSection.append(el('span', 'probe-origin-badge probe-origin-evolved', 'Evolved'));
+      const link = el('a', 'probe-origin-link', attribution.sourceKernel);
+      link.href = '#/s/' + attribution.sourceKernel;
+      originSection.append(document.createTextNode(' from '), link);
+    } else {
+      originSection.append(el('span', 'probe-origin-badge probe-origin-handmade', 'Hand-authored'));
+      if (attribution.firstCommit) {
+        originSection.append(document.createTextNode(' · added ' + attribution.firstCommit.date.slice(0, 10)));
+      }
+    }
+    if (attribution.note) originSection.append(el('p', 'probe-origin-note', attribution.note));
+    originAnchor.after(originSection);
+  }
+
   if (component.tunes.length) {
     const tuneList = el('div', 'probe-tunes');
     for (const tune of component.tunes) {
@@ -209,6 +247,7 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
   return {
     el: panel,
     setStages,
+    setOrigin,
     // animate:false is index.js's fast-swap path (probing a different
     // component, or organ cleanup) — no exit animation to overlap with the
     // next panel's own enter transition.

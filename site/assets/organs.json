@@ -51,6 +51,16 @@
       "payload": "panel"
     },
     {
+      "id": "attribution",
+      "title": "Attribution & provenance",
+      "entry": "js/organs/attribution/index.js",
+      "routes": ["/attribution"],
+      "emits": [],
+      "consumes": [],
+      "caps": [],
+      "payload": "surface"
+    },
+    {
       "id": "anatomy",
       "title": "Anatomy",
       "entry": "js/organs/anatomy/index.js",

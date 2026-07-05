@@ -154,6 +154,18 @@ FILES = [
     # baked by tools/bake_compositions.py from tools/fixtures/
     # composition_ready/ — same "typical" 2 KiB cap as the COMP-1 demo.
     ("site/assets/compositions/phase-into-mountain-peaks.json", None, 2048),
+    # Wave-4 §3 (attribution): hand-curated {kind, sourceKernel, note} per
+    # garden component/variant — small structured data, same order as
+    # organs.json's own 4 KiB row. Actual 747B.
+    ("site/assets/garden/attribution.json", None, 4096),
+    # Wave-4 §3: baked by tools/bake_garden_attribution.py — one {sha, date}
+    # per component, never hand-edited. Actual 912B.
+    ("site/assets/garden/attribution-commits.json", None, 8192),
+    # Wave-4 §3: the /attribution organ — own cap, kept OUT of the garden
+    # aggregate below since it's a standalone route, not garden-mount code
+    # (see §0.5's headroom problem for why new surfaces get their own row
+    # rather than piling into a tight aggregate). Actual 176/200.
+    ("site/js/organs/attribution/index.js", 200, None),
 ]
 
 AGGREGATES = [
@@ -237,7 +249,14 @@ AGGREGATES = [
     # mount/cleanup wiring. Each slice was budgeted honestly from its own
     # worktree (A+B: 1611, D-alone: 1612 over the same 1521 base); this row
     # is the merged union. Actual 1702/1740. Raised deliberately, this merge.
-    ("site/js/organs/garden/*.js", 1740, None),
+    # 1740 -> 1860: wave-4 §3 (attribution) merged on top — the new
+    # attribution.js (fetch+cache, ~70 LOC), panel.js's Origin block
+    # (setOrigin + anchor, ~40 LOC), and index.js's wiring (attribution.js
+    # import, the topbar link, the per-probe fetch+render call, ~15 LOC);
+    # 1643/1650 from its own worktree over the same 1521 base. This row is
+    # now all three wave-4 slices' union. Actual 1824/1860. Raised
+    # deliberately, this merge.
+    ("site/js/organs/garden/*.js", 1860, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

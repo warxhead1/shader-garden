@@ -17,6 +17,8 @@
     "anatomy": "node anatomy.mjs",
     "garden-uniform-inspector": "node garden-uniform-inspector.mjs",
     "dgc-graph": "node dgc-graph.mjs",
+    "garden-attribution": "node garden-attribution.mjs",
+    "attribution-page": "node attribution-page.mjs",
     "layout": "node layout.mjs",
     "lineage": "node lineage.mjs",
     "loader": "node loader.mjs",

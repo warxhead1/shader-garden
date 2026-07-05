@@ -1,0 +1,22 @@
+{
+  "components": {
+    "terrain": {
+      "kind": "evolved",
+      "sourceKernel": "biome-rolling-hills",
+      "note": "Octave persistence (a constant 0.53 in the source kernel) became the TERRAIN_ROUGHNESS slider for the garden."
+    },
+    "sky":       { "kind": "handmade" },
+    "character": { "kind": "handmade" },
+    "shadow":    { "kind": "handmade" },
+    "pond":      { "kind": "handmade" },
+    "grass":     { "kind": "handmade" },
+    "clouds":    { "kind": "handmade" },
+    "rocks":     { "kind": "handmade" }
+  },
+  "variants": {
+    "terrain": {
+      "river-valley":   { "kind": "evolved", "sourceKernel": "biome-river-valley" },
+      "mountain-peaks": { "kind": "evolved", "sourceKernel": "biome-mountain-peaks" }
+    }
+  }
+}

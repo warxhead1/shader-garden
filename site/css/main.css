@@ -1002,6 +1002,39 @@ a:hover { text-decoration: underline; }
 .probe-stages-busy .probe-stage-btn { opacity: 0.55; cursor: progress; }
 .probe-stages-locked .probe-stage-btn { opacity: 0.4; cursor: not-allowed; }
 
+/* Wave-4 §3 (attribution): the probe panel's Origin block (panel.js
+   setOrigin) — reused verbatim by the /attribution page's own component
+   list (organs/attribution/index.js) so the two never drift visually. */
+.probe-origin { margin: 0 0 0.9rem; font-size: 0.82rem; }
+.probe-origin-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  margin-right: 0.35rem;
+}
+.probe-origin-evolved { color: var(--ok); background: rgba(52, 211, 153, 0.12); }
+.probe-origin-handmade { color: var(--muted); background: rgba(139, 147, 165, 0.12); }
+.probe-origin-link { font-weight: 600; }
+.probe-origin-note { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.78rem; }
+
+/* ================= attribution page (wave-4 §3) ================= */
+.attrib-page { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+.attrib-page h1 { margin: 1rem 0 0.5rem; }
+.attrib-intro { color: var(--muted); }
+.attrib-section { margin-top: 2.2rem; }
+.attrib-section h2 { margin: 0 0 0.4rem; }
+.attrib-section h3 { margin: 1.2rem 0 0.5rem; font-size: 0.95rem; color: var(--muted); }
+.attrib-group { margin-top: 1rem; }
+.attrib-kernel-list, .attrib-component-list, .attrib-variant-list { list-style: none; margin: 0; padding: 0; }
+.attrib-kernel-list li { padding: 0.25rem 0; }
+.attrib-component, .attrib-variant { padding: 0.6rem 0; border-bottom: 1px solid var(--border); }
+.attrib-component-name { font-weight: 700; margin-right: 0.5rem; }
+.attrib-component-note { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.85rem; }
+
 /* ================= toast ================= */
 
 .toast {

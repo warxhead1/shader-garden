@@ -52,6 +52,17 @@ uniform float uCharGaitDist;  // world-space distance accumulated ONLY while mov
                                // freezes for free the instant moveFrame() idle-exits
 uniform float uCharSpeed01;   // 0..1, current move-vector magnitude
 
+// Wave-4 §B: camera mode (0=Orbit, 1=Follow, 2=Overview) — see sg_cam_orbit/
+// sg_cam_follow/sg_cam_overview near mainImage below. uCamBlend ramps 0..1
+// JS-side over a fixed duration on every mode switch, cross-fading between
+// whatever uPrevCamMode's camera would be THIS instant and the new mode —
+// see mainImage's camA/camB blend. Default boot state (0/0, blend either
+// value) always resolves to Orbit on both sides of the blend, so this can
+// never perturb the pre-wave-4 render.
+uniform float uCamMode;
+uniform float uPrevCamMode;
+uniform float uCamBlend;
+
 const float COMP_SKY       = 1.0;
 const float COMP_TERRAIN   = 2.0;
 const float COMP_CHARACTER = 3.0;
@@ -521,6 +532,45 @@ SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCen
   return SGHit((t0 + t1) * 0.5, COMP_TERRAIN);
 }
 
+// Wave-4 §B: three camera modes, each computing its own (target, ro) pair —
+// mainImage picks the active pair via uCamMode and cross-blends toward it
+// using uCamBlend (see mainImage below). Computed entirely in-shader: no
+// per-mode JS math beyond picking the mode and driving the transition
+// blend, so movement/camera both stay uniform-only on the hot path.
+struct SGCam { vec3 target; vec3 ro; };
+
+// Orbit: today's exact camera, extracted verbatim — byte-identical output,
+// just relocated into its own function so Follow/Overview share the same
+// calling convention.
+SGCam sg_cam_orbit(vec3 charCenter, float dragYaw, float dragPitch) {
+  float yaw = iTime * 0.07 + dragYaw;
+  float pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
+  vec3 target = mix(vec3(0.0, sg_terrain_height(vec2(uCharPosX, uCharPosZ)), 0.0), charCenter, 0.6);
+  float radius = 3.6;
+  vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(target, ro);
+}
+
+// Follow: third-person, framed behind the character along ITS OWN facing
+// (uCharYaw, wave-4 §A) — not an independent auto-drift. dragYaw/dragPitch
+// still let the visitor look around without losing the follow framing.
+SGCam sg_cam_follow(vec3 charCenter, float dragYaw, float dragPitch) {
+  float yaw = uCharYaw + 3.14159265 + dragYaw; // "behind" = opposite the character's facing
+  float pitch = clamp(0.30 + dragPitch, 0.08, 0.9);
+  vec3 target = charCenter + vec3(0.0, 0.15, 0.0); // aim slightly above center (chest/head), not feet
+  float radius = 2.0; // tighter than orbit's 3.6 — reads as "with" the character, not surveying
+  vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(target, ro);
+}
+
+// Overview: high, architectural, looking down at the whole diorama's
+// centroid (not the character specifically) — for probing/connections.
+SGCam sg_cam_overview(vec3 charCenter) {
+  vec3 target = vec3(1.2, 0.3, 0.7); // diorama's rough centroid (between pond/rocks/character range)
+  vec3 ro = target + vec3(0.0, 4.2, 0.001); // near-top-down; tiny z avoids a degenerate up-vector
+  return SGCam(target, ro);
+}
+
 vec3 sg_light(vec3 pos, vec3 rd, vec3 N, vec3 matCol, float t) {
   vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));
   vec3 sky_col = vec3(0.45, 0.62, 0.90);
@@ -543,25 +593,53 @@ vec3 sg_light(vec3 pos, vec3 rd, vec3 N, vec3 matCol, float t) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
 
-  // Orbit camera: slow auto-drift plus a drag offset read straight off
-  // iMouse — the drag offset persists after release (iMouse.xy keeps the
-  // last drag position even once z/w go negative), so letting go of the
-  // mouse leaves the view where you put it.
+  // Drag offset read straight off iMouse, shared by every camera mode — the
+  // drag offset persists after release (iMouse.xy keeps the last drag
+  // position even once z/w go negative), so letting go of the mouse leaves
+  // the view where you put it.
   float dragYaw = 0.0, dragPitch = 0.0;
   if (iMouse.z != 0.0) {
     float pressX = abs(iMouse.z), pressY = abs(iMouse.w);
     dragYaw   = -(iMouse.x - pressX) * 0.006;
     dragPitch =  (iMouse.y - pressY) * 0.006;
   }
-  float yaw = iTime * 0.07 + dragYaw;
-  float pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
 
   vec3 charCenter = sg_character_center(iTime);
   float pondWaterY = sg_pond_water_y(SG_POND_XZ);
   vec3 rockCenter = sg_rocks_center();
-  vec3 target = mix(vec3(0.0, sg_terrain_height(vec2(uCharPosX, uCharPosZ)), 0.0), charCenter, 0.6);
-  float radius = 3.6;
-  vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+
+  // Wave-4 §B: uCamMode picks the active camera; uCamBlend cross-fades FROM
+  // whatever uPrevCamMode's camera would be AT THIS INSTANT to the new mode
+  // — both computed fresh every frame (cheap: each is ~5 flops, not a
+  // march), so no stored "previous camera" state is needed beyond the
+  // uPrevCamMode uniform itself.
+  vec3 target, ro;
+  if (uCamMode < 0.5 && uPrevCamMode < 0.5) {
+    // Byte-identical fast path for the default/settled-Orbit state: the
+    // EXACT pre-wave-4 expression, untouched — verified empirically
+    // (garden-locomotion-parity.mjs test (1)) that routing this case
+    // through sg_cam_orbit()+mix() instead, while mathematically the same,
+    // let the compiler re-associate a handful of pixels by a single ULP.
+    // Literal code preservation sidesteps that risk entirely rather than
+    // trusting float re-association to be harmless.
+    float yaw = iTime * 0.07 + dragYaw;
+    float pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
+    target = mix(vec3(0.0, sg_terrain_height(vec2(uCharPosX, uCharPosZ)), 0.0), charCenter, 0.6);
+    float radius = 3.6;
+    ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  } else {
+    // if/else, not a ternary chain: ESSL 3.00 (WebGL2) disallows `?:` on structures.
+    SGCam camA;
+    if (uCamMode < 0.5) camA = sg_cam_orbit(charCenter, dragYaw, dragPitch);
+    else if (uCamMode < 1.5) camA = sg_cam_follow(charCenter, dragYaw, dragPitch);
+    else camA = sg_cam_overview(charCenter);
+    SGCam camB;
+    if (uPrevCamMode < 0.5) camB = sg_cam_orbit(charCenter, dragYaw, dragPitch);
+    else if (uPrevCamMode < 1.5) camB = sg_cam_follow(charCenter, dragYaw, dragPitch);
+    else camB = sg_cam_overview(charCenter);
+    target = mix(camB.target, camA.target, uCamBlend);
+    ro = mix(camB.ro, camA.ro, uCamBlend);
+  }
   vec3 fwd = normalize(target - ro);
   vec3 right = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));
   vec3 up = cross(right, fwd);

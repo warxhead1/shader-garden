@@ -26,7 +26,7 @@
 // borrows its noise from: terrain height ~0-2 units, camera orbit radius
 // ~3.6 units.
 
-// @sg-uniforms uProbe uProbeSel SG_QUALITY uCharPosX uCharPosZ uCharYaw uCharGaitDist uCharSpeed01 TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS
+// @sg-uniforms uProbe uProbeSel SG_QUALITY uCharPosX uCharPosZ uCharYaw uCharGaitDist uCharSpeed01 uCamMode uPrevCamMode uCamBlend TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS
 
 // uProbe(): 0 = normal shading, 1 = probe frame (encode compId, no lighting)
 // uProbeSel(): 0 = nothing selected, otherwise a COMP_* id — the matching
@@ -41,6 +41,9 @@
 // whenever idle (unset slot default), and every new motion term below is
 // mixed on it — see scene.glsl's own header for the byte-identity rationale
 // (identical here, WGSL bank slots default to 0 the same way).
+//
+// Wave-4 §B: uCamMode()/uPrevCamMode()/uCamBlend() — camera mode + cross-
+// fade, see sg_cam_orbit/sg_cam_follow/sg_cam_overview and mainImage below.
 
 const COMP_SKY: f32       = 1.0;
 const COMP_TERRAIN: f32   = 2.0;
@@ -495,6 +498,45 @@ fn sg_march(ro: vec3f, rd: vec3f, charCenter: vec3f, pondWaterY: f32, rockCenter
   return SGHit((t0 + t1) * 0.5, COMP_TERRAIN);
 }
 
+// Wave-4 §B: three camera modes, each computing its own (target, ro) pair —
+// mainImage picks the active pair via uCamMode() and cross-blends toward it
+// using uCamBlend() (see mainImage below). Computed entirely in-shader: no
+// per-mode JS math beyond picking the mode and driving the transition
+// blend, so movement/camera both stay uniform-only on the hot path.
+struct SGCam { target: vec3f, ro: vec3f }
+
+// Orbit: today's exact camera, extracted verbatim — byte-identical output,
+// just relocated into its own function so Follow/Overview share the same
+// calling convention.
+fn sg_cam_orbit(charCenter: vec3f, dragYaw: f32, dragPitch: f32) -> SGCam {
+  let yaw = U.time * 0.07 + dragYaw;
+  let pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
+  let target = mix(vec3f(0.0, sg_terrain_height(vec2f(uCharPosX(), uCharPosZ())), 0.0), charCenter, 0.6);
+  let radius = 3.6;
+  let ro = target + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(target, ro);
+}
+
+// Follow: third-person, framed behind the character along ITS OWN facing
+// (uCharYaw(), wave-4 §A) — not an independent auto-drift. dragYaw/dragPitch
+// still let the visitor look around without losing the follow framing.
+fn sg_cam_follow(charCenter: vec3f, dragYaw: f32, dragPitch: f32) -> SGCam {
+  let yaw = uCharYaw() + 3.14159265 + dragYaw; // "behind" = opposite the character's facing
+  let pitch = clamp(0.30 + dragPitch, 0.08, 0.9);
+  let target = charCenter + vec3f(0.0, 0.15, 0.0); // aim slightly above center (chest/head), not feet
+  let radius = 2.0; // tighter than orbit's 3.6 — reads as "with" the character, not surveying
+  let ro = target + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(target, ro);
+}
+
+// Overview: high, architectural, looking down at the whole diorama's
+// centroid (not the character specifically) — for probing/connections.
+fn sg_cam_overview(charCenter: vec3f) -> SGCam {
+  let target = vec3f(1.2, 0.3, 0.7); // diorama's rough centroid (between pond/rocks/character range)
+  let ro = target + vec3f(0.0, 4.2, 0.001); // near-top-down; tiny z avoids a degenerate up-vector
+  return SGCam(target, ro);
+}
+
 fn sg_light(pos: vec3f, rd: vec3f, N: vec3f, matCol: vec3f, t: f32) -> vec3f {
   let sun_dir = normalize(vec3f(0.55, 0.42, 0.35));
   let sky_col = vec3f(0.45, 0.62, 0.90);
@@ -517,10 +559,10 @@ fn sg_light(pos: vec3f, rd: vec3f, N: vec3f, matCol: vec3f, t: f32) -> vec3f {
 fn mainImage(fragCoord: vec2f) -> vec4f {
   let uv = (fragCoord - 0.5 * U.res.xy) / U.res.y;
 
-  // Orbit camera: slow auto-drift plus a drag offset read straight off
-  // U.mouse — the drag offset persists after release (U.mouse.xy keeps the
-  // last drag position even once z/w go negative), so letting go of the
-  // mouse leaves the view where you put it.
+  // Drag offset read straight off U.mouse, shared by every camera mode —
+  // the drag offset persists after release (U.mouse.xy keeps the last drag
+  // position even once z/w go negative), so letting go of the mouse leaves
+  // the view where you put it.
   var dragYaw = 0.0;
   var dragPitch = 0.0;
   if (U.mouse.z != 0.0) {
@@ -529,15 +571,40 @@ fn mainImage(fragCoord: vec2f) -> vec4f {
     dragYaw   = -(U.mouse.x - pressX) * 0.006;
     dragPitch =  (U.mouse.y - pressY) * 0.006;
   }
-  let yaw = U.time * 0.07 + dragYaw;
-  let pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
 
   let charCenter = sg_character_center(U.time);
   let pondWaterY = sg_pond_water_y(SG_POND_XZ);
   let rockCenter = sg_rocks_center();
-  let camTarget = mix(vec3f(0.0, sg_terrain_height(vec2f(uCharPosX(), uCharPosZ())), 0.0), charCenter, 0.6);
-  let radius = 3.6;
-  let ro = camTarget + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+
+  // Wave-4 §B: uCamMode() picks the active camera; uCamBlend() cross-fades
+  // FROM whatever uPrevCamMode()'s camera would be AT THIS INSTANT to the
+  // new mode — both computed fresh every frame (cheap: each is ~5 flops,
+  // not a march).
+  var camTarget: vec3f;
+  var ro: vec3f;
+  if (uCamMode() < 0.5 && uPrevCamMode() < 0.5) {
+    // Byte-identical fast path for the default/settled-Orbit state — mirrors
+    // scene.glsl's own fast path verbatim (see its comment for why this
+    // isn't just "mathematically the same either way").
+    let yaw = U.time * 0.07 + dragYaw;
+    let pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
+    camTarget = mix(vec3f(0.0, sg_terrain_height(vec2f(uCharPosX(), uCharPosZ())), 0.0), charCenter, 0.6);
+    let radius = 3.6;
+    ro = camTarget + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  } else {
+    // No WGSL ternary exists, so this is an if/else chain assigning into a
+    // var, not select() — select() can't return a struct.
+    var camA: SGCam;
+    if (uCamMode() < 0.5) { camA = sg_cam_orbit(charCenter, dragYaw, dragPitch); }
+    else if (uCamMode() < 1.5) { camA = sg_cam_follow(charCenter, dragYaw, dragPitch); }
+    else { camA = sg_cam_overview(charCenter); }
+    var camB: SGCam;
+    if (uPrevCamMode() < 0.5) { camB = sg_cam_orbit(charCenter, dragYaw, dragPitch); }
+    else if (uPrevCamMode() < 1.5) { camB = sg_cam_follow(charCenter, dragYaw, dragPitch); }
+    else { camB = sg_cam_overview(charCenter); }
+    camTarget = mix(camB.target, camA.target, uCamBlend());
+    ro = mix(camB.ro, camA.ro, uCamBlend());
+  }
   let fwd = normalize(camTarget - ro);
   let right = normalize(cross(fwd, vec3f(0.0, 1.0, 0.0)));
   let up = cross(right, fwd);

@@ -90,6 +90,19 @@ function loadQualityMode() {
   return saved && (saved === 'auto' || QUALITY_PRESETS[saved]) ? saved : 'auto';
 }
 
+// Wave-4 §B: three camera modes (index = uCamMode's numeric value), a topbar
+// <select> + keyboard 1/2/3 (guarded by inEditableChrome, same as WASD) +
+// localStorage persistence — same shape as the quality preset above.
+const CAM_MODES = ['orbit', 'follow', 'overview'];
+const CAM_MODE_KEY = 'sg.garden.camMode';
+const CAM_KEYS = new Map([['1', 0], ['2', 1], ['3', 2]]);
+const CAM_BLEND_MS = 450; // fast enough to feel responsive, slow enough to read as a transition
+
+function loadCamMode() {
+  const idx = CAM_MODES.indexOf(localStorage.getItem(CAM_MODE_KEY));
+  return idx >= 0 ? idx : 0;
+}
+
 export async function mount(ctx) {
   const { root, bus } = ctx;
   root.replaceChildren();
@@ -110,9 +123,22 @@ export async function mount(ctx) {
   }
   let qualityMode = loadQualityMode();
   qualitySelect.value = qualityMode;
+  // Wave-4 §B: camera mode select — same topbar slot/pattern as qualitySelect.
+  // camBlend starts at 1 (fully resolved, no transition in flight) — boot
+  // state is a settled Orbit, not a mid-blend.
+  const camSelect = el('select', 'garden-cam-select');
+  for (const [i, name] of CAM_MODES.entries()) {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = name[0].toUpperCase() + name.slice(1);
+    camSelect.append(o);
+  }
+  let camMode = loadCamMode(), prevCamMode = camMode, camBlend = 1;
+  let camBlendStart = 0, camBlendRafId = null;
+  camSelect.value = String(camMode);
   const hint = el('span', 'garden-hint muted', 'drag to orbit · click anything to probe it');
   if (!localStorage.getItem(HINT_SEEN_KEY)) hint.classList.add('garden-hint-pulse');
-  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, qualitySelect, el('div', 'toolbar-spacer'), hint);
+  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, qualitySelect, camSelect, el('div', 'toolbar-spacer'), hint);
   root.append(stage, topbar);
 
   let sceneSrc;
@@ -212,6 +238,36 @@ export async function mount(ctx) {
     rh.runtime?.setUniforms({ SG_QUALITY: sgQuality });
   }
 
+  // Wave-4 §B: pushes the current camera-mode state into the shader — same
+  // "a fresh runtime starts with nothing set" reasoning as applyQualityUniform
+  // above, so a context-loss rebuild mid-transition resumes at the LAST
+  // known blend value (never resets to a jarring pure-orbit default).
+  function applyCamUniforms() {
+    rh.runtime?.setUniforms({ uCamMode: camMode, uPrevCamMode: prevCamMode, uCamBlend: camBlend });
+  }
+
+  // uCamBlend ramps 0->1 over CAM_BLEND_MS on every mode switch — the shader
+  // cross-fades FROM uPrevCamMode's camera TO uCamMode's (see scene.glsl's
+  // mainImage) so a mode switch is a blend, not a teleport.
+  function setCamMode(next) {
+    if (next === camMode) return;
+    prevCamMode = camMode;
+    camMode = next;
+    localStorage.setItem(CAM_MODE_KEY, CAM_MODES[camMode]);
+    camSelect.value = String(camMode);
+    camBlend = 0;
+    camBlendStart = performance.now();
+    applyCamUniforms();
+    if (camBlendRafId == null) camBlendRafId = requestAnimationFrame(tickCamBlend);
+  }
+  function tickCamBlend(t) {
+    camBlend = Math.min(1, (t - camBlendStart) / CAM_BLEND_MS);
+    rh.runtime?.setUniforms({ uCamBlend: camBlend });
+    camBlendRafId = camBlend < 1 ? requestAnimationFrame(tickCamBlend) : null;
+  }
+  function onCamChange(e) { setCamMode(Number(e.target.value)); }
+  camSelect.addEventListener('change', onCamChange);
+
   function onBuild() {
     if (!rh) return; // fires once synchronously during the initial build, before rh is assigned
     backendBadge.textContent = rh.backend === 'webgpu' ? 'WebGPU' : rh.backend === 'webgl2' ? 'WebGL2' : 'no GPU';
@@ -231,6 +287,7 @@ export async function mount(ctx) {
     // Both backends support setUniforms() (GARDEN-1).
     rh.runtime.setUniforms(tuneValues);
     applyQualityUniform();
+    applyCamUniforms();
   }
 
   // PERF-2: honest compact HUD next to the fps badge — the same ~1Hz tap
@@ -495,14 +552,20 @@ export async function mount(ctx) {
 
   function onKeyDown(e) {
     const k = e.key.toLowerCase();
-    if (!MOVE_KEYS.has(k)) return;
+    const isMoveKey = MOVE_KEYS.has(k);
+    const camIdx = CAM_KEYS.get(k); // wave-4 §B: 1/2/3 -> Orbit/Follow/Overview
+    if (!isMoveKey && camIdx === undefined) return;
     // Guards the tune sliders (plain <input type="range">) and the mini-
     // editor (CodeMirror's isContentEditable div) the same way boot.js's
     // Shift+A hotkey does — see dom.js's inEditableChrome header.
     if (inEditableChrome(document.activeElement)) return;
-    e.preventDefault(); // WASD/arrows must not scroll the page while steering the figure
-    heldKeys.add(k);
-    ensureMoveLoop();
+    if (isMoveKey) {
+      e.preventDefault(); // WASD/arrows must not scroll the page while steering the figure
+      heldKeys.add(k);
+      ensureMoveLoop();
+    } else {
+      setCamMode(camIdx); // digits don't scroll the page — no preventDefault needed
+    }
   }
   function onKeyUp(e) { heldKeys.delete(e.key.toLowerCase()); }
   window.addEventListener('keydown', onKeyDown);
@@ -582,6 +645,8 @@ export async function mount(ctx) {
     if (moveRafId != null) cancelAnimationFrame(moveRafId);
     joystick.destroy();
     qualitySelect.removeEventListener('change', onQualityChange);
+    camSelect.removeEventListener('change', onCamChange);
+    if (camBlendRafId != null) cancelAnimationFrame(camBlendRafId);
     closePanel({ animate: false });
     tray.destroy();
     rh.dispose();

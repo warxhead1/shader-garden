@@ -10,7 +10,11 @@
 
 const COMPONENT_RE = /^\/\/\s*@component\s+(\S+)\s+"([^"]*)"\s+"([^"]*)"\s*$/;
 const TUNE_RE = /^\/\/\s*@tune\s+(\S+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+"([^"]*)"\s*$/;
-const END_RE = /^\/\/\s*@end\s*$/;
+// Exported: the GARDEN-IDE inline editor (edit.js) reuses this exact grammar
+// to refuse a component-body edit that would itself contain a `// @end` line
+// (that line would otherwise look like the component ends early once the
+// edited body is spliced back into the full scene).
+export const END_RE = /^\/\/\s*@end\s*$/;
 
 /**
  * @param {string} src — the full scene.glsl text

@@ -50,17 +50,54 @@ export async function mount(ctx) {
   if (!ctx.alive()) return () => {};
 
   const { components } = parseScene(sceneSrc);
-  // Deep-link source for "open in editor" — built once (the scene is a
-  // static asset, never changes mid-session), per component only the
-  // &line= differs.
-  const shareB64 = await compress(sceneSrc).catch(() => null);
+  const sceneLines = sceneSrc.split('\n');
+  // GARDEN-IDE: component id -> current session-edited body text. Session-
+  // only (no persistence) — populated by the inline "Edit here" editor
+  // (edit.js via panel.js), never by anything else. Absent entry means
+  // "use component.source unchanged."
+  const editedBodies = new Map();
 
   const tuneValues = {};
   for (const c of components) for (const t of c.tunes) tuneValues[t.name] = t.default;
 
+  // Reassembles the full scene from the PRISTINE original (sceneLines) plus
+  // whatever's currently in editedBodies — always rebuilt from scratch, never
+  // from a previously-spliced string, so editing N different components in
+  // one session never accumulates drift. Per component: pristine lines up to
+  // and including its `@component` line, then its (possibly edited) body,
+  // then resume right at its `@end` line.
+  function buildSceneSource() {
+    if (!editedBodies.size) return sceneSrc;
+    const out = [];
+    let cursor = 0;
+    for (const c of components) {
+      out.push(...sceneLines.slice(cursor, c.startLine));
+      const body = editedBodies.get(c.id);
+      out.push(...(body != null ? body.split('\n') : sceneLines.slice(c.startLine, c.endLine - 1)));
+      cursor = c.endLine - 1;
+    }
+    out.push(...sceneLines.slice(cursor));
+    return out.join('\n');
+  }
+
+  // GARDEN-IDE: splice `body` in for `component`, recompile the whole scene,
+  // and re-apply @tune values (webgl2.js already persists custom uniforms
+  // across setShader() on the same instance — the explicit call here is
+  // belt-and-suspenders, matching onBuild()'s own reapply below for the
+  // context-loss case). Returns setShader()'s result in FULL-SCENE user
+  // coordinates; edit.js does the further component-local remap.
+  function recompileWithBody(component, body) {
+    if (body === component.source) editedBodies.delete(component.id);
+    else editedBodies.set(component.id, body);
+    if (!rh.runtime) return { ok: false, log: '', messages: [] };
+    const res = rh.runtime.setShader(buildSceneSource());
+    if (res.ok) rh.runtime.setUniforms(tuneValues);
+    return res;
+  }
+
   let panel = null;
-  function closePanel() {
-    if (panel) { panel.destroy(); panel = null; }
+  function closePanel(opts) {
+    if (panel) { panel.destroy(opts); panel = null; rh.runtime?.setUniforms({ uProbeSel: 0 }); }
   }
 
   function onBuild() {
@@ -70,6 +107,10 @@ export async function mount(ctx) {
       stage.append(centerNotice('WebGL2 is not available in this browser.'));
       return;
     }
+    // A context-loss rebuild recompiles from the pristine glslSrc closed
+    // over at runtimeHost() mount time — reassemble any session edits back
+    // in before re-applying slider values, same reason as the line below.
+    if (editedBodies.size) rh.runtime.setShader(buildSceneSource());
     // Re-applies current slider values after a fresh build — including a
     // context-loss rebuild, where the new GL2Runtime starts with none set.
     rh.runtime.setUniforms(tuneValues);
@@ -82,17 +123,38 @@ export async function mount(ctx) {
   });
   onBuild(); // paint the state the in-flight onChange() couldn't see rh for yet
 
-  function openProbe(component) {
-    closePanel();
+  // numericId is the probe-encoded id (1-based, file order — probeAt()'s
+  // readback) — the shader side reads it back as `uProbeSel` to render a
+  // selection seam around whichever component is currently probed.
+  function openProbe(component, numericId) {
+    closePanel({ animate: false }); // fast swap — no exit animation to overlap the new panel's own enter transition
+    rh.runtime?.setUniforms({ uProbeSel: numericId });
     panel = createProbePanel({
       component,
+      body: editedBodies.get(component.id) ?? component.source,
       values: tuneValues,
-      editorHref: shareB64 ? ('#/edit?src=' + shareB64 + '&lang=glsl&line=' + component.startLine) : null,
       onTuneChange(name, v) {
         tuneValues[name] = v;
         rh.runtime?.setUniforms({ [name]: v });
       },
-      onClose: closePanel,
+      async onEditHere(onSourceChanged) {
+        const { mountComponentEditor } = await import('./edit.js');
+        return mountComponentEditor({
+          component,
+          initialBody: editedBodies.get(component.id) ?? component.source,
+          originalBody: component.source,
+          recompile(body) {
+            const res = recompileWithBody(component, body);
+            onSourceChanged();
+            return res;
+          },
+        });
+      },
+      async getEditorHref() {
+        const b64 = await compress(buildSceneSource()).catch(() => null);
+        return b64 ? ('#/edit?src=' + b64 + '&lang=glsl&line=' + component.startLine) : null;
+      },
+      onClose: () => closePanel(),
     });
     stage.append(panel.el);
     bus.emit('garden.probe.opened.v1', { component: component.id, route: '/garden' });
@@ -113,7 +175,7 @@ export async function mount(ctx) {
     const [px, py] = canvasPixelCoords(canvas, e.clientX, e.clientY);
     const id = probeAt(rh.runtime, px, py);
     if (id == null || id < 1 || id > components.length) return;
-    openProbe(components[id - 1]);
+    openProbe(components[id - 1], id);
   }
   stage.addEventListener('pointerdown', onPointerDown);
   stage.addEventListener('pointerup', onPointerUp);
@@ -121,7 +183,7 @@ export async function mount(ctx) {
   return function cleanup() {
     stage.removeEventListener('pointerdown', onPointerDown);
     stage.removeEventListener('pointerup', onPointerUp);
-    closePanel();
+    closePanel({ animate: false });
     rh.dispose();
     stage.remove();
     topbar.remove();

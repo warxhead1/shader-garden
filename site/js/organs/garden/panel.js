@@ -1,22 +1,34 @@
 // GARDEN-0 — panel.js
-// Builds the probe panel DOM: component name/blurb/source chunk, its @tune
-// sliders (live uniform updates, no recompile), and the "open in editor"
-// deep link. Pure DOM construction — index.js owns the probe/runtime wiring.
+// Builds the probe panel DOM: component name/blurb/syntax-tinted source
+// chunk, its @tune sliders (live uniform updates, no recompile), an "Edit
+// here" inline mini-editor (GARDEN-IDE, lazy — see edit.js), and the "open in
+// editor" full-scene deep link. Pure DOM construction — index.js owns the
+// probe/runtime/splice wiring.
 
 import { el } from '../../dom.js';
+import { tintGlsl } from './highlight.js';
+
+// Exit-animation budget (CSS transition is 0.18s) — a safety net in case
+// `transitionend` never fires (e.g. the panel got display:none'd by an
+// ancestor mid-transition).
+const EXIT_MS = 260;
 
 /**
  * @param {{
  *   component: import('./parse.js').Component,
+ *   body: string,                     // current body — edited if a prior session edited it
  *   values: Record<string, number>,   // current tune values, keyed by uniform name
- *   editorHref: string|null,          // null when share.js's compress() failed
  *   onTuneChange: (name: string, value: number) => void,
+ *   onEditHere: (onSourceChanged: () => void) => Promise<{ el: HTMLElement, destroy: () => void }>,
+ *     // dynamic-imports edit.js on first call; onSourceChanged fires after
+ *     // every recompile attempt so the "open in editor" link stays current.
+ *   getEditorHref: () => Promise<string|null>,  // exports the CURRENT (edited) full scene
  *   onClose: () => void,
- * }} opts
- * @returns {{ el: HTMLElement, destroy: () => void }}
+ * }}
+ * @returns {{ el: HTMLElement, destroy: (opts?: { animate?: boolean }) => void }}
  */
-export function createProbePanel({ component, values, editorHref, onTuneChange, onClose }) {
-  const panel = el('aside', 'probe-panel glass');
+export function createProbePanel({ component, body, values, onTuneChange, onEditHere, getEditorHref, onClose }) {
+  const panel = el('aside', 'probe-panel glass probe-panel-enter');
 
   const head = el('div', 'probe-head');
   head.append(el('h2', 'probe-title', component.name));
@@ -26,13 +38,30 @@ export function createProbePanel({ component, values, editorHref, onTuneChange, 
   closeBtn.addEventListener('click', onClose);
   head.append(closeBtn);
 
-  const body = el('div', 'probe-body');
-  body.append(el('p', 'probe-blurb', component.blurb));
+  const panelBody = el('div', 'probe-body');
+  panelBody.append(el('p', 'probe-blurb', component.blurb));
 
   const source = el('pre', 'probe-source');
-  const code = el('code', null, component.source.replace(/^\n+|\n+$/g, ''));
+  const code = el('code');
+  code.innerHTML = tintGlsl(body.replace(/^\n+|\n+$/g, ''));
   source.append(code);
-  body.append(source);
+  panelBody.append(source);
+
+  const editBtn = el('button', 'btn btn-small', 'Edit here');
+  editBtn.type = 'button';
+  const editHost = el('div', 'component-editor-host');
+  editHost.hidden = true;
+  let editorApi = null;
+  editBtn.addEventListener('click', async () => {
+    if (editorApi) return;
+    editBtn.disabled = true;
+    editBtn.textContent = 'Editing…';
+    source.hidden = true;
+    editHost.hidden = false;
+    editorApi = await onEditHere(refreshEditorLink);
+    editHost.append(editorApi.el);
+  });
+  panelBody.append(editBtn, editHost);
 
   if (component.tunes.length) {
     const tuneList = el('div', 'probe-tunes');
@@ -56,19 +85,37 @@ export function createProbePanel({ component, values, editorHref, onTuneChange, 
       row.append(label, range);
       tuneList.append(row);
     }
-    body.append(tuneList);
+    panelBody.append(tuneList);
   }
 
-  if (editorHref) {
-    const editLink = el('a', 'btn btn-small probe-edit-link', 'Open in editor');
-    editLink.setAttribute('href', editorHref);
-    body.append(editLink);
+  const editLink = el('a', 'btn btn-small probe-edit-link', 'Open in editor');
+  async function refreshEditorLink() {
+    const href = await getEditorHref();
+    if (href) editLink.setAttribute('href', href);
   }
+  refreshEditorLink();
+  panelBody.append(editLink);
 
-  panel.append(head, body);
+  panel.append(head, panelBody);
+
+  // Enter transition: start faded/offset (probe-panel-enter, set above),
+  // then let the CSS transition in main.css carry it to rest. Two rAFs so
+  // the browser paints the "enter" state at least once before we remove it
+  // (one rAF alone can coalesce with the class add on some engines).
+  requestAnimationFrame(() => requestAnimationFrame(() => panel.classList.remove('probe-panel-enter')));
 
   return {
     el: panel,
-    destroy() { panel.remove(); },
+    // animate:false is index.js's fast-swap path (probing a different
+    // component, or organ cleanup) — no exit animation to overlap with the
+    // next panel's own enter transition.
+    destroy({ animate = true } = {}) {
+      editorApi?.destroy();
+      if (!animate) { panel.remove(); return; }
+      panel.classList.add('probe-panel-exit');
+      const remove = () => panel.remove();
+      panel.addEventListener('transitionend', remove, { once: true });
+      setTimeout(remove, EXIT_MS);
+    },
   };
 }

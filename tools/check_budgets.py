@@ -95,10 +95,20 @@ FILES = [
     # COMP-0 (v2 §7.5, item 23): iChannel plumbing + render-to-texture.
     # post-ADM-A baseline was 350/350 LOC each; budget is baseline + 120/130.
     ("site/js/runtime/webgl2.js", 470, None),
-    ("site/js/runtime/webgpu.js", 480, None),
+    # 480 -> 580: GARDEN-1 (garden-webgpu wave 2) — setUniforms()'s WGSL
+    # equivalent (a custom-uniform bank + name registry) and readPixel()
+    # (the offscreen probe-readback primitive: a second rgba8unorm pipeline
+    # + copyTextureToBuffer/mapAsync path), both needed to run GARDEN-0's
+    # scene on this backend at all. Actual 565/580. Raised deliberately,
+    # this commit.
+    ("site/js/runtime/webgpu.js", 580, None),
     # wrap.js also rolls up into the admission aggregate below (net -30 from
     # runtimes, per the admission budget); this row is the COMP-0 hard cap.
-    ("site/js/runtime/wrap.js", 70, None),
+    # 70 -> 115: GARDEN-1 adds the `@sg-uniforms` directive parser
+    # (wgCustomUniformNames) + accessor-function generator (genCustomAccessors)
+    # that wrapWgsl() now injects — webgpu.js's WGSL side of setUniforms().
+    # Actual 108/115. Raised deliberately, this commit.
+    ("site/js/runtime/wrap.js", 115, None),
     # COMP-1 (v2 §7.3 item 24): DAG validation shared by the composition
     # player and admission's SG-S08 rule — kept OUT of the admission
     # aggregate below (its byte budget was already near its COMP-0 cap) since
@@ -152,7 +162,10 @@ AGGREGATES = [
     # admitComposition()/runCompositionWorker() (SG-S08 + per-pass SG-Sxx +
     # the composed sacrificial watchdog). Actual at merge: 1093 LOC / 49426
     # bytes; caps raised for headroom. Raised deliberately, this commit.
-    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 51200),
+    # 51200 -> 53248 bytes: GARDEN-1's wrap.js growth (see its own row above)
+    # rolls up into this aggregate; LOC stays under the existing cap.
+    # Actual 1137 LOC / 51763 bytes. Raised deliberately, this commit.
+    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 53248),
     # GARDEN-0 (v2 §8.29): the whole organ, one cap — parse/probe/panel/index.
     ("site/js/organs/garden/*.js", 700, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=

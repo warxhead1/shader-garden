@@ -11,7 +11,8 @@
     "comp0": "node comp0.mjs",
     "layout": "node layout.mjs",
     "loader": "node loader.mjs",
-    "anatomy": "node anatomy.mjs"
+    "anatomy": "node anatomy.mjs",
+    "garden-wgsl-parity": "node garden-wgsl-parity.mjs"
   },
   "dependencies": {
     "puppeteer-core": "25.3.0"

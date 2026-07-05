@@ -662,6 +662,36 @@ scene (perf.mjs only covers baked `kernels.json` entries, and the garden
 isn't one) — same SwiftShader-headless ordinal caveat as perf.mjs applies;
 it measures each `SG_QUALITY` level, not the terrain skip in isolation.
 
+### onLost:'rebuild' circuit breaker (PERF-3)
+
+`runtimeHost()`'s automatic-rebuild policy (`onLost:'rebuild'`, the default —
+see § "Adaptive quality" above) had no bound: a freshly (re)built WebGL2
+context that itself loses immediately drove `onContextLost` straight back
+into another `build()` with nothing to stop it. Empirically reproducible
+against a cold `#/garden` boot on this project's own headless SwiftShader
+setup — a completely isolated `#/garden`-only page load reproduces
+`WebGL: CONTEXT_LOST_WEBGL` on essentially every fresh context, no
+cross-organ interference required. On a machine busy enough that WebGL2
+context setup itself gets slow, "lose, rebuild, lose again" could compound
+into an effectively unbounded stall with no exception, no rejection, and
+nothing left to observe it — confirmed directly: with the breaker removed,
+a deterministic repro (force `WEBGL_lose_context` on every canvas the
+instant it's created) drove over 2,300 rebuild attempts in 8 seconds with
+no sign of stopping.
+
+`MAX_LOSS_REBUILDS` (5) caps consecutive losses inside a `LOSS_WINDOW_MS`
+(5000) sliding window; tripping it disposes the runtime and settles into a
+stable failed state (`backend: null`, `ok: false`, an explanatory `log`)
+instead of retrying forever. The window resets on its own once real time
+passes without another loss, so sparse genuine driver hiccups over a long
+session never approach the cap — only a rapid burst does. `onLost:'release'`
+and a caller-supplied `onLost` function are unaffected (each already runs
+exactly once per loss); only the plain-string `'rebuild'` policy retries
+automatically, so only it needed bounding.
+`tools/test/runtime-host-loss.mjs` is the regression test — same
+`WEBGL_lose_context` technique, asserting the breaker trips within a bounded
+number of attempts rather than coercing real driver flakiness.
+
 ### Transport controls (ED-3)
 
 `editor/surfaces/transport.js` adds pause/step/scrub, resolution scale, and a

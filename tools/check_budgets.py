@@ -22,7 +22,13 @@ FILES = [
     # 132 -> 145: GARDEN-1 — rebuild(overrides) lets a caller (the garden
     # organ's editing seam) permanently pin a mount onto a specific backend.
     # Both raises land in the same wave-2 merge. Actual 135/145.
-    ("site/js/core/runtime-host.js", 145, None),
+    # 145 -> 180: PERF-3 (2026-07-04) — a circuit breaker on onLost:'rebuild'
+    # (MAX_LOSS_REBUILDS/LOSS_WINDOW_MS, the loss-counter state, and the
+    # onContextLost handler's tripped/give-up branch) — fixes a cold-boot
+    # stall where a context that loses immediately on every rebuild retried
+    # forever with nothing to observe it. Lands on top of GARDEN-1's cap in
+    # this cherry-pick. Actual 168/180. Raised deliberately.
+    ("site/js/core/runtime-host.js", 180, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.
@@ -158,7 +164,11 @@ AGGREGATES = [
     # overrides) land in runtime-host.js together — each fit the old caps
     # alone, the union doesn't. Actual 699 LOC / 27924 bytes; raised to
     # 730 / 29184 for headroom. Raised deliberately, this merge.
-    ("site/js/core/*.js", 730, 29184),
+    # 730 -> 750 LOC / 29184 -> 30720 bytes: PERF-3's onLost:'rebuild'
+    # circuit breaker (see runtime-host.js's own cap comment) cherry-picked
+    # on top of the wave-2 union above. Actual 729 LOC / 29934 bytes.
+    # Raised deliberately.
+    ("site/js/core/*.js", 750, 30720),
     # 31744 -> 35840 bytes: ADM-C (V2_BLUEPRINT.md item 13) adds the GLSL
     # sacrificial worker path (sac-worker.js) and the full report.js UI
     # (badge hover legend, findings, preview, timing strip, copy button) —

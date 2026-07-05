@@ -14,6 +14,21 @@ import { wirePerf } from '../dom.js';
 const LOW_FPS = 24, LOW_MS = 3000, HIGH_FPS = 50, HIGH_MS = 5000;
 const STEP = 0.75, FLOOR = 0.5, CEIL = 1;
 
+// PERF-3: onLost:'rebuild''s automatic recovery had no circuit breaker — a
+// freshly (re)built context that itself loses immediately (empirically
+// reproducible under this site's own headless SwiftShader setup, no
+// cross-organ interference required — see the bug writeup) drove `build()`
+// straight back into `else build()` with no bound, so a machine busy enough
+// to make WebGL2 context setup itself slow could turn "lose, rebuild, lose
+// again" into an effectively unbounded stall with nothing left to observe it
+// (no exception, no rejection — just an increasingly expensive retry loop).
+// MAX_LOSS_REBUILDS caps consecutive losses inside a LOSS_WINDOW_MS sliding
+// window; tripping it gives up with a stable failed state instead of
+// retrying forever. A loss window resets on its own once enough real time
+// passes without another loss, so sparse real-world context losses (an
+// occasional actual GPU driver hiccup) never approach the cap.
+const MAX_LOSS_REBUILDS = 5, LOSS_WINDOW_MS = 5000;
+
 // webgpu.js is dynamic-imported only on an actual WGSL attempt — idle-costs-zero for a webgl2-only caller (the hero).
 async function tryWebgpu(canvas, wgslSrc) {
   const { GPURuntime } = await import('../runtime/webgpu.js');
@@ -42,6 +57,7 @@ export async function runtimeHost(host, opts) {
   let disposed = false, gen = 0;
   let scale = 1, autoScale = true, lowSince = 0, highSince = 0; // ladder state
   let emaMs = null; // PERF-2: smoothed ms/frame for the honest HUD readout
+  let lossCount = 0, lossWindowStart = 0; // PERF-3: onLost:'rebuild' circuit breaker — NOT reset by build() itself (see below), only by the window elapsing
 
   function emit(type, data) {
     if (opts.bus) opts.bus.emit(type, { organ: opts.organ, ...data });
@@ -97,10 +113,24 @@ export async function runtimeHost(host, opts) {
     };
     runtime.onContextLost = () => {
       if (disposed || my !== gen) return;
-      emit('runtime.lost.v1', { backend, rebuilt: opts.onLost !== 'release' });
+      // PERF-3 circuit breaker: only the plain 'rebuild' policy below ever
+      // retries automatically, so only it needs bounding — 'release' and a
+      // caller-supplied fn each run exactly once per loss regardless.
+      const now = performance.now();
+      if (now - lossWindowStart > LOSS_WINDOW_MS) { lossWindowStart = now; lossCount = 0; }
+      lossCount++;
+      const autoRebuild = opts.onLost !== 'release' && typeof opts.onLost !== 'function';
+      const tripped = autoRebuild && lossCount > MAX_LOSS_REBUILDS;
+      emit('runtime.lost.v1', { backend, rebuilt: opts.onLost !== 'release' && !tripped });
       if (opts.onLost === 'release') { try { runtime.dispose(); } catch { /* gone */ } h.runtime = null; }
       else if (typeof opts.onLost === 'function') opts.onLost();
-      else build();
+      else if (!tripped) build();
+      else {
+        try { runtime.dispose(); } catch { /* gone */ }
+        h.runtime = null; h.backend = null; h.ok = false;
+        h.log = `WebGL context lost ${lossCount} times within ${LOSS_WINDOW_MS}ms; giving up automatic rebuild.`;
+        opts.onChange?.();
+      }
     };
     emit('backend.selected.v1', { backend, reason });
     if (res.ok) runtime.start();

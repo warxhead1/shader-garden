@@ -602,6 +602,16 @@ a:hover { text-decoration: underline; }
   padding: 0.25em 0.5em;
   font: 600 0.72rem var(--font);
 }
+/* PERF-2: garden topbar quality selector — same pill treatment as buffer-chan-select */
+.garden-quality-select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.25em 0.5em;
+  font: 600 0.72rem var(--font);
+  cursor: pointer;
+}
 
 .code-editor {
   flex: 1;

@@ -625,6 +625,26 @@ average, for a compact always-on readout (`badge-perf`, e.g. `12.4 ms ·
 0.75x`) next to the garden's existing fps badge. Same honesty rule as
 PERF-0's badge: it always reflects whatever is actually rendering.
 
+### Garden quality selector (PERF-2)
+
+The garden topbar gained a quality `<select>` (Auto/Low/Medium/High,
+persisted to `localStorage['sg.garden.quality']`). **Auto** is exactly
+PERF-0's pre-existing adaptive ladder — unset, it behaves byte-identically to
+every garden render before this feature shipped. **Low/Medium/High** each
+pin two things at once: a fixed `renderScale` (`0.5`/`0.75`/`1` — calling
+`setRenderScale()` disables the ladder for that mount per its own contract,
+so switching back to Auto goes through `rh.rebuild()` instead of trying to
+resurrect ladder state runtime-host already tore down) and a shader-side
+`SG_QUALITY` uniform (`0`/`1`/`2`) applied via the runtime's existing custom-
+uniform channel — no new plumbing, no recompile. `scene.glsl`'s `SG_QUALITY`
+scales `sg_march`'s step count (88/66/44) and `sg_cloud_fbm`'s octave count
+(3/2/1) via an early `break` inside each function's still-fixed-bound loop —
+High hits the exact same loop bounds every pre-PERF-2 render used, so nothing
+changes when the uniform goes unused. The garden organ sets this uniform
+explicitly on every build (including a context-loss rebuild, where a fresh
+`GL2Runtime` starts with no custom uniforms at all), so "never set" never
+actually reaches a live frame.
+
 ### Transport controls (ED-3)
 
 `editor/surfaces/transport.js` adds pause/step/scrub, resolution scale, and a

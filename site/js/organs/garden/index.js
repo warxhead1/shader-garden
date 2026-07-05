@@ -26,11 +26,29 @@ const CLICK_SLOP = 6;
 // mount rendering 2.25x more pixels than CSS size on any display reporting
 // devicePixelRatio >= 1.5 (a 4K/HiDPI desktop is exactly that case — see the
 // dispatch notes' "quite shite fps" report). Cap this mount to CSS-pixel
-// density (1) instead — a viewer wanting sharper-than-CSS-pixel raymarch on
-// this scene would be paying real GPU cost for detail this heavy a shader
-// can't resolve anyway (the noise itself is only band-limited to a few
-// octaves).
+// density (1) instead — none of the quality presets below need more than
+// that, and a viewer wanting sharper-than-CSS-pixel raymarch on this scene
+// would be paying real GPU cost for detail this heavy a shader can't
+// resolve anyway (the noise itself is only band-limited to a few octaves).
 const GARDEN_MAX_DPR = 1;
+
+// PERF-2: Low/Medium/High each pin BOTH a fixed renderScale (bypassing the
+// PERF-0 adaptive ladder — see runtime-host.js's setRenderScale() contract)
+// and a shader-side SG_QUALITY level (scene.glsl scales march steps + cloud
+// fbm octaves off this). Auto (sgQuality 2, the ladder's own scale) is
+// byte-identical to pre-PERF-2 behavior — see scene.glsl's own SG_QUALITY
+// comment for why High == the original unconditional cost.
+const QUALITY_PRESETS = {
+  low:    { renderScale: 0.5,  sgQuality: 0 },
+  medium: { renderScale: 0.75, sgQuality: 1 },
+  high:   { renderScale: 1,    sgQuality: 2 },
+};
+const QUALITY_KEY = 'sg.garden.quality';
+
+function loadQualityMode() {
+  const saved = localStorage.getItem(QUALITY_KEY);
+  return saved && (saved === 'auto' || QUALITY_PRESETS[saved]) ? saved : 'auto';
+}
 
 export async function mount(ctx) {
   const { root, bus } = ctx;
@@ -43,8 +61,17 @@ export async function mount(ctx) {
   const backendBadge = el('span', 'badge badge-backend', '…');
   const fpsBadge = el('span', 'badge badge-fps', '');
   const perfBadge = el('span', 'badge badge-perf', ''); // PERF-2: honest ms/frame (EMA) · renderScale, always on
+  const qualitySelect = el('select', 'garden-quality-select');
+  for (const opt of ['auto', 'low', 'medium', 'high']) {
+    const o = document.createElement('option');
+    o.value = opt;
+    o.textContent = opt === 'auto' ? 'Auto' : opt[0].toUpperCase() + opt.slice(1);
+    qualitySelect.append(o);
+  }
+  let qualityMode = loadQualityMode();
+  qualitySelect.value = qualityMode;
   const hint = el('span', 'garden-hint muted', 'drag to orbit · click anything to probe it');
-  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, el('div', 'toolbar-spacer'), hint);
+  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, qualitySelect, el('div', 'toolbar-spacer'), hint);
   root.append(stage, topbar);
 
   let sceneSrc;
@@ -113,6 +140,16 @@ export async function mount(ctx) {
     if (panel) { panel.destroy(opts); panel = null; rh.runtime?.setUniforms({ uProbeSel: 0 }); }
   }
 
+  // PERF-2: pushes the current quality preset's SG_QUALITY level into the
+  // shader — a fresh GL2Runtime (initial mount or a context-loss rebuild)
+  // starts with no custom uniforms set, so this must run on every (re)build,
+  // not just once. Auto uses the same level ("high") the site shipped before
+  // this feature existed — see scene.glsl's SG_QUALITY comment.
+  function applyQualityUniform() {
+    const sgQuality = qualityMode === 'auto' ? 2 : QUALITY_PRESETS[qualityMode].sgQuality;
+    rh.runtime?.setUniforms({ SG_QUALITY: sgQuality });
+  }
+
   function onBuild() {
     if (!rh) return; // fires once synchronously during the initial build, before rh is assigned
     backendBadge.textContent = rh.backend === 'webgl2' ? 'WebGL2' : 'no GPU';
@@ -127,6 +164,7 @@ export async function mount(ctx) {
     // Re-applies current slider values after a fresh build — including a
     // context-loss rebuild, where the new GL2Runtime starts with none set.
     rh.runtime.setUniforms(tuneValues);
+    applyQualityUniform();
   }
 
   // PERF-2: honest compact HUD next to the fps badge — the same ~1Hz tap
@@ -138,12 +176,31 @@ export async function mount(ctx) {
     perfBadge.textContent = emaMs.toFixed(1) + ' ms · ' + scale;
   }
 
+  // Pinning a preset disables runtime-host's adaptive ladder for this mount
+  // permanently (its own setRenderScale() contract) — the only way back to
+  // Auto's clean ladder state is a fresh build, so switching TO auto rebuilds
+  // rather than trying to resurrect ladder bookkeeping runtime-host already
+  // tore down.
+  async function setQuality(mode) {
+    qualityMode = mode;
+    localStorage.setItem(QUALITY_KEY, mode);
+    if (mode === 'auto') {
+      await rh.rebuild(); // resets scale/autoScale; onChange -> onBuild reapplies SG_QUALITY
+    } else {
+      rh.setRenderScale(QUALITY_PRESETS[mode].renderScale);
+      applyQualityUniform();
+    }
+  }
+  function onQualityChange(e) { setQuality(e.target.value); }
+  qualitySelect.addEventListener('change', onQualityChange);
+
   let rh;
   rh = await runtimeHost(stage, {
     prefer: 'webgl2', glslSrc: sceneSrc, canvasClass: 'viewer-canvas garden-canvas',
     fpsBadge, onLost: 'rebuild', bus, organ: 'garden', onChange: onBuild,
     maxDpr: GARDEN_MAX_DPR, onPerf: fmtPerf,
   });
+  if (qualityMode !== 'auto') rh.setRenderScale(QUALITY_PRESETS[qualityMode].renderScale);
   onBuild(); // paint the state the in-flight onChange() couldn't see rh for yet
 
   // numericId is the probe-encoded id (1-based, file order — probeAt()'s
@@ -206,6 +263,7 @@ export async function mount(ctx) {
   return function cleanup() {
     stage.removeEventListener('pointerdown', onPointerDown);
     stage.removeEventListener('pointerup', onPointerUp);
+    qualitySelect.removeEventListener('change', onQualityChange);
     closePanel({ animate: false });
     rh.dispose();
     stage.remove();

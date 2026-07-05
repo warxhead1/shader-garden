@@ -26,7 +26,7 @@
 // borrows its noise from: terrain height ~0-2 units, camera orbit radius
 // ~3.6 units.
 
-// @sg-uniforms uProbe uProbeSel SG_QUALITY uCharPosX uCharPosZ TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS
+// @sg-uniforms uProbe uProbeSel SG_QUALITY uCharPosX uCharPosZ uCharYaw uCharGaitDist uCharSpeed01 TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS
 
 // uProbe(): 0 = normal shading, 1 = probe frame (encode compId, no lighting)
 // uProbeSel(): 0 = nothing selected, otherwise a COMP_* id — the matching
@@ -35,6 +35,12 @@
 // (wave-3 movement controller, js/organs/garden/index.js). Unset slots
 // read back 0 (see wrap.js's custom-uniform bank), so the scene stays
 // pixel-identical to before until something actually calls setUniforms().
+//
+// Wave-4 §A: uCharYaw()/uCharGaitDist()/uCharSpeed01() — distance-driven
+// locomotion, JS-integrated in moveFrame() (index.js). uCharSpeed01() is 0
+// whenever idle (unset slot default), and every new motion term below is
+// mixed on it — see scene.glsl's own header for the byte-identity rationale
+// (identical here, WGSL bank slots default to 0 the same way).
 
 const COMP_SKY: f32       = 1.0;
 const COMP_TERRAIN: f32   = 2.0;
@@ -139,6 +145,13 @@ const SG_LEG_LEN: f32 = 0.5;
 // the same curve, not an approximation of one.
 fn sg_bounce_phase(time: f32) -> f32 { return fract(time * BOUNCE_SPEED() * 0.5); }
 
+// Wave-4 §A: gait phase is DISTANCE-driven, not wall-clock — it stops
+// advancing the instant uCharGaitDist() stops growing, which happens
+// automatically the frame moveFrame() (index.js) idle-exits.
+const SG_STRIDE_LEN: f32 = 1.1; // world units per full gait cycle — tuned so a
+                                 // MOVE_SPEED=1.8 walk reads as ~1.6 steps/sec
+fn sg_gait_phase() -> f32 { return fract(uCharGaitDist() / SG_STRIDE_LEN); }
+
 // center is precomputed once per pixel by the caller (mainImage) — it only
 // depends on U.time, not on p, and this is called once per raymarch step;
 // recomputing sg_terrain_height() (a 5-octave noise loop) that often was
@@ -170,20 +183,71 @@ fn sg_character_sdf(p: vec3f, center: vec3f) -> f32 {
   let scaleXZ = mix(1.20, 0.90, (1.0 - phase) * 0.5);
 
   var lp = p - center;
-  lp.y = lp.y / scaleY;
-  lp = vec3f(lp.x / scaleXZ, lp.y, lp.z / scaleXZ);
+
+  // Wave-4 §A: byte-identical fast path when nothing is moving — mirrors
+  // scene.glsl's own fast path verbatim (see its comment for the full
+  // rationale: this sidesteps a proven, compiler-level 1-ULP effect from
+  // the new uniforms merely existing, not a logic issue reachable from
+  // GLSL/WGSL source shape).
+  if (uCharYaw() == 0.0 && uCharGaitDist() == 0.0 && uCharSpeed01() <= 0.0) {
+    lp = vec3f(lp.x / scaleXZ, lp.y / scaleY, lp.z / scaleXZ);
+
+    let k = 0.075;
+    var d = sg_capsule(lp, vec3f(0.0, -0.04, 0.0), vec3f(0.0, 0.28, 0.0), 0.165);
+    d = sg_smin(d, sg_sphere(lp, vec3f(0.0, 0.50, 0.0), 0.155), k);
+
+    let swing = sin(U.time * 3.1);
+    d = sg_smin(d, sg_capsule(lp, vec3f( 0.24, 0.24, 0.0), vec3f( 0.27 + 0.07 * swing, -0.12,  0.13 * swing), 0.062), k);
+    d = sg_smin(d, sg_capsule(lp, vec3f(-0.24, 0.24, 0.0), vec3f(-0.27 - 0.07 * swing, -0.12, -0.13 * swing), 0.062), k);
+
+    let tuck = smoothstep(0.12, 0.5, min(t, 1.0 - t)); // legs draw up mid-flight, extend for landing
+    d = sg_smin(d, sg_capsule(lp, vec3f( 0.11, -0.04, 0.0), vec3f( 0.11, -0.5 + 0.24 * tuck,  0.07 * tuck), 0.075), k);
+    d = sg_smin(d, sg_capsule(lp, vec3f(-0.11, -0.04, 0.0), vec3f(-0.11, -0.5 + 0.24 * tuck, -0.07 * tuck), 0.075), k);
+
+    return d * min(scaleY, scaleXZ);
+  }
+
+  // Yaw the whole figure to face uCharYaw() before any limb math runs, so
+  // every primitive below turns together.
+  let cy = cos(uCharYaw());
+  let sy = sin(uCharYaw());
+  lp = vec3f(lp.x * cy - lp.z * sy, lp.y, lp.x * sy + lp.z * cy);
+
+  // gp: 0..2pi over one full stride, see sg_gait_phase(). A second, smaller
+  // vertical bob at 2x gait frequency (one dip per footstep, not per
+  // stride) rides underneath the hop's own squash/stretch below.
+  let gp = sg_gait_phase() * 6.28318530718;
+  let gaitBob = sin(gp * 2.0) * 0.03 * uCharSpeed01();
+  lp = vec3f(lp.x, lp.y - gaitBob, lp.z);
+
+  lp = vec3f(lp.x / scaleXZ, lp.y / scaleY, lp.z / scaleXZ);
 
   let k = 0.075; // one smooth-min radius for the whole figure's "softness"
-  var d = sg_capsule(lp, vec3f(0.0, -0.04, 0.0), vec3f(0.0, 0.28, 0.0), 0.165);
-  d = sg_smin(d, sg_sphere(lp, vec3f(0.0, 0.50, 0.0), 0.155), k);
 
-  let swing = sin(U.time * 3.1);
-  d = sg_smin(d, sg_capsule(lp, vec3f( 0.24, 0.24, 0.0), vec3f( 0.27 + 0.07 * swing, -0.12,  0.13 * swing), 0.062), k);
-  d = sg_smin(d, sg_capsule(lp, vec3f(-0.24, 0.24, 0.0), vec3f(-0.27 - 0.07 * swing, -0.12, -0.13 * swing), 0.062), k);
+  // Lean the upper body into the direction of travel; legs stay in the
+  // unleaned `lp` below so they read as planted, not swaying with the torso.
+  let lean = uCharSpeed01() * 0.12; // radians, ~7 deg max
+  let lu = vec3f(lp.x, lp.y - lean * lp.z, lp.z + lean * lp.y);
 
+  var d = sg_capsule(lu, vec3f(0.0, -0.04, 0.0), vec3f(0.0, 0.28, 0.0), 0.165);
+  d = sg_smin(d, sg_sphere(lu, vec3f(0.0, 0.50, 0.0), 0.155), k);
+
+  // Arm swing: at rest this branch is never reached (see the fast path
+  // above) — the walk formula (gait-phase-driven) takes over as speed
+  // increases, mixed FROM the same pre-wave-4 idle formula so a start/stop
+  // is a blend, not a pop.
+  let swing = mix(sin(U.time * 3.1), sin(gp) * 0.55, uCharSpeed01());
+  d = sg_smin(d, sg_capsule(lu, vec3f( 0.24, 0.24, 0.0), vec3f( 0.27 + 0.07 * swing, -0.12,  0.13 * swing), 0.062), k);
+  d = sg_smin(d, sg_capsule(lu, vec3f(-0.24, 0.24, 0.0), vec3f(-0.27 - 0.07 * swing, -0.12, -0.13 * swing), 0.062), k);
+
+  // Legs go counter-phase to the arms (gp + pi). The existing bounce-driven
+  // tuck (mid-flight knee lift) is untouched; legSwing adds a horizontal
+  // front/back stride offset on top of it — the two read as orthogonal
+  // motions (swing forward/back AND lift at the knee).
   let tuck = smoothstep(0.12, 0.5, min(t, 1.0 - t)); // legs draw up mid-flight, extend for landing
-  d = sg_smin(d, sg_capsule(lp, vec3f( 0.11, -0.04, 0.0), vec3f( 0.11, -0.5 + 0.24 * tuck,  0.07 * tuck), 0.075), k);
-  d = sg_smin(d, sg_capsule(lp, vec3f(-0.11, -0.04, 0.0), vec3f(-0.11, -0.5 + 0.24 * tuck, -0.07 * tuck), 0.075), k);
+  let legSwing = mix(0.0, sin(gp + 3.14159265) * 0.35, uCharSpeed01());
+  d = sg_smin(d, sg_capsule(lp, vec3f( 0.11, -0.04, 0.0), vec3f( 0.11 + legSwing * 0.15, -0.5 + 0.24 * tuck,  0.07 * tuck - legSwing * 0.10), 0.075), k);
+  d = sg_smin(d, sg_capsule(lp, vec3f(-0.11, -0.04, 0.0), vec3f(-0.11 - legSwing * 0.15, -0.5 + 0.24 * tuck, -0.07 * tuck + legSwing * 0.10), 0.075), k);
 
   return d * min(scaleY, scaleXZ); // conservative distance correction for the non-uniform scale
 }

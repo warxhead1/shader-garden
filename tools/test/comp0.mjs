@@ -55,9 +55,9 @@ check('wrapGlsl(src, 0) === wrapGlsl(src) — explicit zero is still zero',
   wrapGlsl(USER_GLSL, 0) === wrapGlsl(USER_GLSL));
 
 const USER_WGSL = 'fn mainImage(fragCoord: vec2f) -> vec4f { return vec4f(1.0); }';
-// Re-frozen for GARDEN-1 (wave 2): the custom-uniform bank adds exactly one
-// struct member to the WGSL prelude (16 named f32 slots — see wrap.js's
-// @sg-uniforms directive). A deliberate C11 golden update, not drift.
+// Re-frozen for wave-4 §A+B: the custom-uniform bank doubled 16 -> 32 named
+// f32 slots (locomotion + camera-mode uniforms — see wrap.js's own comment
+// on WGSL_CUSTOM_UNIFORM_SLOTS). A deliberate C11 golden update, not drift.
 const GOLDEN_WGSL = `struct SGUniforms {
   res: vec4f,
   mouse: vec4f,
@@ -65,7 +65,7 @@ const GOLDEN_WGSL = `struct SGUniforms {
   dt: f32,
   frame: f32,
   _pad: f32,
-  custom: array<vec4f, 4>,
+  custom: array<vec4f, 8>,
 }
 @group(0) @binding(0) var<uniform> U: SGUniforms;
 

@@ -474,7 +474,7 @@ rt.setUniforms({name: n})       // named float uniforms beyond the fixed five �
                                  // @tune sliders + probe toggle; merges, persists across
                                  // setShader(), unknown names silently ignored. Both backends
                                  // (WGSL side: wrap.js's `@sg-uniforms` directive + a fixed
-                                 // 16-float bank — see § "The Garden" below)
+                                 // 32-float bank — see § "The Garden" below)
 rt.setChannels([tex, ...])      // COMP-0: bind up to 4 WebGLTextures as iChannel0..
 rt.createTarget(w, h, {feedback}) // COMP-0: offscreen render target; feedback:true ping-pongs
 rt.renderTo(target, t)          // COMP-0: renderOnce's off-screen sibling

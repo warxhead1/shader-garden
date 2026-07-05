@@ -49,6 +49,10 @@ const HINT_SEEN_KEY = 'sg.garden.hintSeen';
 // 6.4-unit play diameter in ~3.5s, tuned to read as a walk, not a teleport.
 const PLAY_RADIUS = 3.2;
 const MOVE_SPEED = 1.8;
+// Wave-4 §A: bounded turn rate for the character's facing (uCharYaw) — fast
+// enough to feel responsive, slow enough that a diagonal-to-diagonal flick
+// doesn't snap instantly to the new heading.
+const TURN_RATE = 10; // rad/s
 const MOVE_KEYS = new Map([
   ['w', [0, -1]], ['arrowup', [0, -1]],
   ['s', [0, 1]], ['arrowdown', [0, 1]],
@@ -434,6 +438,13 @@ export async function mount(ctx) {
   // (scene.glsl/scene.wgsl, wave-3 item D) — this only has to accumulate
   // and clamp a target, never read anything back from the GPU.
   let charX = 0, charZ = 0;
+  // Wave-4 §A: charYaw (facing) and gaitDist (a distance accumulator, not a
+  // time accumulator) live next to charX/charZ — same integrator, driven by
+  // the same held-key/joystick vector. gaitDist NEVER wraps here (the
+  // shader does fract()) — an ever-growing float is fine at f32 precision
+  // for a browser session's realistic play time, exactly like iTime already
+  // is.
+  let charYaw = 0, gaitDist = 0;
   const heldKeys = new Set();
   const joystickVec = { x: 0, z: 0 };
   let moveRafId = null;
@@ -458,9 +469,23 @@ export async function mount(ctx) {
     let nz = charZ + dz * MOVE_SPEED * dt;
     const d = Math.hypot(nx, nz);
     if (d > PLAY_RADIUS) { nx = (nx / d) * PLAY_RADIUS; nz = (nz / d) * PLAY_RADIUS; }
+    const movedDist = Math.hypot(nx - charX, nz - charZ); // actual distance this frame, post-clamp
+    gaitDist += movedDist; // frozen for free the instant this function idle-exits above
+    if (movedDist > 1e-5) {
+      const targetYaw = Math.atan2(dx, -dz); // matches the shader's yaw-rotation convention
+                                              // (uCharYaw=0 faces -Z) — see scene.glsl's own comment
+      let delta = targetYaw - charYaw;
+      delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // shortest-path wrap to [-pi,pi]
+      const maxTurn = TURN_RATE * dt;
+      charYaw += Math.max(-maxTurn, Math.min(maxTurn, delta));
+    }
     if (nx !== charX || nz !== charZ) {
       charX = nx; charZ = nz;
-      rh.runtime?.setUniforms({ uCharPosX: charX, uCharPosZ: charZ }); // only on actual change
+      const speed01 = Math.min(1, Math.hypot(dx, dz)); // currentMoveVector() already normalizes to <= 1
+      rh.runtime?.setUniforms({
+        uCharPosX: charX, uCharPosZ: charZ,
+        uCharYaw: charYaw, uCharGaitDist: gaitDist, uCharSpeed01: speed01,
+      }); // only on actual change
     }
     moveRafId = requestAnimationFrame(moveFrame);
   }

@@ -498,12 +498,15 @@ fn sg_march(ro: vec3f, rd: vec3f, charCenter: vec3f, pondWaterY: f32, rockCenter
   return SGHit((t0 + t1) * 0.5, COMP_TERRAIN);
 }
 
-// Wave-4 §B: three camera modes, each computing its own (target, ro) pair —
-// mainImage picks the active pair via uCamMode() and cross-blends toward it
-// using uCamBlend() (see mainImage below). Computed entirely in-shader: no
-// per-mode JS math beyond picking the mode and driving the transition
+// Wave-4 §B: three camera modes, each computing its own (camTarget, ro) pair
+// — mainImage picks the active pair via uCamMode() and cross-blends toward
+// it using uCamBlend() (see mainImage below). Computed entirely in-shader:
+// no per-mode JS math beyond picking the mode and driving the transition
 // blend, so movement/camera both stay uniform-only on the hot path.
-struct SGCam { target: vec3f, ro: vec3f }
+// Field is `camTarget`, not `target` — `target` is a WGSL reserved keyword
+// (silently fine in GLSL, fatal here: verified against a real WebGPU device,
+// this headless test harness has no navigator.gpu to have caught it).
+struct SGCam { camTarget: vec3f, ro: vec3f }
 
 // Orbit: today's exact camera, extracted verbatim — byte-identical output,
 // just relocated into its own function so Follow/Overview share the same
@@ -511,10 +514,10 @@ struct SGCam { target: vec3f, ro: vec3f }
 fn sg_cam_orbit(charCenter: vec3f, dragYaw: f32, dragPitch: f32) -> SGCam {
   let yaw = U.time * 0.07 + dragYaw;
   let pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
-  let target = mix(vec3f(0.0, sg_terrain_height(vec2f(uCharPosX(), uCharPosZ())), 0.0), charCenter, 0.6);
+  let camTarget = mix(vec3f(0.0, sg_terrain_height(vec2f(uCharPosX(), uCharPosZ())), 0.0), charCenter, 0.6);
   let radius = 3.6;
-  let ro = target + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
-  return SGCam(target, ro);
+  let ro = camTarget + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(camTarget, ro);
 }
 
 // Follow: third-person, framed behind the character along ITS OWN facing
@@ -523,18 +526,18 @@ fn sg_cam_orbit(charCenter: vec3f, dragYaw: f32, dragPitch: f32) -> SGCam {
 fn sg_cam_follow(charCenter: vec3f, dragYaw: f32, dragPitch: f32) -> SGCam {
   let yaw = uCharYaw() + 3.14159265 + dragYaw; // "behind" = opposite the character's facing
   let pitch = clamp(0.30 + dragPitch, 0.08, 0.9);
-  let target = charCenter + vec3f(0.0, 0.15, 0.0); // aim slightly above center (chest/head), not feet
+  let camTarget = charCenter + vec3f(0.0, 0.15, 0.0); // aim slightly above center (chest/head), not feet
   let radius = 2.0; // tighter than orbit's 3.6 — reads as "with" the character, not surveying
-  let ro = target + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
-  return SGCam(target, ro);
+  let ro = camTarget + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(camTarget, ro);
 }
 
 // Overview: high, architectural, looking down at the whole diorama's
 // centroid (not the character specifically) — for probing/connections.
 fn sg_cam_overview(charCenter: vec3f) -> SGCam {
-  let target = vec3f(1.2, 0.3, 0.7); // diorama's rough centroid (between pond/rocks/character range)
-  let ro = target + vec3f(0.0, 4.2, 0.001); // near-top-down; tiny z avoids a degenerate up-vector
-  return SGCam(target, ro);
+  let camTarget = vec3f(1.2, 0.3, 0.7); // diorama's rough centroid (between pond/rocks/character range)
+  let ro = camTarget + vec3f(0.0, 4.2, 0.001); // near-top-down; tiny z avoids a degenerate up-vector
+  return SGCam(camTarget, ro);
 }
 
 fn sg_light(pos: vec3f, rd: vec3f, N: vec3f, matCol: vec3f, t: f32) -> vec3f {
@@ -602,7 +605,7 @@ fn mainImage(fragCoord: vec2f) -> vec4f {
     if (uPrevCamMode() < 0.5) { camB = sg_cam_orbit(charCenter, dragYaw, dragPitch); }
     else if (uPrevCamMode() < 1.5) { camB = sg_cam_follow(charCenter, dragYaw, dragPitch); }
     else { camB = sg_cam_overview(charCenter); }
-    camTarget = mix(camB.target, camA.target, uCamBlend());
+    camTarget = mix(camB.camTarget, camA.camTarget, uCamBlend());
     ro = mix(camB.ro, camA.ro, uCamBlend());
   }
   let fwd = normalize(camTarget - ro);

@@ -113,6 +113,7 @@ a:hover { text-decoration: underline; }
 .badge-fit { color: var(--cyan); font-variant-numeric: tabular-nums; }
 .badge-backend { color: #c4b5fd; }
 .badge-fps { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 8em; } /* PERF-0: "fps · scale" */
+.badge-perf { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 8em; } /* PERF-2: "ms · scale", always-on honest HUD */
 
 .pill {
   padding: 0.2em 0.8em;

@@ -20,6 +20,18 @@ import { createProbePanel } from './panel.js';
 // this turns out to be).
 const CLICK_SLOP = 6;
 
+// PERF-2: the garden is the single heaviest kernel on the site — an
+// 88-step raymarch evaluating 4 distance fields per step, full-screen, every
+// frame. The site-wide DEFAULT_DPR_CAP (1.5, webgl2.js) still leaves this
+// mount rendering 2.25x more pixels than CSS size on any display reporting
+// devicePixelRatio >= 1.5 (a 4K/HiDPI desktop is exactly that case — see the
+// dispatch notes' "quite shite fps" report). Cap this mount to CSS-pixel
+// density (1) instead — a viewer wanting sharper-than-CSS-pixel raymarch on
+// this scene would be paying real GPU cost for detail this heavy a shader
+// can't resolve anyway (the noise itself is only band-limited to a few
+// octaves).
+const GARDEN_MAX_DPR = 1;
+
 export async function mount(ctx) {
   const { root, bus } = ctx;
   root.replaceChildren();
@@ -30,8 +42,9 @@ export async function mount(ctx) {
   backLink.setAttribute('href', '#/');
   const backendBadge = el('span', 'badge badge-backend', '…');
   const fpsBadge = el('span', 'badge badge-fps', '');
+  const perfBadge = el('span', 'badge badge-perf', ''); // PERF-2: honest ms/frame (EMA) · renderScale, always on
   const hint = el('span', 'garden-hint muted', 'drag to orbit · click anything to probe it');
-  topbar.append(backLink, backendBadge, fpsBadge, el('div', 'toolbar-spacer'), hint);
+  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, el('div', 'toolbar-spacer'), hint);
   root.append(stage, topbar);
 
   let sceneSrc;
@@ -116,10 +129,20 @@ export async function mount(ctx) {
     rh.runtime.setUniforms(tuneValues);
   }
 
+  // PERF-2: honest compact HUD next to the fps badge — the same ~1Hz tap
+  // wirePerf's fps badge uses, but the EMA'd ms/frame runtime-host.js
+  // computes plus the current renderScale, always reflecting what's
+  // actually rendering (never a stale/optimistic number).
+  function fmtPerf({ emaMs, renderScale }) {
+    const scale = (Math.round(renderScale * 100) / 100).toString() + 'x';
+    perfBadge.textContent = emaMs.toFixed(1) + ' ms · ' + scale;
+  }
+
   let rh;
   rh = await runtimeHost(stage, {
     prefer: 'webgl2', glslSrc: sceneSrc, canvasClass: 'viewer-canvas garden-canvas',
     fpsBadge, onLost: 'rebuild', bus, organ: 'garden', onChange: onBuild,
+    maxDpr: GARDEN_MAX_DPR, onPerf: fmtPerf,
   });
   onBuild(); // paint the state the in-flight onChange() couldn't see rh for yet
 

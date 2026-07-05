@@ -460,7 +460,8 @@ Both runtimes present the same surface, so callers swap them freely:
 
 ```js
 // webgl2.js
-new GL2Runtime(canvas)          // throws when WebGL2 is unavailable
+new GL2Runtime(canvas, {maxDpr?}) // throws when WebGL2 unavailable; maxDpr overrides
+                                 // the site-wide DEFAULT_DPR_CAP for this instance (PERF-2)
 rt.setShader(glslSrc, channels) // -> { ok, log, messages }; channels (0-4, COMP-0) declares
                                  // iChannel0.. (C11: omitted entirely when 0); a failed compile
                                  // keeps the previous program running
@@ -603,6 +604,26 @@ The backend badge (`badge-backend` + `badge-fps`, wired by `dom.js`'s
 `wirePerf`) always renders `<fps> fps · <scale>x`, e.g. `31 fps · 0.75x` — the
 honesty pillar: whatever quality level is actually rendering, the badge says
 so, ladder-driven or user-chosen.
+
+### Per-mount DPR cap + an honest ms/frame HUD (PERF-2)
+
+PERF-0's `1.5` DPR cap is site-wide; a fullscreen raymarch is a different
+animal from a thumbnail-sized kernel, so `GL2Runtime`'s constructor now takes
+an optional `{maxDpr}` (defaults to the module's `DEFAULT_DPR_CAP`), plumbed
+through `runtimeHost(host, opts)`'s own `opts.maxDpr` -> its internal
+`tryWebgl2()` helper. The garden (`organs/garden/index.js`) is the one mount
+that overrides it: `GARDEN_MAX_DPR = 1` (CSS-pixel density, no DPR multiplier
+at all) — an 88-step, 4-distance-field-per-step raymarch at native DPR on a
+HiDPI/4K display is exactly the "quite shite fps" complaint that motivated
+this whole track: `1.5` still means 2.25x the pixel count of `1`.
+
+`runtimeHost()` also grew an `opts.onPerf` callback, fired from the same
+~1 Hz `onPerf` tap `wirePerf`'s fps badge already uses. It carries an EMA
+(`emaMs = emaMs*0.8 + perf.ms*0.2`) alongside the raw `{fps, ms}` and the
+ladder's current `renderScale` — a smoother number than the raw per-second
+average, for a compact always-on readout (`badge-perf`, e.g. `12.4 ms ·
+0.75x`) next to the garden's existing fps badge. Same honesty rule as
+PERF-0's badge: it always reflects whatever is actually rendering.
 
 ### Transport controls (ED-3)
 

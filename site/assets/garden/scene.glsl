@@ -375,12 +375,22 @@ SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCen
   // behavior); Low/Medium exit after fewer steps, same fallback path a ray
   // that legitimately exhausts 88 steps already takes below.
   int maxSteps = SG_QUALITY < 0.5 ? 44 : (SG_QUALITY < 1.5 ? 66 : 88);
+  // PERF-2, exact (not an approximation): the heightfield's per-step noise
+  // (sg_terrain_height, 5 octaves) is the single most expensive call in this
+  // march, and it runs unconditionally every step even for sky rays. Once a
+  // ray is strictly ascending (rd.y > 0) and already above the highest point
+  // this frame's TERRAIN_SCALE can ever produce, terrain is analytically
+  // unreachable for the rest of the march — dTerrain would only ever grow
+  // from here, so skipping straight to a sentinel is not a visual
+  // approximation, it's the same "terrain isn't the nearest surface"
+  // conclusion the real computation would reach, without paying for it.
+  float terrainCeil = SG_TERRAIN_HEIGHT_RNG * max(TERRAIN_SCALE, 0.05) + 0.02;
   float t = 0.05;
   float hitKind = COMP_TERRAIN; // which candidate was closest last — decides the fallback below
   for (int i = 0; i < 88; i++) {
     if (i >= maxSteps) break;
     vec3 p = ro + rd * t;
-    float dTerrain = p.y - sg_terrain_height(p.xz);
+    float dTerrain = (rd.y > 0.0 && p.y > terrainCeil) ? 1.0e4 : (p.y - sg_terrain_height(p.xz));
     float dChar = sg_character_sdf(p, charCenter);
     float dPond = sg_pond_sdf(p, pondWaterY);
     float dRock = sg_rocks_sdf(p, rockCenter);

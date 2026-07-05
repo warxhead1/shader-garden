@@ -645,6 +645,21 @@ explicitly on every build (including a context-loss rebuild, where a fresh
 `GL2Runtime` starts with no custom uniforms at all), so "never set" never
 actually reaches a live frame.
 
+### Terrain-ceiling march skip + garden perf harness (PERF-2)
+
+Independent of the quality selector, `sg_march` gained an exact (not
+approximated) early-out: once a ray is strictly ascending (`rd.y > 0`) and
+already above the highest point the current `TERRAIN_SCALE` can ever
+produce, the terrain heightfield — a 5-octave noise call, the single most
+expensive thing in the march, evaluated unconditionally every step — is
+analytically unreachable for the rest of that ray, so it's skipped rather
+than computed and discarded. Verified pixel-identical (0/921600 bytes
+differing) against the pre-optimization scene at five fixed `iTime` samples.
+`tools/test/garden-perf.mjs` is the dedicated forced-sync harness for this
+scene (perf.mjs only covers baked `kernels.json` entries, and the garden
+isn't one) — same SwiftShader-headless ordinal caveat as perf.mjs applies;
+it measures each `SG_QUALITY` level, not the terrain skip in isolation.
+
 ### Transport controls (ED-3)
 
 `editor/surfaces/transport.js` adds pause/step/scrub, resolution scale, and a

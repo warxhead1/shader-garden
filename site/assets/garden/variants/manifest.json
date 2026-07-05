@@ -1,0 +1,27 @@
+{
+  "terrain": {
+    "variants": [
+      {
+        "id": "rolling-hills",
+        "label": "Rolling Hills (default)",
+        "pristine": true,
+        "heavy": false,
+        "blurb": "The component's original body \u2014 quintic FBM with shear, from kernel biome-rolling-hills."
+      },
+      {
+        "id": "river-valley",
+        "label": "River Valley",
+        "file": "river-valley.glsl",
+        "heavy": false,
+        "blurb": "Cheap 6-octave offset FBM from kernel biome-river-valley \u2014 a shallower carve with a tinted channel at the lowest ground."
+      },
+      {
+        "id": "mountain-peaks",
+        "label": "Mountain Peaks",
+        "file": "mountain-peaks.glsl",
+        "heavy": true,
+        "blurb": "Domain-warped 8-octave ridged FBM from kernel biome-mountain-peaks \u2014 about 5x the noise evaluations of Rolling Hills per pixel. Applies only on explicit click."
+      }
+    ]
+  }
+}

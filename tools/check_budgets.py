@@ -154,7 +154,16 @@ AGGREGATES = [
     # bytes; caps raised for headroom. Raised deliberately, this commit.
     ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 51200),
     # GARDEN-0 (v2 §8.29): the whole organ, one cap — parse/probe/panel/index.
-    ("site/js/organs/garden/*.js", 700, None),
+    # 700 -> 1150: GARDEN-IDE "depth" wave — component tray + keyboard nav
+    # (tray.js), the static connections analyzer (connections.js, has its own
+    # node-only unit test outside this budget), per-component cost chips via
+    # an explicit stub-and-time Measure action (measure.js), and terrain
+    # stage/variant fetching (variants.js) + the probe panel's stage selector
+    # and in-panel connections block. Four genuinely new surfaces landed
+    # together, not bloat on the existing single-probe path (that path's own
+    # tests in garden.mjs stay green — see the commit this shipped with).
+    # Actual at merge: 1099/1150. Raised deliberately, this commit.
+    ("site/js/organs/garden/*.js", 1150, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

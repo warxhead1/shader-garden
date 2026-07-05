@@ -13,6 +13,9 @@ import { compress } from '../../share.js';
 import { parseScene } from './parse.js';
 import { probeAt } from './probe.js';
 import { createProbePanel } from './panel.js';
+import { summarizeConnections } from './connections.js';
+import { createComponentTray } from './tray.js';
+import { loadVariantManifest, loadVariantBody } from './variants.js';
 
 // A pointerup within this many CSS pixels of the matching pointerdown counts
 // as a probe click; anything farther is an orbit drag (both read the same
@@ -51,11 +54,19 @@ export async function mount(ctx) {
 
   const { components } = parseScene(sceneSrc);
   const sceneLines = sceneSrc.split('\n');
+  const connections = summarizeConnections(components); // pristine-source graph, computed once
+  const idOf = (component) => components.indexOf(component) + 1; // probe-encoded id, 1-based, file order
   // GARDEN-IDE: component id -> current session-edited body text. Session-
   // only (no persistence) — populated by the inline "Edit here" editor
-  // (edit.js via panel.js), never by anything else. Absent entry means
-  // "use component.source unchanged."
+  // (edit.js via panel.js) and the stage selector (variants.js bodies also
+  // land here — a variant IS an edit as far as splicing/Revert/measure are
+  // concerned). Absent entry means "use component.source unchanged."
   const editedBodies = new Map();
+  // GARDEN-IDE work item 3: component id -> selected variant id, so a
+  // reopened panel shows the right active stage. Same session-only lifetime
+  // as editedBodies; a manual edit clears the entry (the body is "custom"
+  // from then on, not any named stage).
+  const variantChoices = new Map();
 
   const tuneValues = {};
   for (const c of components) for (const t of c.tunes) tuneValues[t.name] = t.default;
@@ -123,16 +134,37 @@ export async function mount(ctx) {
   });
   onBuild(); // paint the state the in-flight onChange() couldn't see rh for yet
 
+  // Finds the first line inside `component`'s own pristine source where
+  // `symbol` is actually referenced — a connection click scrolls here, not
+  // just to the top of the component. Whole-word match; undefined (no
+  // scroll) if the symbol moved or was never findable as plain text.
+  function findSymbolLine(component, symbol) {
+    const re = new RegExp('\\b' + symbol + '\\b');
+    const lines = component.source.split('\n');
+    const i = lines.findIndex((l) => re.test(l));
+    return i < 0 ? undefined : i + 1;
+  }
+
   // numericId is the probe-encoded id (1-based, file order — probeAt()'s
   // readback) — the shader side reads it back as `uProbeSel` to render a
   // selection seam around whichever component is currently probed.
-  function openProbe(component, numericId) {
+  // `focusLine` (component-LOCAL, from a connections navigation click) scrolls
+  // the read-only source pane there instead of leaving it at the top.
+  let probedComponent = null; // for the tray's hover-highlight to fall back to when the mouse leaves an item
+  function openProbe(component, numericId, focusLine) {
     closePanel({ animate: false }); // fast swap — no exit animation to overlap the new panel's own enter transition
     rh.runtime?.setUniforms({ uProbeSel: numericId });
+    probedComponent = component;
     panel = createProbePanel({
       component,
       body: editedBodies.get(component.id) ?? component.source,
       values: tuneValues,
+      focusLine,
+      connections: connections.get(component.id),
+      onNavigate(targetId, symbol) {
+        const target = components.find((c) => c.id === targetId);
+        if (target) openProbe(target, idOf(target), findSymbolLine(target, symbol));
+      },
       onTuneChange(name, v) {
         tuneValues[name] = v;
         rh.runtime?.setUniforms({ [name]: v });
@@ -145,6 +177,7 @@ export async function mount(ctx) {
           originalBody: component.source,
           recompile(body) {
             const res = recompileWithBody(component, body);
+            variantChoices.delete(component.id); // hand-edited — no named stage describes this body anymore
             onSourceChanged();
             return res;
           },
@@ -154,19 +187,73 @@ export async function mount(ctx) {
         const b64 = await compress(buildSceneSource()).catch(() => null);
         return b64 ? ('#/edit?src=' + b64 + '&lang=glsl&line=' + component.startLine) : null;
       },
-      onClose: () => closePanel(),
+      onClose: () => { probedComponent = null; closePanel(); },
     });
     stage.append(panel.el);
     bus.emit('garden.probe.opened.v1', { component: component.id, route: '/garden' });
+
+    // GARDEN-IDE work item 3: fetch this component's stage manifest (cached
+    // after the first open; a component without variants resolves null and
+    // never shows a row). The panel may have been fast-swapped for another
+    // component by the time the fetch lands — the identity check drops the
+    // stale resolution instead of decorating the wrong panel.
+    const thisPanel = panel;
+    loadVariantManifest(component.id).then((manifest) => {
+      if (!manifest || panel !== thisPanel) return;
+      const activeId = variantChoices.get(component.id)
+        ?? (editedBodies.has(component.id) ? null : manifest.variants.find((v) => v.pristine)?.id);
+      thisPanel.setStages(manifest, activeId, async (variant) => {
+        const nextBody = variant.pristine
+          ? component.source
+          : await loadVariantBody(component.id, variant).catch(() => null);
+        if (nextBody == null) return null;
+        const res = recompileWithBody(component, nextBody);
+        if (!res.ok) return null;
+        if (variant.pristine) variantChoices.delete(component.id);
+        else variantChoices.set(component.id, variant.id);
+        return nextBody;
+      });
+    });
   }
+
+  // GARDEN-IDE work item 1: the component tray — a collapsible rail listing
+  // every parsed component, so components are touchable without pixel-
+  // hunting the canvas. Hover previews the same uProbeSel highlight a canvas
+  // click would set; it falls back to whatever's actually probed (if
+  // anything) once the pointer leaves the item, rather than always to 0.
+  const tray = createComponentTray({
+    components,
+    connections,
+    onHover(component) {
+      rh.runtime?.setUniforms({ uProbeSel: component ? idOf(component) : (probedComponent ? idOf(probedComponent) : 0) });
+    },
+    onSelect(component) { openProbe(component, idOf(component)); },
+    onNavigate(componentId, symbol) {
+      const target = components.find((c) => c.id === componentId);
+      if (target) openProbe(target, idOf(target), findSymbolLine(target, symbol));
+    },
+    // GARDEN-IDE work item 4: measure.js is dynamic-imported here, not at the
+    // top — same lazy discipline as edit.js; an idle #/garden visit never
+    // fetches the measurement machinery.
+    async onMeasure() {
+      if (!rh.runtime) return;
+      const { measureComponentCosts } = await import('./measure.js');
+      const results = await measureComponentCosts({ runtime: rh.runtime, components, editedBodies, buildSceneSource, tuneValues });
+      for (const [id, ms] of results) tray.setCost(id, ms);
+      // measure.js restores the scene itself; the probe highlight uniform
+      // rides through setShader() untouched (webgl2.js persists custom
+      // uniforms), so nothing else to put back here.
+    },
+  });
+  stage.append(tray.el);
 
   let downAt = null;
   function onPointerDown(e) {
-    if (e.target.closest('.probe-panel')) return; // dragging a slider isn't a canvas gesture
+    if (e.target.closest('.probe-panel, .garden-tray')) return; // dragging a slider/tray item isn't a canvas gesture
     downAt = [e.clientX, e.clientY];
   }
   function onPointerUp(e) {
-    if (!downAt || e.target.closest('.probe-panel')) { downAt = null; return; }
+    if (!downAt || e.target.closest('.probe-panel, .garden-tray')) { downAt = null; return; }
     const [dx0, dy0] = downAt;
     downAt = null;
     if (Math.hypot(e.clientX - dx0, e.clientY - dy0) > CLICK_SLOP) return; // an orbit drag, not a click
@@ -184,6 +271,7 @@ export async function mount(ctx) {
     stage.removeEventListener('pointerdown', onPointerDown);
     stage.removeEventListener('pointerup', onPointerUp);
     closePanel({ animate: false });
+    tray.destroy();
     rh.dispose();
     stage.remove();
     topbar.remove();

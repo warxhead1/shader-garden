@@ -60,6 +60,17 @@
       "consumes": ["*"],
       "caps": [],
       "payload": "overlay"
+    },
+    {
+      "id": "dgc-graph",
+      "title": "DGC / producer-consumer (teaching view)",
+      "entry": "js/organs/dgc-graph/index.js",
+      "routes": [],
+      "hotkey": "KeyD+Shift",
+      "emits": [],
+      "consumes": [],
+      "caps": [],
+      "payload": "overlay"
     }
   ]
 }

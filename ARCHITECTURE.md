@@ -837,6 +837,44 @@ The garden organ emits exactly one event of its own, `garden.probe.opened.v1`
 gets for free. Nothing chattier — no per-frame telemetry, no slider-drag
 events.
 
+### Worked example: adding a uniform end-to-end (wave-4 Area D2)
+
+The uniform contract above and the `@tune` convention section are both
+precise but scattered; this is the one place that walks a new custom uniform
+through every layer it has to touch, concretely, start to finish.
+
+1. **GLSL**: declare `uniform float MY_THING;` anywhere in your kernel body.
+   `iResolution`/`iTime`/`iTimeDelta`/`iFrame`/`iMouse` are reserved (the
+   runtime preamble owns them); any other name is yours, unlimited count —
+   GLSL has no bank to run out of. Read it like any other GLSL uniform.
+2. **WGSL**: WGSL has no free-standing named uniform. Add `MY_THING` to the
+   `@sg-uniforms` directive line (`runtime/wrap.js`'s
+   `wgCustomUniformNames()`; any order, engine names first by convention —
+   see `assets/garden/scene.wgsl`'s own directive line) and read it via the
+   accessor `wrap.js` auto-generates for you: `fn MY_THING() -> f32 { return
+   U.custom[i].c; }`. Call `MY_THING()`, never `U.custom[n]` directly — the
+   slot index `i` is an implementation detail the generator picks, not
+   something you should ever hardcode.
+3. **JS**: `runtime.setUniforms({ MY_THING: value })` — the same call on
+   either backend (`GL2Runtime`/`GPURuntime` both implement it), and it
+   persists across `setShader()` recompiles on the same instance (no need to
+   re-set it after every edit).
+4. **If this is a garden `@tune` slider**, not a one-off engine uniform, add
+   the `// @tune MY_THING <min> <max> <default> "<label>"` comment
+   immediately above the GLSL declaration — `parse.js` turns it into a live
+   range-slider row in the probe panel for free, no extra JS.
+5. **Budget**: WGSL's custom bank is finite —
+   `WGSL_CUSTOM_UNIFORM_SLOTS` (`runtime/wrap.js`) caps how many distinct
+   custom names a single WGSL scene can declare across its whole
+   `@sg-uniforms` line. GLSL has no such limit, so on a WGSL-backed scene
+   this bank is the wall you hit first, not GPU uniform-count limits or
+   anything else.
+
+The garden's own live uniform-bank inspector (topbar "Uniforms" toggle,
+`js/organs/garden/uniform-inspector.js`) shows exactly what's currently in
+that bank for the running scene — a live instance of step 2/3 above, not a
+static example.
+
 ## Admission
 
 Third-party shader source (currently: a `#/edit?src=` share link — anything

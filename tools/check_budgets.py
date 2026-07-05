@@ -78,8 +78,20 @@ FILES = [
     # `provenance` block) and the async onCompositionOpened() fallback that
     # populates the roster on the bus re-navigation path. Raised
     # deliberately, this commit.
-    ("site/js/organs/provenance/index.js", 260, None),
+    # 260 -> 280: wave-4 Area D3 — the multi-pass mechanism explainer in
+    # renderComposition(), gated on passes.length > 1 (a single-kernel /s/:id
+    # view via renderKernel() is a separate path, untouched). Actual 268/280.
+    # Raised deliberately, this commit.
+    ("site/js/organs/provenance/index.js", 280, None),
     ("site/js/organs/anatomy/index.js", 300, None),
+    # wave-4 Area E: the DGC/producer-consumer teaching overlay (Shift+D) —
+    # own organ, own budget row, kept out of the garden aggregate (§0.5 of
+    # the wave-4 blueprint: none of the tight existing aggregates had room).
+    # Renders one card per garden component + one directed-edge SVG (mirrors
+    # anatomy's own card/edge substrate) plus the dispatch-order list and the
+    # mandatory teaching disclaimer. Actual 145/250. Raised deliberately,
+    # this commit.
+    ("site/js/organs/dgc-graph/index.js", 250, None),
     # SEED-1 (V2_BLUEPRINT.md item 15): ~450 LOC target / 600 max, excluding
     # the forked runtime (site/js/seed/runtime.js, uncapped here — it's a
     # deliberate byte-for-byte snapshot per ruling C8, not first-party code
@@ -219,7 +231,13 @@ AGGREGATES = [
     # 1/2/3 + blend ramp + localStorage), all in the same file the player
     # controller already lives in. Actual 1611/1650. Raised deliberately,
     # this commit.
-    ("site/js/organs/garden/*.js", 1650, None),
+    # 1650 -> 1740: wave-4 Area D merged on top of §A+B — the new
+    # uniform-inspector.js (live uniform-bank panel, 10 Hz poll,
+    # engine/tunable grouping) plus index.js's topbar toggle button +
+    # mount/cleanup wiring. Each slice was budgeted honestly from its own
+    # worktree (A+B: 1611, D-alone: 1612 over the same 1521 base); this row
+    # is the merged union. Actual 1702/1740. Raised deliberately, this merge.
+    ("site/js/organs/garden/*.js", 1740, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

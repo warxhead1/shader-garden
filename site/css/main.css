@@ -424,6 +424,8 @@ a:hover { text-decoration: underline; }
 /* COMP-3: per-node fitness + the composition-level oracle summary line. */
 .meta-graph-fitness { color: var(--ok); font-variant-numeric: tabular-nums; }
 .meta-oracle { margin: 0 0 0.75rem; font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* D3 (wave-4): multi-pass mechanism explainer — only rendered when passes.length > 1. */
+.meta-graph-explainer { margin: 0 0 0.6rem; font-size: 0.78rem; line-height: 1.5; color: var(--muted); }
 
 /* SUB-6: lineage block. Additive-only — reuses .meta-list's grid via the
    shared class on the lineage <dl>; only the section spacing and the
@@ -531,6 +533,7 @@ a:hover { text-decoration: underline; }
 .uniforms-list { display: flex; flex-direction: column; gap: 0.2rem; }
 .uniforms-row-item { display: flex; justify-content: space-between; gap: 0.6rem; font-variant-numeric: tabular-nums; }
 .uniforms-name { color: var(--muted); }
+.uniforms-doc-link { color: var(--cyan); font-size: 0.72rem; white-space: nowrap; }
 
 .editor-code-pane {
   display: flex;
@@ -765,6 +768,25 @@ a:hover { text-decoration: underline; }
 }
 .garden-hint-pulse { animation: sg-hint-pulse 1.1s ease-in-out 2; }
 
+/* D1 (wave-4): collapsed-by-default live uniform-bank inspector, topbar-toggled */
+.garden-uniform-inspector {
+  position: absolute;
+  right: 1rem;
+  top: 4.2rem;
+  width: min(17rem, calc(50vw - 2rem));
+  max-height: calc(100% - 5.2rem);
+  overflow: auto;
+  background: var(--panel-strong);
+  z-index: 3;
+  padding: 0.7rem;
+}
+.garden-uniform-inspector[hidden] { display: none; }
+.garden-uniform-head { font: 700 0.8rem var(--font); margin-bottom: 0.4rem; }
+.garden-uniform-group { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; margin: 0.5rem 0 0.2rem; }
+.garden-uniform-row { display: flex; justify-content: space-between; gap: 0.6rem; font: 0.78rem var(--mono); padding: 0.1rem 0; }
+.garden-uniform-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.garden-uniform-value { color: var(--cyan); flex-shrink: 0; }
+
 .probe-panel {
   position: absolute;
   right: 1rem;
@@ -776,7 +798,16 @@ a:hover { text-decoration: underline; }
   z-index: 3;
   opacity: 1;
   transform: translateY(0) scale(1);
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition: opacity 0.18s ease, transform 0.18s ease, right 0.18s ease;
+}
+/* D1 (wave-4) mutual avoidance: both panels dock to the right edge — a tall
+   probe panel (long blurb + tunes + source) can reach high enough to
+   collide with the uniform inspector docked above it. When the inspector is
+   open, shift the probe panel left by the inspector's own width (kept in
+   the same `min(17rem, calc(50vw - 2rem))` formula so the two never drift
+   out of sync) + a small gap, so neither ever visually overlaps the other. */
+.viewer-stage:has(.garden-uniform-inspector:not([hidden])) .probe-panel {
+  right: calc(1rem + min(17rem, calc(50vw - 2rem)) + 0.6rem);
 }
 /* Open/close (GARDEN-IDE): .probe-panel-enter is set on creation then
    removed a couple rAFs later (panel.js); .probe-panel-exit is set right
@@ -1067,6 +1098,47 @@ a:hover { text-decoration: underline; }
 }
 .anatomy-layout-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
 .anatomy-layout-msg { color: var(--muted); font-size: 0.82rem; }
+
+/* ================= dgc-graph overlay (wave-4 Area E) ================= */
+/* Shares #region-overlay with anatomy (.anatomy-overlay-region's [hidden]
+   rule already covers this organ too — no second region, no CSS needed for
+   that part) and reuses anatomy's card/edge visual language deliberately. */
+
+.dgc-overlay {
+  position: fixed;
+  inset: 1rem;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.3rem 1.3rem;
+  overflow: auto;
+  /* Legibility fix: .glass's shared --panel (rgba(255,255,255,0.045)) is
+     nearly transparent and reads fine over anatomy's normal dark routes,
+     but this overlay is opened over the BRIGHT garden scene — the thin
+     backdrop let the sky/terrain wash out every text element beneath it.
+     Override with a near-opaque dark backdrop, independent of whatever's
+     rendering underneath (dgc-graph.mjs asserts alpha >= 0.85). */
+  background: rgba(8, 12, 16, 0.92);
+}
+.dgc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
+.dgc-head h2 { margin: 0; }
+.dgc-nongoal { margin: 0 0 0.3rem; font-size: 0.82rem; color: var(--cyan); }
+.dgc-explainer { margin: 0 0 0.5rem; font-size: 0.8rem; line-height: 1.5; color: var(--muted); }
+.dgc-body { display: flex; flex-direction: column; gap: 1.1rem; margin-top: 0.5rem; }
+.dgc-section h3 { margin: 0 0 0.5rem; font-size: 0.95rem; color: var(--muted); }
+
+.dgc-graph-wrap { position: relative; }
+.dgc-edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.dgc-edge { stroke: var(--muted); stroke-width: 1.5; }
+.dgc-edge-const { stroke-dasharray: 4 4; opacity: 0.6; }
+.dgc-edge-call { opacity: 0.85; }
+.dgc-cards { position: relative; display: flex; flex-wrap: wrap; gap: 0.8rem; }
+.dgc-card { min-width: 12rem; padding: 0.6rem 0.8rem; border-radius: 0.6rem; font: 0.78rem/1.5 var(--mono); }
+.dgc-card-id { font-weight: 700; font-size: 0.92rem; }
+.dgc-card-meta, .dgc-card-writes, .dgc-card-reads, .dgc-card-depends { color: var(--muted); }
+
+.dgc-dispatch-note { margin: 0 0 0.5rem; font-size: 0.8rem; color: var(--muted); }
+.dgc-dispatch-list { margin: 0; padding-left: 1.2rem; font: 0.85rem var(--mono); }
 
 /* ================= misc ================= */
 

@@ -223,6 +223,10 @@ export class GL2Runtime {
     Object.assign(this._customUniforms, values);
   }
 
+  // D1 (wave-4): snapshot of the custom-uniform bank for the garden's live
+  // inspector — no GPU round-trip, shallow copy so mutating it is inert.
+  getCustomUniforms() { return { ...this._customUniforms }; }
+
   start() {
     if (this._raf) return;
     this._clock.start();

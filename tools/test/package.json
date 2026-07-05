@@ -15,6 +15,8 @@
     "comp2": "node comp2.mjs",
     "comp3": "node comp3.mjs",
     "anatomy": "node anatomy.mjs",
+    "garden-uniform-inspector": "node garden-uniform-inspector.mjs",
+    "dgc-graph": "node dgc-graph.mjs",
     "layout": "node layout.mjs",
     "lineage": "node lineage.mjs",
     "loader": "node loader.mjs",

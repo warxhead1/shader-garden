@@ -21,6 +21,7 @@ import { summarizeConnections } from './connections.js';
 import { createComponentTray } from './tray.js';
 import { loadVariantManifest, loadVariantBody } from './variants.js';
 import { mountJoystick } from './joystick.js';
+import { createUniformInspector } from './uniform-inspector.js';
 
 // A pointerup within this many CSS pixels of the matching pointerdown counts
 // as a probe click; anything farther is an orbit drag (both read the same
@@ -136,9 +137,13 @@ export async function mount(ctx) {
   let camMode = loadCamMode(), prevCamMode = camMode, camBlend = 1;
   let camBlendStart = 0, camBlendRafId = null;
   camSelect.value = String(camMode);
+  // D1 (wave-4): collapsed-by-default live uniform-bank inspector, toggled
+  // from the topbar next to the quality select — see uniform-inspector.js.
+  const uniformsToggle = el('button', 'btn btn-small btn-ghost garden-uniform-toggle', 'Uniforms');
+  uniformsToggle.type = 'button';
   const hint = el('span', 'garden-hint muted', 'drag to orbit · click anything to probe it');
   if (!localStorage.getItem(HINT_SEEN_KEY)) hint.classList.add('garden-hint-pulse');
-  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, qualitySelect, camSelect, el('div', 'toolbar-spacer'), hint);
+  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, qualitySelect, camSelect, uniformsToggle, el('div', 'toolbar-spacer'), hint);
   root.append(stage, topbar);
 
   let sceneSrc;
@@ -486,6 +491,14 @@ export async function mount(ctx) {
   });
   stage.append(tray.el);
 
+  // D1 (wave-4): mounted after `components` exists (tunable-name lookup) —
+  // getRuntime/getComponents are lazy closures, so mount order vs. `rh`'s
+  // own assignment above doesn't matter.
+  const uniformInspector = createUniformInspector({ getRuntime: () => rh.runtime, getComponents: () => components });
+  stage.append(uniformInspector.el);
+  uniformInspector.start();
+  uniformsToggle.addEventListener('click', () => uniformInspector.toggle());
+
   // Wave-3 §4: the player controller. One shared XZ vector two input
   // sources write into — held keyboard keys below and the touch joystick
   // (joystick.js, mounted further down) — read by a single rAF loop that
@@ -644,6 +657,7 @@ export async function mount(ctx) {
     window.removeEventListener('keyup', onKeyUp);
     if (moveRafId != null) cancelAnimationFrame(moveRafId);
     joystick.destroy();
+    uniformInspector.destroy();
     qualitySelect.removeEventListener('change', onQualityChange);
     camSelect.removeEventListener('change', onCamChange);
     if (camBlendRafId != null) cancelAnimationFrame(camBlendRafId);

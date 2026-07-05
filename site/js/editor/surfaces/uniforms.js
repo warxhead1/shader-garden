@@ -9,6 +9,7 @@
 // the freeze toggle, so it stays deliberately tiny.
 
 import { el } from '../../dom.js';
+import { githubRepoUrl } from '../../share.js';
 
 const POLL_MS = 100; // 10 Hz
 
@@ -37,9 +38,16 @@ export function createUniformsPanel({ getRuntime, getSource, getLanguage }) {
   box.hidden = true;
   const head = el('div', 'uniforms-head');
   const title = el('span', 'muted', 'uniforms in use');
+  // D2 (wave-4): the fixed five are all this panel teaches — a custom
+  // uniform (garden @tune, or a one-off engine uniform) is a different,
+  // consolidated walkthrough, linked rather than duplicated here.
+  const docLink = el('a', 'uniforms-doc-link', 'How do I add one? →');
+  docLink.href = githubRepoUrl() + '/blob/main/ARCHITECTURE.md#worked-example-adding-a-uniform-end-to-end-wave-4-area-d2';
+  docLink.target = '_blank';
+  docLink.rel = 'noopener';
   const freezeBtn = el('button', 'btn btn-small btn-ghost', 'Freeze iMouse');
   freezeBtn.type = 'button';
-  head.append(title, freezeBtn);
+  head.append(title, docLink, freezeBtn);
   const list = el('div', 'uniforms-list');
   box.append(head, list);
 

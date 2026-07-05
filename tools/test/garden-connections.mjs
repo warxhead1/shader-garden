@@ -62,7 +62,11 @@ function edgeSet(edges) {
     'character->terrain:call:sg_terrain_height',   // sg_character_center's ground sample
     'shadow->character:call:sg_bounce_phase',       // sg_shadow_factor reuses the bounce phase
     'shadow->character:const:BOUNCE_HEIGHT',
-    'shadow->character:const:SG_CHAR_XZ',
+    // wave-3: the character's XZ target moved from a component-owned const
+    // (SG_CHAR_XZ) to a top-level engine uniform (uCharPosX/uCharPosZ,
+    // declared alongside uProbe/uProbeSel/SG_QUALITY) — same reason those
+    // three never show up as edges: it's not "owned" by any component body,
+    // so this is no longer a tracked cross-component reference.
     'pond->terrain:call:sg_terrain_height',         // sg_pond_water_y sinks below the heightfield
     'pond->sky:call:sg_sky_color',                  // sg_pond_color's reflection
     'grass->terrain:call:sg_noise2',                // sg_grass_shade's wind wobble

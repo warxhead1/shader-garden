@@ -26,11 +26,15 @@
 // borrows its noise from: terrain height ~0-2 units, camera orbit radius
 // ~3.6 units.
 
-// @sg-uniforms uProbe uProbeSel SG_QUALITY TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS
+// @sg-uniforms uProbe uProbeSel SG_QUALITY uCharPosX uCharPosZ TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS
 
 // uProbe(): 0 = normal shading, 1 = probe frame (encode compId, no lighting)
 // uProbeSel(): 0 = nothing selected, otherwise a COMP_* id — the matching
 // component gets a fresnel rim-light in the normal shading path below.
+// uCharPosX()/uCharPosZ(): world-space XZ target for the character
+// (wave-3 movement controller, js/organs/garden/index.js). Unset slots
+// read back 0 (see wrap.js's custom-uniform bank), so the scene stays
+// pixel-identical to before until something actually calls setUniforms().
 
 const COMP_SKY: f32       = 1.0;
 const COMP_TERRAIN: f32   = 2.0;
@@ -129,7 +133,6 @@ fn sg_capsule(p: vec3f, a: vec3f, b: vec3f, r: f32) -> f32 {
 // @tune BOUNCE_SPEED 0.4 2.5 1.1 "hops per second (roughly)"
 
 const SG_LEG_LEN: f32 = 0.5;
-const SG_CHAR_XZ: vec2f = vec2f(0.0);
 
 // Bounce phase in [0, 1); a parabola of this (4t(1-t)) is the actual
 // trajectory of a ball under constant gravity between two ground contacts —
@@ -201,7 +204,8 @@ fn sg_character_normal(p: vec3f, center: vec3f) -> vec3f {
 fn sg_character_center(time: f32) -> vec3f {
   let t = sg_bounce_phase(time);
   let arc = 4.0 * BOUNCE_HEIGHT() * t * (1.0 - t);
-  return vec3f(SG_CHAR_XZ.x, sg_terrain_height(SG_CHAR_XZ) + SG_LEG_LEN + arc, SG_CHAR_XZ.y);
+  let xz = vec2f(uCharPosX(), uCharPosZ());
+  return vec3f(xz.x, sg_terrain_height(xz) + SG_LEG_LEN + arc, xz.y);
 }
 // @end
 
@@ -212,7 +216,7 @@ fn sg_shadow_factor(xz: vec2f) -> f32 {
   let t = sg_bounce_phase(U.time);
   let arc = 4.0 * BOUNCE_HEIGHT() * t * (1.0 - t);
   let r = max(0.30 * SHADOW_SOFTNESS() * (1.0 + arc * 0.7), 0.05);
-  let d = length(xz - SG_CHAR_XZ);
+  let d = length(xz - vec2f(uCharPosX(), uCharPosZ()));
   let shadow = 1.0 - smoothstep(0.0, r, d);
   return shadow * mix(1.0, 0.35, clamp(arc / max(BOUNCE_HEIGHT(), 0.05), 0.0, 1.0));
 }
@@ -467,7 +471,7 @@ fn mainImage(fragCoord: vec2f) -> vec4f {
   let charCenter = sg_character_center(U.time);
   let pondWaterY = sg_pond_water_y(SG_POND_XZ);
   let rockCenter = sg_rocks_center();
-  let camTarget = mix(vec3f(0.0, sg_terrain_height(SG_CHAR_XZ), 0.0), charCenter, 0.6);
+  let camTarget = mix(vec3f(0.0, sg_terrain_height(vec2f(uCharPosX(), uCharPosZ())), 0.0), charCenter, 0.6);
   let radius = 3.6;
   let ro = camTarget + radius * vec3f(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
   let fwd = normalize(camTarget - ro);

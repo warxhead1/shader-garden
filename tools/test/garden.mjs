@@ -562,6 +562,144 @@ async function openCharacterEditor(page, errors) {
   await page.close();
 }
 
+/* ---------- (m) connection hover highlight (wave-3 §3a) ---------- */
+// COMP_TERRAIN=2 and COMP_ROCKS=8 (scene.glsl's own numeric ids, file order)
+// — ground truth for what uProbeSel should read, not a guessed number.
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+
+  check('(m) opened the probed component (Weathered Rocks) via the tray', await clickTrayItem(page, 'Weathered Rocks'));
+  await sleep(300);
+
+  // Panel connection link: hovering "Uses: Rolling Hills (evolved)" previews
+  // the terrain component (id 2), reverting to the actually-probed rocks
+  // component (id 8) on mouseleave — mirrors tray.js's own hover fallback.
+  const connLink = await page.evaluateHandle(() =>
+    [...document.querySelectorAll('.probe-conn-link')].find((n) => n.textContent === 'Rolling Hills (evolved)'));
+  await connLink.asElement().hover();
+  await sleep(200);
+  const previewedTerrain = await page.evaluate(() => window.__uniformCalls.some((c) => c.uProbeSel === 2));
+  check('(m) hovering a panel connection link sets uProbeSel to the target id', previewedTerrain);
+
+  await page.hover('.probe-title'); // moves the real pointer off the link, onto unrelated panel chrome
+  await sleep(200);
+  const revertedToRocks = await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1].uProbeSel === 8);
+  check('(m) mouseleave reverts uProbeSel to the actually-probed component (Weathered Rocks, id 8)', revertedToRocks,
+    'last=' + JSON.stringify(await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1])));
+
+  // Tray connection pill: same path, driven from .garden-tray-conn-link
+  // instead of the panel's own block.
+  const trayLink = await page.evaluateHandle(() =>
+    [...document.querySelectorAll('.garden-tray-conn-link')].find((n) => n.textContent === 'Rolling Hills (evolved)'));
+  await trayLink.asElement().hover();
+  await sleep(200);
+  const previewedTerrainFromTray = await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1].uProbeSel === 2);
+  check('(m) hovering a tray connection pill sets uProbeSel to the target id', previewedTerrainFromTray);
+
+  await page.hover('.probe-title');
+  await sleep(200);
+  const revertedAgain = await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1].uProbeSel === 8);
+  check('(m) leaving the tray connection pill reverts uProbeSel the same way', revertedAgain);
+
+  check('(m) no console errors across the connection-hover flow', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (n) probing discoverability: hover-preview + first-visit hint (wave-3 §1) ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  // Wipes whatever prior tests in this run left behind, before boot.js/
+  // index.js ever reads it — same "first visit" the real flag is meant to
+  // gate, not an artifact of test ordering sharing one browser profile.
+  await page.evaluateOnNewDocument(() => localStorage.removeItem('sg.garden.hintSeen'));
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+
+  const pulsingBefore = await page.$eval('.garden-hint', (el) => el.classList.contains('garden-hint-pulse'));
+  check('(n) the hint pulses on a first visit (no localStorage flag yet)', pulsingBefore);
+
+  // Hover-preview: settle over the character (same 720,380 oracle every
+  // other check in this file uses) without clicking — the ~120ms settle
+  // timer should still fire an async probe and preview uProbeSel.
+  await page.mouse.move(720, 380);
+  await sleep(500);
+  const previewedWithoutClick = await page.evaluate(() => window.__uniformCalls.some((c) => 'uProbeSel' in c && c.uProbeSel === 3));
+  check('(n) hovering (no click) previews the character via uProbeSel', previewedWithoutClick);
+
+  // hover-then-click still opens the right panel — the settle-hover preview
+  // must never interfere with the existing click-to-probe path.
+  await page.mouse.click(720, 380);
+  await sleep(300);
+  const title = await page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
+  check('(n) hover-then-click still opens the right panel', title === 'Bouncing Figure', 'got ' + title);
+
+  const hintSeenFlag = await page.evaluate(() => localStorage.getItem('sg.garden.hintSeen'));
+  check('(n) hintSeen flag is set after the first open', hintSeenFlag === '1');
+  const pulsingAfter = await page.$eval('.garden-hint', (el) => el.classList.contains('garden-hint-pulse'));
+  check('(n) the pulse class is removed once the hint has retired', !pulsingAfter);
+
+  check('(n) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (o) modify-flow fixes: edited chip + backend-switch toast (wave-3 §2) ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await forceTextareaFallback(page);
+  await openCharacterEditor(page, errors);
+
+  const meta = await characterComponent(page);
+  await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.6'));
+  await sleep(900);
+
+  await page.click('.probe-panel .collapse-btn'); // animated close
+  await sleep(400);
+  check('(o) the panel actually closed', (await page.$('.probe-panel')) === null);
+
+  const editedVisible = await page.$$eval('.garden-tray-item', (items) => {
+    const item = items.find((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() === 'Bouncing Figure');
+    const chip = item?.querySelector('.garden-tray-edited-chip');
+    return chip ? !chip.hidden : null;
+  });
+  check('(o) the tray marks the edited component with a visible "edited" chip after the panel closes', editedVisible === true, 'got ' + editedVisible);
+
+  // Edit tracking is per-component, not global — nothing else should light up.
+  const otherEdited = await page.$$eval('.garden-tray-item', (items) => items
+    .filter((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() !== 'Bouncing Figure')
+    .some((it) => !it.querySelector('.garden-tray-edited-chip').hidden));
+  check('(o) no other component is marked edited', otherEdited === false);
+
+  check('(o) no console errors across the edit-then-close flow', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+// F1's backend-switch toast can't be exercised at runtime in this harness:
+// puppeteer's SwiftShader-backed Chrome never reports a WebGPU adapter
+// (browser.mjs's own header: "the WebGPU path does NOT execute headless"),
+// so rh.backend can never actually BE 'webgpu' here to trip the branch —
+// same limitation every other WebGPU-only row in the launch checklist has.
+// Static regression net instead: the toast call must live inside the exact
+// same conditional the rebuild call already does.
+{
+  const page = await browser.newPage();
+  await gotoSafe(page, BASE + '/index.html', { waitUntil: 'networkidle2', timeout: 20000 });
+  const src = await page.evaluate(() => fetch('js/organs/garden/index.js').then((r) => r.text()));
+  const gated = /if \(rh\.backend === 'webgpu'\) \{\s*await rh\.rebuild\(\{ prefer: 'webgl2' \}\);\s*toast\('Switched to WebGL2 for live editing'\);/.test(src);
+  check('(o) the WebGL2-switch toast is gated on the same condition as the rebuild (WebGPU untestable headless)', gated);
+  await page.close();
+}
+
 await browser.close();
 server.kill();
 console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');

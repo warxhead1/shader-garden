@@ -203,7 +203,17 @@ AGGREGATES = [
     # Wave-2 merge: the IDE spine (above), PERF-2's quality selector/HUD,
     # and GARDEN-1's dual-source mount + async probe land in this organ
     # together — each fit alone, the union doesn't. Actual 1253/1300.
-    ("site/js/organs/garden/*.js", 1300, None),
+    # 1300 -> 1400: wave-3 core (work items C/A/B landed together — connection-
+    # pill hover, settle-hover probe + first-visit hint, and the modify-flow
+    # toast/edited-chip/hierarchy fixes; D touched only scene.glsl/scene.wgsl,
+    # budget-free, and F touched boot.js/dom.js, outside this row). Actual
+    # 1358/1400. Raised deliberately, this commit.
+    # 1400 -> 1570: wave-3 item E, the player controller — index.js's shared
+    # move-vector rAF integrator (held-key state, the idle-exiting loop,
+    # play-radius clamp, cleanup wiring) plus the new joystick.js (mobile
+    # touch nub, gated on matchMedia('(pointer: coarse)'), feeding the same
+    # vector). Actual 1521/1570. Raised deliberately, this commit.
+    ("site/js/organs/garden/*.js", 1570, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

@@ -34,6 +34,13 @@ uniform float uProbeSel; // 0 = nothing selected, otherwise a COMP_* id — the 
 // loop's own iteration math.
 uniform float SG_QUALITY;
 
+// World-space XZ target for the character (wave-3 movement controller,
+// js/organs/garden/index.js). Unset uniforms default to 0 in GLSL, so the
+// scene stays pixel-identical to before until something actually calls
+// setUniforms({ uCharPosX, uCharPosZ }).
+uniform float uCharPosX;
+uniform float uCharPosZ;
+
 const float COMP_SKY       = 1.0;
 const float COMP_TERRAIN   = 2.0;
 const float COMP_CHARACTER = 3.0;
@@ -131,7 +138,6 @@ uniform float BOUNCE_HEIGHT;
 uniform float BOUNCE_SPEED;
 
 const float SG_LEG_LEN = 0.5;
-const vec2  SG_CHAR_XZ = vec2(0.0);
 
 // Bounce phase in [0, 1); a parabola of this (4t(1-t)) is the actual
 // trajectory of a ball under constant gravity between two ground contacts —
@@ -203,7 +209,8 @@ vec3 sg_character_normal(vec3 p, vec3 center) {
 vec3 sg_character_center(float time) {
   float t = sg_bounce_phase(time);
   float arc = 4.0 * BOUNCE_HEIGHT * t * (1.0 - t);
-  return vec3(SG_CHAR_XZ.x, sg_terrain_height(SG_CHAR_XZ) + SG_LEG_LEN + arc, SG_CHAR_XZ.y);
+  vec2 xz = vec2(uCharPosX, uCharPosZ);
+  return vec3(xz.x, sg_terrain_height(xz) + SG_LEG_LEN + arc, xz.y);
 }
 // @end
 
@@ -215,7 +222,7 @@ float sg_shadow_factor(vec2 xz) {
   float t = sg_bounce_phase(iTime);
   float arc = 4.0 * BOUNCE_HEIGHT * t * (1.0 - t);
   float r = max(0.30 * SHADOW_SOFTNESS * (1.0 + arc * 0.7), 0.05);
-  float d = length(xz - SG_CHAR_XZ);
+  float d = length(xz - vec2(uCharPosX, uCharPosZ));
   float shadow = 1.0 - smoothstep(0.0, r, d);
   return shadow * mix(1.0, 0.35, clamp(arc / max(BOUNCE_HEIGHT, 0.05), 0.0, 1.0));
 }
@@ -476,7 +483,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec3 charCenter = sg_character_center(iTime);
   float pondWaterY = sg_pond_water_y(SG_POND_XZ);
   vec3 rockCenter = sg_rocks_center();
-  vec3 target = mix(vec3(0.0, sg_terrain_height(SG_CHAR_XZ), 0.0), charCenter, 0.6);
+  vec3 target = mix(vec3(0.0, sg_terrain_height(vec2(uCharPosX, uCharPosZ)), 0.0), charCenter, 0.6);
   float radius = 3.6;
   vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
   vec3 fwd = normalize(target - ro);

@@ -562,6 +562,55 @@ async function openCharacterEditor(page, errors) {
   await page.close();
 }
 
+/* ---------- (m) connection hover highlight (wave-3 §3a) ---------- */
+// COMP_TERRAIN=2 and COMP_ROCKS=8 (scene.glsl's own numeric ids, file order)
+// — ground truth for what uProbeSel should read, not a guessed number.
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+
+  check('(m) opened the probed component (Weathered Rocks) via the tray', await clickTrayItem(page, 'Weathered Rocks'));
+  await sleep(300);
+
+  // Panel connection link: hovering "Uses: Rolling Hills (evolved)" previews
+  // the terrain component (id 2), reverting to the actually-probed rocks
+  // component (id 8) on mouseleave — mirrors tray.js's own hover fallback.
+  const connLink = await page.evaluateHandle(() =>
+    [...document.querySelectorAll('.probe-conn-link')].find((n) => n.textContent === 'Rolling Hills (evolved)'));
+  await connLink.asElement().hover();
+  await sleep(200);
+  const previewedTerrain = await page.evaluate(() => window.__uniformCalls.some((c) => c.uProbeSel === 2));
+  check('(m) hovering a panel connection link sets uProbeSel to the target id', previewedTerrain);
+
+  await page.hover('.probe-title'); // moves the real pointer off the link, onto unrelated panel chrome
+  await sleep(200);
+  const revertedToRocks = await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1].uProbeSel === 8);
+  check('(m) mouseleave reverts uProbeSel to the actually-probed component (Weathered Rocks, id 8)', revertedToRocks,
+    'last=' + JSON.stringify(await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1])));
+
+  // Tray connection pill: same path, driven from .garden-tray-conn-link
+  // instead of the panel's own block.
+  const trayLink = await page.evaluateHandle(() =>
+    [...document.querySelectorAll('.garden-tray-conn-link')].find((n) => n.textContent === 'Rolling Hills (evolved)'));
+  await trayLink.asElement().hover();
+  await sleep(200);
+  const previewedTerrainFromTray = await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1].uProbeSel === 2);
+  check('(m) hovering a tray connection pill sets uProbeSel to the target id', previewedTerrainFromTray);
+
+  await page.hover('.probe-title');
+  await sleep(200);
+  const revertedAgain = await page.evaluate(() => window.__uniformCalls[window.__uniformCalls.length - 1].uProbeSel === 8);
+  check('(m) leaving the tray connection pill reverts uProbeSel the same way', revertedAgain);
+
+  check('(m) no console errors across the connection-hover flow', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
 await browser.close();
 server.kill();
 console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');

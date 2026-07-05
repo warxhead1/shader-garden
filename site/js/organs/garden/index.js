@@ -248,6 +248,18 @@ export async function mount(ctx) {
   // `focusLine` (component-LOCAL, from a connections navigation click) scrolls
   // the read-only source pane there instead of leaving it at the top.
   let probedComponent = null; // for the tray's hover-highlight to fall back to when the mouse leaves an item
+
+  // Wave-3 §3a: hovering a connection pill (panel.js's .probe-conn-link or
+  // tray.js's .garden-tray-conn-link) previews the SAME uProbeSel rim-light
+  // the tray's own item-hover uses below — resolved by id, since a
+  // connection target is a {id,name,symbols} snapshot from connections.js,
+  // not a reference into `components` (idOf() needs the latter). Falls back
+  // to whatever's actually probed (or 0) on mouseleave, identical fallback.
+  function onHoverConnection(componentId) {
+    const target = componentId ? components.find((c) => c.id === componentId) : null;
+    rh.runtime?.setUniforms({ uProbeSel: target ? idOf(target) : (probedComponent ? idOf(probedComponent) : 0) });
+  }
+
   function openProbe(component, numericId, focusLine) {
     closePanel({ animate: false }); // fast swap — no exit animation to overlap the new panel's own enter transition
     rh.runtime?.setUniforms({ uProbeSel: numericId });
@@ -262,6 +274,7 @@ export async function mount(ctx) {
         const target = components.find((c) => c.id === targetId);
         if (target) openProbe(target, idOf(target), findSymbolLine(target, symbol));
       },
+      onHoverConnection,
       onTuneChange(name, v) {
         tuneValues[name] = v;
         rh.runtime?.setUniforms({ [name]: v });
@@ -343,6 +356,7 @@ export async function mount(ctx) {
       const target = components.find((c) => c.id === componentId);
       if (target) openProbe(target, idOf(target), findSymbolLine(target, symbol));
     },
+    onHoverConnection,
     // GARDEN-IDE work item 4: measure.js is dynamic-imported here, not at the
     // top — same lazy discipline as edit.js; an idle #/garden visit never
     // fetches the measurement machinery.

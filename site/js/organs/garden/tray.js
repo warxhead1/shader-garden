@@ -17,11 +17,12 @@ import { el } from '../../dom.js';
  *   onHover: (component: object|null) => void,           // null clears the canvas highlight
  *   onSelect: (component: object) => void,                 // click / Enter — opens the probe panel
  *   onNavigate: (componentId: string, symbol: string) => void,  // clicking a connection pill
+ *   onHoverConnection: (componentId: string|null) => void,  // wave-3 §3a — hovering a connection pill
  *   onMeasure: () => Promise<void>,                        // work item 4 — explicit, never automatic
  * }}
  * @returns {{ el: HTMLElement, setCost: (id: string, ms: number|null) => void, destroy: () => void }}
  */
-export function createComponentTray({ components, connections, onHover, onSelect, onNavigate, onMeasure }) {
+export function createComponentTray({ components, connections, onHover, onSelect, onNavigate, onHoverConnection, onMeasure }) {
   const tray = el('aside', 'garden-tray glass');
   const head = el('div', 'garden-tray-head');
   const toggle = el('button', 'garden-tray-toggle', '☰ Components');
@@ -74,6 +75,10 @@ export function createComponentTray({ components, connections, onHover, onSelect
           a.href = '#';
           a.title = t.symbols.join(', ');
           a.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); onNavigate(t.id, t.symbols[0]); });
+          // wave-3 §3a: same uProbeSel rim-light the item's own hover uses
+          // above — released back to whatever's actually probed on leave.
+          a.addEventListener('mouseenter', () => onHoverConnection(t.id));
+          a.addEventListener('mouseleave', () => onHoverConnection(null));
           span.append(a);
           if (j < targets.length - 1) span.append(', ');
         });

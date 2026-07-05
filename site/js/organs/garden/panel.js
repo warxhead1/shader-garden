@@ -27,6 +27,7 @@ const EXIT_MS = 260;
  *   focusLine?: number,                // GARDEN-IDE work item 2 — scroll the read-only source here on open
  *   connections?: { uses: Array<{id,name,symbols}>, usedBy: Array<{id,name,symbols}> },
  *   onNavigate?: (componentId: string, symbol: string) => void,  // opens that component's panel, scrolled to `symbol`
+ *   onHoverConnection?: (componentId: string|null) => void,  // wave-3 §3a — mouseenter/leave on a connection link
  * }}
  * @returns {{
  *   el: HTMLElement,
@@ -39,7 +40,7 @@ const EXIT_MS = 260;
  *   destroy: (opts?: { animate?: boolean }) => void,
  * }}
  */
-export function createProbePanel({ component, body, values, onTuneChange, onEditHere, getEditorHref, onClose, focusLine, connections, onNavigate }) {
+export function createProbePanel({ component, body, values, onTuneChange, onEditHere, getEditorHref, onClose, focusLine, connections, onNavigate, onHoverConnection }) {
   const panel = el('aside', 'probe-panel glass probe-panel-enter');
 
   const head = el('div', 'probe-head');
@@ -67,6 +68,11 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
         a.href = '#';
         a.title = t.symbols.join(', ');
         a.addEventListener('click', (e) => { e.preventDefault(); onNavigate?.(t.id, t.symbols[0]); });
+        // wave-3 §3a: reuses the same uProbeSel rim-light the tray's own
+        // item-hover already drives — released back to whatever's actually
+        // probed (or nothing) on mouseleave, index.js's job, not ours.
+        a.addEventListener('mouseenter', () => onHoverConnection?.(t.id));
+        a.addEventListener('mouseleave', () => onHoverConnection?.(null));
         p.append(a);
         if (i < targets.length - 1) p.append(', ');
       });

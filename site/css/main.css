@@ -756,6 +756,15 @@ a:hover { text-decoration: underline; }
 .garden-hint { font-size: 0.82rem; }
 .garden-canvas { cursor: crosshair; } /* probing feels intentional, not incidental */
 
+/* Wave-3 §1c: unobtrusive first-visit hint — two soft pulses, then index.js
+   removes the class for good (localStorage sg.garden.hintSeen) the moment a
+   visitor actually probes something, not on a fixed timer. */
+@keyframes sg-hint-pulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; text-shadow: 0 0 8px rgba(34, 211, 238, 0.55); }
+}
+.garden-hint-pulse { animation: sg-hint-pulse 1.1s ease-in-out 2; }
+
 .probe-panel {
   position: absolute;
   right: 1rem;

@@ -611,6 +611,47 @@ async function openCharacterEditor(page, errors) {
   await page.close();
 }
 
+/* ---------- (n) probing discoverability: hover-preview + first-visit hint (wave-3 §1) ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  // Wipes whatever prior tests in this run left behind, before boot.js/
+  // index.js ever reads it — same "first visit" the real flag is meant to
+  // gate, not an artifact of test ordering sharing one browser profile.
+  await page.evaluateOnNewDocument(() => localStorage.removeItem('sg.garden.hintSeen'));
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  await sleep(2000);
+
+  const pulsingBefore = await page.$eval('.garden-hint', (el) => el.classList.contains('garden-hint-pulse'));
+  check('(n) the hint pulses on a first visit (no localStorage flag yet)', pulsingBefore);
+
+  // Hover-preview: settle over the character (same 720,380 oracle every
+  // other check in this file uses) without clicking — the ~120ms settle
+  // timer should still fire an async probe and preview uProbeSel.
+  await page.mouse.move(720, 380);
+  await sleep(500);
+  const previewedWithoutClick = await page.evaluate(() => window.__uniformCalls.some((c) => 'uProbeSel' in c && c.uProbeSel === 3));
+  check('(n) hovering (no click) previews the character via uProbeSel', previewedWithoutClick);
+
+  // hover-then-click still opens the right panel — the settle-hover preview
+  // must never interfere with the existing click-to-probe path.
+  await page.mouse.click(720, 380);
+  await sleep(300);
+  const title = await page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
+  check('(n) hover-then-click still opens the right panel', title === 'Bouncing Figure', 'got ' + title);
+
+  const hintSeenFlag = await page.evaluate(() => localStorage.getItem('sg.garden.hintSeen'));
+  check('(n) hintSeen flag is set after the first open', hintSeenFlag === '1');
+  const pulsingAfter = await page.$eval('.garden-hint', (el) => el.classList.contains('garden-hint-pulse'));
+  check('(n) the pulse class is removed once the hint has retired', !pulsingAfter);
+
+  check('(n) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
 await browser.close();
 server.kill();
 console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');

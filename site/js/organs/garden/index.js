@@ -27,6 +27,17 @@ import { loadVariantManifest, loadVariantBody } from './variants.js';
 // this turns out to be).
 const CLICK_SLOP = 6;
 
+// Wave-3 §1b: how long the pointer must sit still before a hover-preview
+// probe fires — a native-tooltip-style "settle, then probe" delay, not a
+// per-mousemove cost (probeAt does two full renderOnce() calls on WebGL2, or
+// an async texture-copy+mapAsync round-trip on WebGpu).
+const HOVER_SETTLE_MS = 120;
+
+// Wave-3 §1c: gates the first-visit hint pulse — same localStorage-flag
+// pattern as QUALITY_KEY above, self-retiring the moment a visitor actually
+// probes something rather than on a fixed timer.
+const HINT_SEEN_KEY = 'sg.garden.hintSeen';
+
 // PERF-2: the garden is the single heaviest kernel on the site — an
 // 88-step raymarch evaluating 4 distance fields per step, full-screen, every
 // frame. The site-wide DEFAULT_DPR_CAP (1.5, webgl2.js) still leaves this
@@ -78,6 +89,7 @@ export async function mount(ctx) {
   let qualityMode = loadQualityMode();
   qualitySelect.value = qualityMode;
   const hint = el('span', 'garden-hint muted', 'drag to orbit · click anything to probe it');
+  if (!localStorage.getItem(HINT_SEEN_KEY)) hint.classList.add('garden-hint-pulse');
   topbar.append(backLink, backendBadge, fpsBadge, perfBadge, qualitySelect, el('div', 'toolbar-spacer'), hint);
   root.append(stage, topbar);
 
@@ -311,6 +323,12 @@ export async function mount(ctx) {
     });
     stage.append(panel.el);
     bus.emit('garden.probe.opened.v1', { component: component.id, route: '/garden' });
+    // Wave-3 §1c: self-retires the hint the moment a visitor actually probes
+    // something — not on a fixed timer.
+    if (!localStorage.getItem(HINT_SEEN_KEY)) {
+      localStorage.setItem(HINT_SEEN_KEY, '1');
+      hint.classList.remove('garden-hint-pulse');
+    }
 
     // GARDEN-IDE work item 3: fetch this component's stage manifest (cached
     // after the first open; a component without variants resolves null and
@@ -405,9 +423,38 @@ export async function mount(ctx) {
   stage.addEventListener('pointerdown', onPointerDown);
   stage.addEventListener('pointerup', onPointerUp);
 
+  // Wave-3 §1b: hover-preview via a throttled probe, reusing the existing
+  // hover->uProbeSel path (onHoverConnection resolves an id, falling back to
+  // whatever's actually probed). Settles on ~120ms of no movement rather
+  // than firing on every raw pointermove — probeAt is real GPU work.
+  let hoverTimer = null;
+  function onPointerMove(e) {
+    if (e.target.closest('.probe-panel, .garden-tray')) return;
+    clearTimeout(hoverTimer);
+    const { clientX, clientY } = e;
+    hoverTimer = setTimeout(async () => {
+      if (!rh.runtime) return;
+      const runtime = rh.runtime;
+      const canvas = runtime.canvas;
+      const [px, py] = canvasPixelCoords(canvas, clientX, clientY);
+      const id = await probeAt(runtime, px, py);
+      if (rh.runtime !== runtime) return; // same stale-async guard as onPointerUp
+      onHoverConnection(id != null && id >= 1 && id <= components.length ? components[id - 1].id : null);
+    }, HOVER_SETTLE_MS);
+  }
+  function onPointerLeave() {
+    clearTimeout(hoverTimer);
+    onHoverConnection(null);
+  }
+  stage.addEventListener('pointermove', onPointerMove);
+  stage.addEventListener('pointerleave', onPointerLeave);
+
   return function cleanup() {
     stage.removeEventListener('pointerdown', onPointerDown);
     stage.removeEventListener('pointerup', onPointerUp);
+    stage.removeEventListener('pointermove', onPointerMove);
+    stage.removeEventListener('pointerleave', onPointerLeave);
+    clearTimeout(hoverTimer);
     qualitySelect.removeEventListener('change', onQualityChange);
     closePanel({ animate: false });
     tray.destroy();

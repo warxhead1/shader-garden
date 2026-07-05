@@ -2,6 +2,9 @@
   "biome-rolling-hills": "assets/wgsl/biome-rolling-hills.wgsl",
   "biome-river-valley": "assets/wgsl/biome-river-valley.wgsl",
   "biome-mountain-peaks": "assets/wgsl/biome-mountain-peaks.wgsl",
+  "biome-volcanic-plateau": "assets/wgsl/biome-volcanic-plateau.wgsl",
+  "biome-eroded-badlands": "assets/wgsl/biome-eroded-badlands.wgsl",
+  "phase-allen-cahn-demo": "assets/wgsl/phase-allen-cahn-demo.wgsl",
   "vault-462c7d48": "assets/wgsl/vault-462c7d48.wgsl",
   "vault-91e87215": "assets/wgsl/vault-91e87215.wgsl",
   "vault-1289d510": "assets/wgsl/vault-1289d510.wgsl",
@@ -11,5 +14,8 @@
   "vault-34039f7b": "assets/wgsl/vault-34039f7b.wgsl",
   "vault-61990596": "assets/wgsl/vault-61990596.wgsl",
   "vault-394ae1b5": "assets/wgsl/vault-394ae1b5.wgsl",
-  "vault-994278f5": "assets/wgsl/vault-994278f5.wgsl"
+  "vault-994278f5": "assets/wgsl/vault-994278f5.wgsl",
+  "vault-a2974d11": "assets/wgsl/vault-a2974d11.wgsl",
+  "vault-d2fbd4e9": "assets/wgsl/vault-d2fbd4e9.wgsl",
+  "vault-d8432ca0": "assets/wgsl/vault-d8432ca0.wgsl"
 }

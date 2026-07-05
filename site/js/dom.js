@@ -10,6 +10,14 @@ export function el(tag, className, text) {
 
 export function clear(node) { node.replaceChildren(); }
 
+// input/textarea/contenteditable guard — isContentEditable also catches
+// CodeMirror's `.cm-content` div, so the editor never loses a keystroke.
+// Shared by boot.js's Shift+A overlay hotkey and any other keydown listener
+// that must not steal input from focused editable chrome.
+export function inEditableChrome(t) {
+  return !!t && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
+}
+
 // Formats a renderScale multiplier like "0.75x" / "1x" (never "1.00x").
 function fmtScale(s) {
   return (Math.round(s * 100) / 100).toString() + 'x';

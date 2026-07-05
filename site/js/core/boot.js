@@ -11,6 +11,7 @@ import { initLoader } from './loader.js';
 import { bindSource, on } from './bus.js';
 import { loadData } from './registry.js';
 import { layoutCtx } from './layout.js';
+import { inEditableChrome } from '../dom.js';
 
 // Footer / hero GitHub links (placeholder repo substituted at deploy).
 for (const link of document.querySelectorAll('a[data-repo-link]')) {
@@ -46,12 +47,6 @@ function hotkeyMatches(hotkey, e) {
   const parts = hotkey.split('+');
   const held = (mod) => parts.includes(mod) === e[mod.toLowerCase() + 'Key'];
   return parts.includes(e.code) && held('Shift') && held('Ctrl') && held('Alt') && held('Meta');
-}
-
-// input/textarea/contenteditable guard — isContentEditable also catches
-// CodeMirror's `.cm-content` div, so the editor never loses a keystroke.
-function inEditableChrome(t) {
-  return !!t && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
 }
 
 async function toggleOverlay(organ) {

@@ -20,6 +20,7 @@ import { createProbePanel } from './panel.js';
 import { summarizeConnections } from './connections.js';
 import { createComponentTray } from './tray.js';
 import { loadVariantManifest, loadVariantBody } from './variants.js';
+import { attributionFor } from './attribution.js';
 import { mountJoystick } from './joystick.js';
 
 // A pointerup within this many CSS pixels of the matching pointerdown counts
@@ -94,6 +95,10 @@ export async function mount(ctx) {
   const topbar = el('div', 'viewer-topbar');
   const backLink = el('a', 'btn btn-small btn-ghost', '← gallery');
   backLink.setAttribute('href', '#/');
+  // Wave-4 §3: makes "where did this come from" discoverable from inside
+  // the garden itself, not just from a probe panel someone happens to open.
+  const attribLink = el('a', 'btn btn-small btn-ghost', 'Attribution');
+  attribLink.setAttribute('href', '#/attribution');
   const backendBadge = el('span', 'badge badge-backend', '…');
   const fpsBadge = el('span', 'badge badge-fps', '');
   const perfBadge = el('span', 'badge badge-perf', ''); // PERF-2: honest ms/frame (EMA) · renderScale, always on
@@ -108,7 +113,7 @@ export async function mount(ctx) {
   qualitySelect.value = qualityMode;
   const hint = el('span', 'garden-hint muted', 'drag to orbit · click anything to probe it');
   if (!localStorage.getItem(HINT_SEEN_KEY)) hint.classList.add('garden-hint-pulse');
-  topbar.append(backLink, backendBadge, fpsBadge, perfBadge, qualitySelect, el('div', 'toolbar-spacer'), hint);
+  topbar.append(backLink, attribLink, backendBadge, fpsBadge, perfBadge, qualitySelect, el('div', 'toolbar-spacer'), hint);
   root.append(stage, topbar);
 
   let sceneSrc;
@@ -360,12 +365,21 @@ export async function mount(ctx) {
       hint.classList.remove('garden-hint-pulse');
     }
 
+    // Wave-4 §3: fetch this component's attribution (cached after the first
+    // open, same identity-check discipline as the variant-manifest fetch
+    // below — a fast-swapped panel must never get another component's
+    // Origin block).
+    const thisPanel = panel;
+    attributionFor(component.id).then((attribution) => {
+      if (panel !== thisPanel) return;
+      thisPanel.setOrigin(attribution);
+    });
+
     // GARDEN-IDE work item 3: fetch this component's stage manifest (cached
     // after the first open; a component without variants resolves null and
     // never shows a row). The panel may have been fast-swapped for another
     // component by the time the fetch lands — the identity check drops the
     // stale resolution instead of decorating the wrong panel.
-    const thisPanel = panel;
     loadVariantManifest(component.id).then((manifest) => {
       if (!manifest || panel !== thisPanel) return;
       const activeId = variantChoices.get(component.id)

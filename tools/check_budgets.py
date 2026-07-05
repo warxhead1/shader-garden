@@ -142,6 +142,18 @@ FILES = [
     # baked by tools/bake_compositions.py from tools/fixtures/
     # composition_ready/ — same "typical" 2 KiB cap as the COMP-1 demo.
     ("site/assets/compositions/phase-into-mountain-peaks.json", None, 2048),
+    # Wave-4 §3 (attribution): hand-curated {kind, sourceKernel, note} per
+    # garden component/variant — small structured data, same order as
+    # organs.json's own 4 KiB row. Actual 747B.
+    ("site/assets/garden/attribution.json", None, 4096),
+    # Wave-4 §3: baked by tools/bake_garden_attribution.py — one {sha, date}
+    # per component, never hand-edited. Actual 912B.
+    ("site/assets/garden/attribution-commits.json", None, 8192),
+    # Wave-4 §3: the /attribution organ — own cap, kept OUT of the garden
+    # aggregate below since it's a standalone route, not garden-mount code
+    # (see §0.5's headroom problem for why new surfaces get their own row
+    # rather than piling into a tight aggregate). Actual 176/200.
+    ("site/js/organs/attribution/index.js", 200, None),
 ]
 
 AGGREGATES = [
@@ -213,7 +225,12 @@ AGGREGATES = [
     # play-radius clamp, cleanup wiring) plus the new joystick.js (mobile
     # touch nub, gated on matchMedia('(pointer: coarse)'), feeding the same
     # vector). Actual 1521/1570. Raised deliberately, this commit.
-    ("site/js/organs/garden/*.js", 1570, None),
+    # 1570 -> 1650: wave-4 §3 (attribution) — the new attribution.js
+    # (fetch+cache, ~70 LOC), panel.js's Origin block (setOrigin + anchor,
+    # ~40 LOC), and index.js's wiring (attribution.js import, the topbar
+    # link, the per-probe fetch+render call, ~15 LOC). Actual 1643/1650.
+    # Raised deliberately, this commit.
+    ("site/js/organs/garden/*.js", 1650, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

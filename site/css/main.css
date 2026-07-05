@@ -424,6 +424,8 @@ a:hover { text-decoration: underline; }
 /* COMP-3: per-node fitness + the composition-level oracle summary line. */
 .meta-graph-fitness { color: var(--ok); font-variant-numeric: tabular-nums; }
 .meta-oracle { margin: 0 0 0.75rem; font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* D3 (wave-4): multi-pass mechanism explainer — only rendered when passes.length > 1. */
+.meta-graph-explainer { margin: 0 0 0.6rem; font-size: 0.78rem; line-height: 1.5; color: var(--muted); }
 
 /* SUB-6: lineage block. Additive-only — reuses .meta-list's grid via the
    shared class on the lineage <dl>; only the section spacing and the
@@ -531,6 +533,7 @@ a:hover { text-decoration: underline; }
 .uniforms-list { display: flex; flex-direction: column; gap: 0.2rem; }
 .uniforms-row-item { display: flex; justify-content: space-between; gap: 0.6rem; font-variant-numeric: tabular-nums; }
 .uniforms-name { color: var(--muted); }
+.uniforms-doc-link { color: var(--cyan); font-size: 0.72rem; white-space: nowrap; }
 
 .editor-code-pane {
   display: flex;
@@ -764,6 +767,25 @@ a:hover { text-decoration: underline; }
   50% { opacity: 1; text-shadow: 0 0 8px rgba(34, 211, 238, 0.55); }
 }
 .garden-hint-pulse { animation: sg-hint-pulse 1.1s ease-in-out 2; }
+
+/* D1 (wave-4): collapsed-by-default live uniform-bank inspector, topbar-toggled */
+.garden-uniform-inspector {
+  position: absolute;
+  right: 1rem;
+  top: 4.2rem;
+  width: min(17rem, calc(50vw - 2rem));
+  max-height: calc(100% - 5.2rem);
+  overflow: auto;
+  background: var(--panel-strong);
+  z-index: 3;
+  padding: 0.7rem;
+}
+.garden-uniform-inspector[hidden] { display: none; }
+.garden-uniform-head { font: 700 0.8rem var(--font); margin-bottom: 0.4rem; }
+.garden-uniform-group { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; margin: 0.5rem 0 0.2rem; }
+.garden-uniform-row { display: flex; justify-content: space-between; gap: 0.6rem; font: 0.78rem var(--mono); padding: 0.1rem 0; }
+.garden-uniform-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.garden-uniform-value { color: var(--cyan); flex-shrink: 0; }
 
 .probe-panel {
   position: absolute;

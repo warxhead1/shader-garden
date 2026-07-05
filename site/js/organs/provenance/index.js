@@ -190,6 +190,20 @@ export async function mount(ctx) {
         'composition oracle: fit ' + Number(prov.composition_fitness).toFixed(4) +
         ' (gate ' + prov.gate_threshold + ', ' + (prov.ready ? 'ready' : 'not ready') + ')'));
     }
+    // D3 (wave-4): the pass graph above already renders the WHAT (nodes,
+    // targets, channels) — this explains the MECHANISM, once, only when
+    // there's actually more than one pass to make sense of (a single-pass
+    // kernel's own /s/:id view never grows this text: renderKernel() is a
+    // wholly separate path from this function).
+    const passes = data.passes || [];
+    if (passes.length > 1) {
+      panelBody.append(el('p', 'meta-graph-explainer',
+        `This composition renders in ${passes.length} ordered passes. Each ` +
+        'pass\'s target is either an offscreen buffer or the screen; ' +
+        'channels lists which earlier buffers this pass can sample via ' +
+        'iChannel0.., exactly like iResolution/iTime. "feedback" means a ' +
+        'pass reads its own previous frame — used for accumulation effects.'));
+    }
     const list = el('ol', 'meta-graph');
     (data.passes || []).forEach((p) => {
       const item = el('li', 'meta-graph-node');

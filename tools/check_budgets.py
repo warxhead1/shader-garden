@@ -78,7 +78,11 @@ FILES = [
     # `provenance` block) and the async onCompositionOpened() fallback that
     # populates the roster on the bus re-navigation path. Raised
     # deliberately, this commit.
-    ("site/js/organs/provenance/index.js", 260, None),
+    # 260 -> 280: wave-4 Area D3 — the multi-pass mechanism explainer in
+    # renderComposition(), gated on passes.length > 1 (a single-kernel /s/:id
+    # view via renderKernel() is a separate path, untouched). Actual 268/280.
+    # Raised deliberately, this commit.
+    ("site/js/organs/provenance/index.js", 280, None),
     ("site/js/organs/anatomy/index.js", 300, None),
     # SEED-1 (V2_BLUEPRINT.md item 15): ~450 LOC target / 600 max, excluding
     # the forked runtime (site/js/seed/runtime.js, uncapped here — it's a
@@ -213,7 +217,13 @@ AGGREGATES = [
     # play-radius clamp, cleanup wiring) plus the new joystick.js (mobile
     # touch nub, gated on matchMedia('(pointer: coarse)'), feeding the same
     # vector). Actual 1521/1570. Raised deliberately, this commit.
-    ("site/js/organs/garden/*.js", 1570, None),
+    # 1570 -> 1630: wave-4 Area D — the new uniform-inspector.js (live
+    # uniform-bank panel, 10 Hz poll, engine/tunable grouping) plus index.js's
+    # topbar toggle button + mount/cleanup wiring. This is Area D's slice
+    # only (landed from its own worktree ahead of Areas A/B/C); the aggregate
+    # will need a further honest raise once those land too. Actual 1612/1630.
+    # Raised deliberately, this commit.
+    ("site/js/organs/garden/*.js", 1630, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

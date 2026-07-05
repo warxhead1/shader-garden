@@ -286,6 +286,10 @@ export class GPURuntime {
     Object.assign(this._customValues, values);
   }
 
+  // D1 (wave-4): snapshot of the custom-uniform bank for the garden's live
+  // inspector — no GPU round-trip, shallow copy so mutating it is inert.
+  getCustomUniforms() { return { ...this._customValues }; }
+
   /**
    * @param {Record<string, number>} [customOverride] - GARDEN-1 readPixel():
    *   custom-uniform values for THIS write only, never merged into

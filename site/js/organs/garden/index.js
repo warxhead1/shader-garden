@@ -11,7 +11,7 @@
 
 import { centerNotice } from '../../core/loader.js';
 import { runtimeHost } from '../../core/runtime-host.js';
-import { el } from '../../dom.js';
+import { el, inEditableChrome } from '../../dom.js';
 import { canvasPixelCoords } from '../../runtime/uniforms.js';
 import { compress, toast } from '../../share.js';
 import { parseScene } from './parse.js';
@@ -20,6 +20,7 @@ import { createProbePanel } from './panel.js';
 import { summarizeConnections } from './connections.js';
 import { createComponentTray } from './tray.js';
 import { loadVariantManifest, loadVariantBody } from './variants.js';
+import { mountJoystick } from './joystick.js';
 
 // A pointerup within this many CSS pixels of the matching pointerdown counts
 // as a probe click; anything farther is an orbit drag (both read the same
@@ -37,6 +38,23 @@ const HOVER_SETTLE_MS = 120;
 // pattern as QUALITY_KEY above, self-retiring the moment a visitor actually
 // probes something rather than on a fixed timer.
 const HINT_SEEN_KEY = 'sg.garden.hintSeen';
+
+// Wave-3 §4: the player-controller's shared movement constants. PLAY_RADIUS
+// keeps the figure inside the camera's own 3.6-unit orbit radius (blueprint
+// §4) so it never crosses into terrain the camera can't frame well — no
+// pond/rock collision by design (scene.glsl's SG_POND_XZ/SG_ROCK_XZ have no
+// JS-side reader; duplicating them here would be exactly the kind of
+// hand-honored, driftable invariant this codebase's own comments flag as a
+// risk — see the blueprint's own §4 rationale). MOVE_SPEED crosses the
+// 6.4-unit play diameter in ~3.5s, tuned to read as a walk, not a teleport.
+const PLAY_RADIUS = 3.2;
+const MOVE_SPEED = 1.8;
+const MOVE_KEYS = new Map([
+  ['w', [0, -1]], ['arrowup', [0, -1]],
+  ['s', [0, 1]], ['arrowdown', [0, 1]],
+  ['a', [-1, 0]], ['arrowleft', [-1, 0]],
+  ['d', [1, 0]], ['arrowright', [1, 0]],
+]);
 
 // PERF-2: the garden is the single heaviest kernel on the site — an
 // 88-step raymarch evaluating 4 distance fields per step, full-screen, every
@@ -407,6 +425,73 @@ export async function mount(ctx) {
   });
   stage.append(tray.el);
 
+  // Wave-3 §4: the player controller. One shared XZ vector two input
+  // sources write into — held keyboard keys below and the touch joystick
+  // (joystick.js, mounted further down) — read by a single rAF loop that
+  // idle-exits the instant both sources go neutral (near-free: zero cost
+  // while nobody's moving the figure). uCharPosX/uCharPosZ already drive
+  // terrain-height clamping and 60%-follow camera targeting shader-side
+  // (scene.glsl/scene.wgsl, wave-3 item D) — this only has to accumulate
+  // and clamp a target, never read anything back from the GPU.
+  let charX = 0, charZ = 0;
+  const heldKeys = new Set();
+  const joystickVec = { x: 0, z: 0 };
+  let moveRafId = null;
+  let moveLastT = 0;
+
+  function currentMoveVector() {
+    let dx = joystickVec.x, dz = joystickVec.z;
+    for (const k of heldKeys) {
+      const v = MOVE_KEYS.get(k);
+      if (v) { dx += v[0]; dz += v[1]; }
+    }
+    const mag = Math.hypot(dx, dz);
+    return mag > 1 ? [dx / mag, dz / mag] : [dx, dz]; // normalize so diagonals aren't faster
+  }
+
+  function moveFrame(t) {
+    const dt = moveLastT ? (t - moveLastT) / 1000 : 0;
+    moveLastT = t;
+    const [dx, dz] = currentMoveVector();
+    if (!dx && !dz) { moveRafId = null; moveLastT = 0; return; } // idle-exit: no next frame scheduled
+    let nx = charX + dx * MOVE_SPEED * dt;
+    let nz = charZ + dz * MOVE_SPEED * dt;
+    const d = Math.hypot(nx, nz);
+    if (d > PLAY_RADIUS) { nx = (nx / d) * PLAY_RADIUS; nz = (nz / d) * PLAY_RADIUS; }
+    if (nx !== charX || nz !== charZ) {
+      charX = nx; charZ = nz;
+      rh.runtime?.setUniforms({ uCharPosX: charX, uCharPosZ: charZ }); // only on actual change
+    }
+    moveRafId = requestAnimationFrame(moveFrame);
+  }
+  function ensureMoveLoop() {
+    if (moveRafId == null) { moveLastT = 0; moveRafId = requestAnimationFrame(moveFrame); }
+  }
+
+  function onKeyDown(e) {
+    const k = e.key.toLowerCase();
+    if (!MOVE_KEYS.has(k)) return;
+    // Guards the tune sliders (plain <input type="range">) and the mini-
+    // editor (CodeMirror's isContentEditable div) the same way boot.js's
+    // Shift+A hotkey does — see dom.js's inEditableChrome header.
+    if (inEditableChrome(document.activeElement)) return;
+    e.preventDefault(); // WASD/arrows must not scroll the page while steering the figure
+    heldKeys.add(k);
+    ensureMoveLoop();
+  }
+  function onKeyUp(e) { heldKeys.delete(e.key.toLowerCase()); }
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+
+  // Wave-3 §4 (mobile): the same shared vector, fed from a touch joystick
+  // instead of held keys — joystick.js gates its own construction on
+  // matchMedia('(pointer: coarse)') and no-ops (an inert destroy()) on
+  // desktop, so this call is unconditional here.
+  const joystick = mountJoystick(stage, (x, z) => {
+    joystickVec.x = x; joystickVec.z = z;
+    if (x || z) ensureMoveLoop();
+  });
+
   let downAt = null;
   function onPointerDown(e) {
     if (e.target.closest('.probe-panel, .garden-tray')) return; // dragging a slider/tray item isn't a canvas gesture
@@ -467,6 +552,10 @@ export async function mount(ctx) {
     stage.removeEventListener('pointermove', onPointerMove);
     stage.removeEventListener('pointerleave', onPointerLeave);
     clearTimeout(hoverTimer);
+    window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('keyup', onKeyUp);
+    if (moveRafId != null) cancelAnimationFrame(moveRafId);
+    joystick.destroy();
     qualitySelect.removeEventListener('change', onQualityChange);
     closePanel({ animate: false });
     tray.destroy();

@@ -5,15 +5,26 @@
   "description": "Headless verification harness for the site. Not deployed; the site itself stays dependency-free.",
   "scripts": {
     "smoke": "node smoke.mjs",
-    "admission-sac": "node admission-sac.mjs",
-    "shots": "node shots.mjs",
-    "perf": "node perf.mjs",
-    "comp0": "node comp0.mjs",
+    "garden": "node garden.mjs",
     "garden-connections": "node garden-connections.mjs",
-    "layout": "node layout.mjs",
-    "loader": "node loader.mjs",
+    "garden-movement": "node garden-movement.mjs",
+    "garden-perf": "node garden-perf.mjs",
+    "garden-wgsl-parity": "node garden-wgsl-parity.mjs",
+    "comp0": "node comp0.mjs",
+    "comp1": "node comp1.mjs",
+    "comp2": "node comp2.mjs",
+    "comp3": "node comp3.mjs",
     "anatomy": "node anatomy.mjs",
-    "garden-wgsl-parity": "node garden-wgsl-parity.mjs"
+    "layout": "node layout.mjs",
+    "lineage": "node lineage.mjs",
+    "loader": "node loader.mjs",
+    "seed": "node seed.mjs",
+    "admission-sac": "node admission-sac.mjs",
+    "runtime-host-loss": "node runtime-host-loss.mjs",
+    "servesite": "node servesite.mjs",
+    "perf": "node perf.mjs",
+    "webgpu-live": "node webgpu-live.mjs",
+    "shots": "node shots.mjs"
   },
   "dependencies": {
     "puppeteer-core": "25.3.0"

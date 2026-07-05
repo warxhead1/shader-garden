@@ -16,6 +16,12 @@
 //       production gate is exercised directly rather than bypassed with a
 //       test-only hook.
 //   (e) no console errors across the whole session.
+//   (f) wave-4 §A: holding a direction produces monotonically increasing
+//       uCharGaitDist writes; releasing freezes it within one idle-exit
+//       frame (no further writes trickle in after release).
+//   (g) wave-4 §A: uCharYaw never jumps by more than TURN_RATE*dt in a
+//       single frame across a scripted 180-degree direction reversal (no
+//       instant snap-to).
 // Prints "all-PASS" and exits 0 only if every check passed.
 import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
 
@@ -213,6 +219,90 @@ async function armSpies(page) {
   const nub = await page.$('.garden-joystick');
   check('(e) no joystick DOM on a regular (fine-pointer) desktop viewport', nub === null);
   check('(e) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (f) wave-4 §A: uCharGaitDist monotonic while held, frozen after release ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+
+  await page.keyboard.down('d');
+  await sleep(600);
+  await page.keyboard.up('d');
+  await sleep(150); // idle-exit window, same as (a)
+
+  const gaitCalls = await page.evaluate(() => window.__uniformCalls.filter((c) => 'uCharGaitDist' in c).map((c) => c.uCharGaitDist));
+  check('(f) holding a direction produced multiple uCharGaitDist writes', gaitCalls.length >= 2, 'got ' + gaitCalls.length);
+  const nonDecreasing = gaitCalls.every((v, i) => i === 0 || v >= gaitCalls[i - 1]);
+  check('(f) uCharGaitDist is monotonically non-decreasing while held', nonDecreasing, JSON.stringify(gaitCalls));
+
+  await page.evaluate(() => { window.__uniformCalls.length = 0; }); // isolate the post-release window
+  await sleep(400); // outlives the idle-exit frame with margin
+  const afterRelease = await page.evaluate(() => window.__uniformCalls.filter((c) => 'uCharGaitDist' in c).map((c) => c.uCharGaitDist));
+  check('(f) uCharGaitDist stops advancing once released (frozen, no further writes)', afterRelease.length === 0, JSON.stringify(afterRelease));
+
+  check('(f) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (g) wave-4 §A: uCharYaw never snaps across a 180-degree reversal ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await page.evaluateOnNewDocument(() => {
+    window.__yawCalls = [];
+    import('./js/runtime/webgl2.js').then((mod) => {
+      const orig = mod.GL2Runtime.prototype.setUniforms;
+      mod.GL2Runtime.prototype.setUniforms = function (values) {
+        if ('uCharYaw' in values) window.__yawCalls.push({ yaw: values.uCharYaw, t: performance.now() });
+        return orig.call(this, values);
+      };
+    }).catch(() => {});
+  });
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  page.on('pageerror', (e) => errors.push(String(e)));
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+
+  // Face +X, then reverse straight to -X — a 180-degree heading flip across
+  // one input transition. Both phases (and the transition between them) land
+  // in the SAME __yawCalls array, checked as one continuous sequence below.
+  await page.keyboard.down('d');
+  await sleep(500);
+  await page.keyboard.up('d');
+  await sleep(200); // idle-exit gap — no calls land here, see the dt note below
+  await page.keyboard.down('a');
+  await sleep(500);
+  await page.keyboard.up('a');
+  await sleep(150);
+
+  const yawCalls = await page.evaluate(() => window.__yawCalls);
+  check('(g) the session produced multiple uCharYaw writes', yawCalls.length >= 4, 'got ' + yawCalls.length);
+  // TURN_RATE = 10 rad/s (index.js). Consecutive PUSHED calls are almost
+  // always one real animation frame apart, EXCEPT across the idle-exit gap
+  // above (no calls land during it) — that pair's dt is correspondingly
+  // large, so its bound scales up too; it can never falsely trip this check,
+  // it just isn't a meaningful sample. 25% slack over the theoretical
+  // per-frame bound for rAF jitter/GC pauses under headless SwiftShader,
+  // the same generosity this repo's own PERF harnesses give real-GPU timing.
+  const TURN_RATE = 10, SLACK = 1.25;
+  let worstOvershoot = 0;
+  for (let i = 1; i < yawCalls.length; i++) {
+    const dt = (yawCalls[i].t - yawCalls[i - 1].t) / 1000;
+    if (dt <= 0) continue;
+    const delta = Math.abs(yawCalls[i].yaw - yawCalls[i - 1].yaw);
+    worstOvershoot = Math.max(worstOvershoot, delta - TURN_RATE * dt * SLACK);
+  }
+  check('(g) uCharYaw never jumps more than TURN_RATE*dt in a single frame (no instant snap)',
+    worstOvershoot <= 0, `worst overshoot=${worstOvershoot.toFixed(4)} rad`);
+
+  check('(g) no console errors', errors.length === 0, errors.join(' | '));
   await page.close();
 }
 

@@ -213,7 +213,13 @@ AGGREGATES = [
     # play-radius clamp, cleanup wiring) plus the new joystick.js (mobile
     # touch nub, gated on matchMedia('(pointer: coarse)'), feeding the same
     # vector). Actual 1521/1570. Raised deliberately, this commit.
-    ("site/js/organs/garden/*.js", 1570, None),
+    # 1570 -> 1650: wave-4 §A+B — index.js grows the shared move-vector
+    # integrator with charYaw/gaitDist (bounded turn-rate + distance
+    # accumulator) and adds the camera-mode state machine (select + keyboard
+    # 1/2/3 + blend ramp + localStorage), all in the same file the player
+    # controller already lives in. Actual 1611/1650. Raised deliberately,
+    # this commit.
+    ("site/js/organs/garden/*.js", 1650, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

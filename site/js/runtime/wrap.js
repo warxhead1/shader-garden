@@ -30,14 +30,19 @@ export function wrapGlsl(src, channels = 0) {
   return GLSL_PRELUDE + decl + src + GLSL_EPILOGUE;
 }
 
-// `custom` is a fixed 16-float bank (4 vec4f, so it satisfies WGSL's 16-byte
+// `custom` is a fixed 32-float bank (8 vec4f, so it satisfies WGSL's 16-byte
 // array-of-vec4 alignment for free) backing GL2Runtime.setUniforms()'s WGSL
 // equivalent — see wgCustomUniformNames()/genCustomAccessors() below. WGSL
 // has no free-standing named-uniform binding model (no getUniformLocation-
 // by-name equivalent), so a kernel can't just declare `uniform float NAME;`
 // the way GLSL does; this bank + the `@sg-uniforms` directive is the WGSL
 // substitute — see ARCHITECTURE.md § "The Garden" for the convention.
-export const WGSL_CUSTOM_UNIFORM_SLOTS = 16;
+// 16 -> 32: wave-4 (locomotion §A + camera modes §B) adds 6 new engine
+// uniforms (uCharYaw, uCharGaitDist, uCharSpeed01, uCamMode, uPrevCamMode,
+// uCamBlend) — one deliberate doubling landed with the first of them
+// (uCharYaw), not incrementally per-uniform, so the bank only ever moves
+// once for this wave.
+export const WGSL_CUSTOM_UNIFORM_SLOTS = 32;
 
 export const WGSL_PRELUDE = `struct SGUniforms {
   res: vec4f,
@@ -46,7 +51,7 @@ export const WGSL_PRELUDE = `struct SGUniforms {
   dt: f32,
   frame: f32,
   _pad: f32,
-  custom: array<vec4f, 4>,
+  custom: array<vec4f, 8>,
 }
 @group(0) @binding(0) var<uniform> U: SGUniforms;
 

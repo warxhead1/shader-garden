@@ -41,6 +41,28 @@ uniform float SG_QUALITY;
 uniform float uCharPosX;
 uniform float uCharPosZ;
 
+// Wave-4 §A: distance-driven locomotion, JS-integrated in moveFrame()
+// (js/organs/garden/index.js). uCharSpeed01 is 0 whenever the character is
+// idle (unset uniforms default to 0), and every new motion term below is
+// mixed on uCharSpeed01 — so a fresh mount, or any frame nobody is holding
+// a direction, reproduces today's exact idle math bit-for-bit.
+uniform float uCharYaw;       // facing angle, radians — turned toward the movement heading
+                               // at a bounded rate JS-side, never snapped
+uniform float uCharGaitDist;  // world-space distance accumulated ONLY while moving —
+                               // freezes for free the instant moveFrame() idle-exits
+uniform float uCharSpeed01;   // 0..1, current move-vector magnitude
+
+// Wave-4 §B: camera mode (0=Orbit, 1=Follow, 2=Overview) — see sg_cam_orbit/
+// sg_cam_follow/sg_cam_overview near mainImage below. uCamBlend ramps 0..1
+// JS-side over a fixed duration on every mode switch, cross-fading between
+// whatever uPrevCamMode's camera would be THIS instant and the new mode —
+// see mainImage's camA/camB blend. Default boot state (0/0, blend either
+// value) always resolves to Orbit on both sides of the blend, so this can
+// never perturb the pre-wave-4 render.
+uniform float uCamMode;
+uniform float uPrevCamMode;
+uniform float uCamBlend;
+
 const float COMP_SKY       = 1.0;
 const float COMP_TERRAIN   = 2.0;
 const float COMP_CHARACTER = 3.0;
@@ -144,6 +166,13 @@ const float SG_LEG_LEN = 0.5;
 // the same curve, not an approximation of one.
 float sg_bounce_phase(float time) { return fract(time * BOUNCE_SPEED * 0.5); }
 
+// Wave-4 §A: gait phase is DISTANCE-driven, not wall-clock — it stops
+// advancing the instant uCharGaitDist stops growing, which happens
+// automatically the frame moveFrame() (index.js) idle-exits.
+const float SG_STRIDE_LEN = 1.1; // world units per full gait cycle — tuned so a
+                                  // MOVE_SPEED=1.8 walk reads as ~1.6 steps/sec
+float sg_gait_phase() { return fract(uCharGaitDist / SG_STRIDE_LEN); }
+
 // center is precomputed once per pixel by the caller (mainImage) — it only
 // depends on iTime, not on p, and this is called once per raymarch step;
 // recomputing sg_terrain_height() (a 5-octave noise loop) that often was
@@ -175,20 +204,78 @@ float sg_character_sdf(vec3 p, vec3 center) {
   float scaleXZ = mix(1.20, 0.90, (1.0 - phase) * 0.5);
 
   vec3 lp = p - center;
+
+  // Wave-4 §A: byte-identical fast path when nothing is moving (the ACTUAL
+  // idle signal moveFrame() maintains, not just "speed is near zero") — the
+  // EXACT pre-wave-4 expression tree, untouched. Mathematically the
+  // animated path below reduces to the same thing at these values (yaw
+  // rotation is an identity at 0, every new term is 0-multiplied), but
+  // empirically that reduction cost a handful of pixels a single ULP
+  // (garden-locomotion-parity.mjs test (1) caught it — almost certainly the
+  // compiler re-associating cos(uCharYaw)/sin(uCharYaw) into the chain
+  // differently than the old code's absence of them). Literal code
+  // preservation sidesteps the question of WHY entirely.
+  if (uCharYaw == 0.0 && uCharGaitDist == 0.0 && uCharSpeed01 <= 0.0) {
+    lp.y /= scaleY;
+    lp.xz /= scaleXZ;
+
+    float k = 0.075;
+    float d = sg_capsule(lp, vec3(0.0, -0.04, 0.0), vec3(0.0, 0.28, 0.0), 0.165);
+    d = sg_smin(d, sg_sphere(lp, vec3(0.0, 0.50, 0.0), 0.155), k);
+
+    float swing = sin(iTime * 3.1);
+    d = sg_smin(d, sg_capsule(lp, vec3( 0.24, 0.24, 0.0), vec3( 0.27 + 0.07 * swing, -0.12,  0.13 * swing), 0.062), k);
+    d = sg_smin(d, sg_capsule(lp, vec3(-0.24, 0.24, 0.0), vec3(-0.27 - 0.07 * swing, -0.12, -0.13 * swing), 0.062), k);
+
+    float tuck = smoothstep(0.12, 0.5, min(t, 1.0 - t)); // legs draw up mid-flight, extend for landing
+    d = sg_smin(d, sg_capsule(lp, vec3( 0.11, -0.04, 0.0), vec3( 0.11, -0.5 + 0.24 * tuck,  0.07 * tuck), 0.075), k);
+    d = sg_smin(d, sg_capsule(lp, vec3(-0.11, -0.04, 0.0), vec3(-0.11, -0.5 + 0.24 * tuck, -0.07 * tuck), 0.075), k);
+
+    return d * min(scaleY, scaleXZ);
+  }
+
+  // Yaw the whole figure to face uCharYaw before any limb math runs, so
+  // every primitive below turns together.
+  float cy = cos(uCharYaw), sy = sin(uCharYaw);
+  lp.xz = vec2(lp.x * cy - lp.z * sy, lp.x * sy + lp.z * cy);
+
+  // gp: 0..2pi over one full stride, see sg_gait_phase(). A second, smaller
+  // vertical bob at 2x gait frequency (one dip per footstep, not per
+  // stride) rides underneath the hop's own squash/stretch below.
+  float gp = sg_gait_phase() * 6.28318530718;
+  float gaitBob = sin(gp * 2.0) * 0.03 * uCharSpeed01;
+  lp.y -= gaitBob;
+
   lp.y /= scaleY;
   lp.xz /= scaleXZ;
 
   float k = 0.075; // one smooth-min radius for the whole figure's "softness"
-  float d = sg_capsule(lp, vec3(0.0, -0.04, 0.0), vec3(0.0, 0.28, 0.0), 0.165);
-  d = sg_smin(d, sg_sphere(lp, vec3(0.0, 0.50, 0.0), 0.155), k);
 
-  float swing = sin(iTime * 3.1);
-  d = sg_smin(d, sg_capsule(lp, vec3( 0.24, 0.24, 0.0), vec3( 0.27 + 0.07 * swing, -0.12,  0.13 * swing), 0.062), k);
-  d = sg_smin(d, sg_capsule(lp, vec3(-0.24, 0.24, 0.0), vec3(-0.27 - 0.07 * swing, -0.12, -0.13 * swing), 0.062), k);
+  // Lean the upper body into the direction of travel; legs stay in the
+  // unleaned `lp` below so they read as planted, not swaying with the torso.
+  float lean = uCharSpeed01 * 0.12; // radians, ~7 deg max
+  vec3 lu = lp;
+  lu.yz += vec2(-lean * lp.z, lean * lp.y);
 
+  float d = sg_capsule(lu, vec3(0.0, -0.04, 0.0), vec3(0.0, 0.28, 0.0), 0.165);
+  d = sg_smin(d, sg_sphere(lu, vec3(0.0, 0.50, 0.0), 0.155), k);
+
+  // Arm swing: at rest this branch is never reached (see the fast path
+  // above) — the walk formula (gait-phase-driven) takes over as speed
+  // increases, mixed FROM the same pre-wave-4 idle formula so a start/stop
+  // is a blend, not a pop.
+  float swing = mix(sin(iTime * 3.1), sin(gp) * 0.55, uCharSpeed01);
+  d = sg_smin(d, sg_capsule(lu, vec3( 0.24, 0.24, 0.0), vec3( 0.27 + 0.07 * swing, -0.12,  0.13 * swing), 0.062), k);
+  d = sg_smin(d, sg_capsule(lu, vec3(-0.24, 0.24, 0.0), vec3(-0.27 - 0.07 * swing, -0.12, -0.13 * swing), 0.062), k);
+
+  // Legs go counter-phase to the arms (gp + pi). The existing bounce-driven
+  // tuck (mid-flight knee lift) is untouched; legSwing adds a horizontal
+  // front/back stride offset on top of it — the two read as orthogonal
+  // motions (swing forward/back AND lift at the knee).
   float tuck = smoothstep(0.12, 0.5, min(t, 1.0 - t)); // legs draw up mid-flight, extend for landing
-  d = sg_smin(d, sg_capsule(lp, vec3( 0.11, -0.04, 0.0), vec3( 0.11, -0.5 + 0.24 * tuck,  0.07 * tuck), 0.075), k);
-  d = sg_smin(d, sg_capsule(lp, vec3(-0.11, -0.04, 0.0), vec3(-0.11, -0.5 + 0.24 * tuck, -0.07 * tuck), 0.075), k);
+  float legSwing = mix(0.0, sin(gp + 3.14159265) * 0.35, uCharSpeed01);
+  d = sg_smin(d, sg_capsule(lp, vec3( 0.11, -0.04, 0.0), vec3( 0.11 + legSwing * 0.15, -0.5 + 0.24 * tuck,  0.07 * tuck - legSwing * 0.10), 0.075), k);
+  d = sg_smin(d, sg_capsule(lp, vec3(-0.11, -0.04, 0.0), vec3(-0.11 - legSwing * 0.15, -0.5 + 0.24 * tuck, -0.07 * tuck + legSwing * 0.10), 0.075), k);
 
   return d * min(scaleY, scaleXZ); // conservative distance correction for the non-uniform scale
 }
@@ -445,6 +532,45 @@ SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCen
   return SGHit((t0 + t1) * 0.5, COMP_TERRAIN);
 }
 
+// Wave-4 §B: three camera modes, each computing its own (target, ro) pair —
+// mainImage picks the active pair via uCamMode and cross-blends toward it
+// using uCamBlend (see mainImage below). Computed entirely in-shader: no
+// per-mode JS math beyond picking the mode and driving the transition
+// blend, so movement/camera both stay uniform-only on the hot path.
+struct SGCam { vec3 target; vec3 ro; };
+
+// Orbit: today's exact camera, extracted verbatim — byte-identical output,
+// just relocated into its own function so Follow/Overview share the same
+// calling convention.
+SGCam sg_cam_orbit(vec3 charCenter, float dragYaw, float dragPitch) {
+  float yaw = iTime * 0.07 + dragYaw;
+  float pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
+  vec3 target = mix(vec3(0.0, sg_terrain_height(vec2(uCharPosX, uCharPosZ)), 0.0), charCenter, 0.6);
+  float radius = 3.6;
+  vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(target, ro);
+}
+
+// Follow: third-person, framed behind the character along ITS OWN facing
+// (uCharYaw, wave-4 §A) — not an independent auto-drift. dragYaw/dragPitch
+// still let the visitor look around without losing the follow framing.
+SGCam sg_cam_follow(vec3 charCenter, float dragYaw, float dragPitch) {
+  float yaw = uCharYaw + 3.14159265 + dragYaw; // "behind" = opposite the character's facing
+  float pitch = clamp(0.30 + dragPitch, 0.08, 0.9);
+  vec3 target = charCenter + vec3(0.0, 0.15, 0.0); // aim slightly above center (chest/head), not feet
+  float radius = 2.0; // tighter than orbit's 3.6 — reads as "with" the character, not surveying
+  vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  return SGCam(target, ro);
+}
+
+// Overview: high, architectural, looking down at the whole diorama's
+// centroid (not the character specifically) — for probing/connections.
+SGCam sg_cam_overview(vec3 charCenter) {
+  vec3 target = vec3(1.2, 0.3, 0.7); // diorama's rough centroid (between pond/rocks/character range)
+  vec3 ro = target + vec3(0.0, 4.2, 0.001); // near-top-down; tiny z avoids a degenerate up-vector
+  return SGCam(target, ro);
+}
+
 vec3 sg_light(vec3 pos, vec3 rd, vec3 N, vec3 matCol, float t) {
   vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));
   vec3 sky_col = vec3(0.45, 0.62, 0.90);
@@ -467,25 +593,53 @@ vec3 sg_light(vec3 pos, vec3 rd, vec3 N, vec3 matCol, float t) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
 
-  // Orbit camera: slow auto-drift plus a drag offset read straight off
-  // iMouse — the drag offset persists after release (iMouse.xy keeps the
-  // last drag position even once z/w go negative), so letting go of the
-  // mouse leaves the view where you put it.
+  // Drag offset read straight off iMouse, shared by every camera mode — the
+  // drag offset persists after release (iMouse.xy keeps the last drag
+  // position even once z/w go negative), so letting go of the mouse leaves
+  // the view where you put it.
   float dragYaw = 0.0, dragPitch = 0.0;
   if (iMouse.z != 0.0) {
     float pressX = abs(iMouse.z), pressY = abs(iMouse.w);
     dragYaw   = -(iMouse.x - pressX) * 0.006;
     dragPitch =  (iMouse.y - pressY) * 0.006;
   }
-  float yaw = iTime * 0.07 + dragYaw;
-  float pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
 
   vec3 charCenter = sg_character_center(iTime);
   float pondWaterY = sg_pond_water_y(SG_POND_XZ);
   vec3 rockCenter = sg_rocks_center();
-  vec3 target = mix(vec3(0.0, sg_terrain_height(vec2(uCharPosX, uCharPosZ)), 0.0), charCenter, 0.6);
-  float radius = 3.6;
-  vec3 ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+
+  // Wave-4 §B: uCamMode picks the active camera; uCamBlend cross-fades FROM
+  // whatever uPrevCamMode's camera would be AT THIS INSTANT to the new mode
+  // — both computed fresh every frame (cheap: each is ~5 flops, not a
+  // march), so no stored "previous camera" state is needed beyond the
+  // uPrevCamMode uniform itself.
+  vec3 target, ro;
+  if (uCamMode < 0.5 && uPrevCamMode < 0.5) {
+    // Byte-identical fast path for the default/settled-Orbit state: the
+    // EXACT pre-wave-4 expression, untouched — verified empirically
+    // (garden-locomotion-parity.mjs test (1)) that routing this case
+    // through sg_cam_orbit()+mix() instead, while mathematically the same,
+    // let the compiler re-associate a handful of pixels by a single ULP.
+    // Literal code preservation sidesteps that risk entirely rather than
+    // trusting float re-association to be harmless.
+    float yaw = iTime * 0.07 + dragYaw;
+    float pitch = clamp(0.42 + dragPitch, 0.08, 1.15);
+    target = mix(vec3(0.0, sg_terrain_height(vec2(uCharPosX, uCharPosZ)), 0.0), charCenter, 0.6);
+    float radius = 3.6;
+    ro = target + radius * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+  } else {
+    // if/else, not a ternary chain: ESSL 3.00 (WebGL2) disallows `?:` on structures.
+    SGCam camA;
+    if (uCamMode < 0.5) camA = sg_cam_orbit(charCenter, dragYaw, dragPitch);
+    else if (uCamMode < 1.5) camA = sg_cam_follow(charCenter, dragYaw, dragPitch);
+    else camA = sg_cam_overview(charCenter);
+    SGCam camB;
+    if (uPrevCamMode < 0.5) camB = sg_cam_orbit(charCenter, dragYaw, dragPitch);
+    else if (uPrevCamMode < 1.5) camB = sg_cam_follow(charCenter, dragYaw, dragPitch);
+    else camB = sg_cam_overview(charCenter);
+    target = mix(camB.target, camA.target, uCamBlend);
+    ro = mix(camB.ro, camA.ro, uCamBlend);
+  }
   vec3 fwd = normalize(target - ro);
   vec3 right = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));
   vec3 up = cross(right, fwd);

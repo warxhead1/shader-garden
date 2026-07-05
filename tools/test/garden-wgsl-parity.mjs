@@ -65,12 +65,14 @@ for (let i = 0; i < n; i++) {
 
 // @sg-uniforms coverage: every @tune name + the non-tune engine uniforms, no
 // more, no less. SG_QUALITY is the third probe-adjacent toggle (PERF-2's
-// quality tier); uCharPosX/uCharPosZ (wave-3 movement controller) are the
-// two most recent additions — none of the three have a slider, but all
-// three must live in the WGSL bank so the garden organ can set them on
-// either backend. Grow this allowlist deliberately, one named entry at a
-// time — never widen it with a wildcard.
-const NON_TUNE_NAMES = ['uProbe', 'uProbeSel', 'SG_QUALITY', 'uCharPosX', 'uCharPosZ'];
+// quality tier); uCharPosX/uCharPosZ (wave-3 movement controller),
+// uCharYaw/uCharGaitDist/uCharSpeed01 (wave-4 §A locomotion), and
+// uCamMode/uPrevCamMode/uCamBlend (wave-4 §B camera modes) are the most
+// recent additions — none have a slider, but all must live in the WGSL bank
+// so the garden organ can set them on either backend. Grow this allowlist
+// deliberately, one named entry at a time — never widen it with a wildcard.
+const NON_TUNE_NAMES = ['uProbe', 'uProbeSel', 'SG_QUALITY', 'uCharPosX', 'uCharPosZ',
+  'uCharYaw', 'uCharGaitDist', 'uCharSpeed01', 'uCamMode', 'uPrevCamMode', 'uCamBlend'];
 const expectedCustomNames = [...NON_TUNE_NAMES, ...wgsl.tunes.map((t) => t.name)];
 const actualCustomNames = wgCustomUniformNames(wgslSrc);
 check('@sg-uniforms declares uProbe + uProbeSel + every @tune name, in that order',

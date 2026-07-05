@@ -15,7 +15,11 @@ FILES = [
     ("site/js/core/layout.js", 150, None),
     # PERF-0 (2026-07-03): +30 LOC for the adaptive-quality ladder — raised
     # 90 -> 120 deliberately, noted in the ED-3+PERF-0 commit message.
-    ("site/js/core/runtime-host.js", 120, None),
+    # 120 -> 135: GARDEN-1 — rebuild(overrides) lets a caller (the garden
+    # organ's editing seam) permanently pin a mount onto a specific backend
+    # instead of only ever re-running the original opts. Actual 129/135.
+    # Raised deliberately, this commit.
+    ("site/js/core/runtime-host.js", 135, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.

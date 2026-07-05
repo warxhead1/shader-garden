@@ -110,7 +110,16 @@ export async function runtimeHost(host, opts) {
       autoScale = false;
       return (scale = h.runtime ? h.runtime.setRenderScale(s) : s);
     },
-    rebuild: build,
+    // `overrides` merges into `opts` BEFORE this (or any future — onLost:
+    // 'rebuild' included) rebuild, so a one-time forced backend switch (the
+    // garden organ's editing seam: WebGPU -> WebGL2 for live recompile)
+    // persists for the rest of this mount's life instead of reverting on
+    // the next context-loss rebuild — "don't thrash backends" is the
+    // default once a caller has opted a mount onto a specific one.
+    rebuild(overrides) {
+      if (overrides) Object.assign(opts, overrides);
+      return build();
+    },
     dispose() {
       disposed = true;
       if (h.runtime) { try { h.runtime.dispose(); } catch { /* gone */ } h.runtime = null; }

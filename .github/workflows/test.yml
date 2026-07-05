@@ -1,0 +1,127 @@
+name: Test battery
+
+# Headless verification harness (tools/test/*.mjs) — see ARCHITECTURE.md and
+# tools/launch_checklist.md for what this does and doesn't cover. Every
+# suite runs in its own process, sequentially: tools/test/browser.mjs's
+# serveSite()/derivePort() are pid-derived, and parallel suites are a known
+# source of flake (a hero-rAF visibility check under machine load), not a
+# theoretical one.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  # Pushes to main don't trigger this directly — deploy.yml calls this
+  # workflow as a job (workflow_call) and gates the Pages deploy on it via a
+  # real `needs:` in that run's graph. Triggering push:main here too would
+  # just run the same battery twice for the same commit.
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install harness dependencies
+        working-directory: tools/test
+        run: npm ci --no-fund --no-audit
+
+      - name: Install headless browsers
+        # tools/test/browser.mjs's chromePath() and webgpu-live.mjs's
+        # fullChromiumPath() both resolve a puppeteer-cached binary under
+        # ~/.cache/puppeteer by globbing for it — installing to that exact
+        # path is what makes both scripts find these without extra env vars.
+        # chrome-headless-shell covers every suite except webgpu-live.mjs,
+        # which needs the full "chrome" build because chrome-headless-shell
+        # has no navigator.gpu at all (see webgpu-live.mjs's header comment).
+        run: |
+          npx --yes @puppeteer/browsers install chrome-headless-shell --path ~/.cache/puppeteer
+          npx --yes @puppeteer/browsers install chrome --path ~/.cache/puppeteer
+
+      - name: Prepare output/log directory
+        run: mkdir -p tools/test/out/logs
+
+      # One suite per process, sequentially — see the workflow-level comment.
+      # Each is tee'd to its own log under tools/test/out/logs/ so a failure
+      # artifact (uploaded below) has every suite's output, not just the one
+      # that failed.
+      - name: smoke
+        working-directory: tools/test
+        run: node smoke.mjs 2>&1 | tee out/logs/smoke.log
+      - name: garden
+        working-directory: tools/test
+        run: node garden.mjs 2>&1 | tee out/logs/garden.log
+      - name: garden-connections
+        working-directory: tools/test
+        run: node garden-connections.mjs 2>&1 | tee out/logs/garden-connections.log
+      - name: garden-perf
+        working-directory: tools/test
+        run: node garden-perf.mjs 2>&1 | tee out/logs/garden-perf.log
+      - name: garden-wgsl-parity
+        working-directory: tools/test
+        run: node garden-wgsl-parity.mjs 2>&1 | tee out/logs/garden-wgsl-parity.log
+      - name: comp0
+        working-directory: tools/test
+        run: node comp0.mjs 2>&1 | tee out/logs/comp0.log
+      - name: comp1
+        working-directory: tools/test
+        run: node comp1.mjs 2>&1 | tee out/logs/comp1.log
+      - name: comp2
+        working-directory: tools/test
+        run: node comp2.mjs 2>&1 | tee out/logs/comp2.log
+      - name: comp3
+        working-directory: tools/test
+        run: node comp3.mjs 2>&1 | tee out/logs/comp3.log
+      - name: anatomy
+        working-directory: tools/test
+        run: node anatomy.mjs 2>&1 | tee out/logs/anatomy.log
+      - name: layout
+        working-directory: tools/test
+        run: node layout.mjs 2>&1 | tee out/logs/layout.log
+      - name: lineage
+        working-directory: tools/test
+        run: node lineage.mjs 2>&1 | tee out/logs/lineage.log
+      - name: loader
+        working-directory: tools/test
+        run: node loader.mjs 2>&1 | tee out/logs/loader.log
+      - name: seed
+        working-directory: tools/test
+        run: node seed.mjs 2>&1 | tee out/logs/seed.log
+      - name: admission-sac
+        working-directory: tools/test
+        run: node admission-sac.mjs 2>&1 | tee out/logs/admission-sac.log
+      - name: runtime-host-loss
+        working-directory: tools/test
+        run: node runtime-host-loss.mjs 2>&1 | tee out/logs/runtime-host-loss.log
+      - name: servesite
+        working-directory: tools/test
+        run: node servesite.mjs 2>&1 | tee out/logs/servesite.log
+      - name: perf
+        working-directory: tools/test
+        run: node perf.mjs 2>&1 | tee out/logs/perf.log
+      - name: webgpu-live (headless graceful-degradation contract)
+        # Real WebGPU execution (the badge actually reading "WebGPU") is a
+        # manual launch-checklist row (tools/launch_checklist.md) run headed
+        # on real hardware with SG_HEADED=1 — see webgpu-live.mjs's header
+        # for why headless can't prove that badge (device.lost fires ~37ms
+        # after a live adapter/device, a real GPU-process instability, not a
+        # product bug). This step only asserts the graceful-degradation
+        # contract: navigator.gpu + adapter + device present, then a clean
+        # WebGL2 landing with zero console errors.
+        working-directory: tools/test
+        run: node webgpu-live.mjs 2>&1 | tee out/logs/webgpu-live.log
+
+      - name: Upload screenshot/log artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-battery-failure-artifacts
+          path: tools/test/out/
+          if-no-files-found: ignore
+          retention-days: 14

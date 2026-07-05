@@ -15,6 +15,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    # Reusable-workflow call: this makes the test battery a real job in this
+    # run's graph, so `upload` below can `needs:` it exactly like any other
+    # job (no cross-workflow polling, no separate success/failure event to
+    # interpret). test.yml is still its own file so it can independently
+    # gate PRs via its own pull_request trigger.
+    uses: ./.github/workflows/test.yml
+
   editor-bundle-diff:
     # ED-2: site/js/vendor/cm-editor.bundle.js is committed, not CI-built
     # (ARCHITECTURE.md / tools/editor-bundle/README.md) — this job is the
@@ -43,7 +51,7 @@ jobs:
         run: git diff --exit-code -- site/js/vendor/cm-editor.bundle.js
 
   upload:
-    needs: editor-bundle-diff
+    needs: [test, editor-bundle-diff]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

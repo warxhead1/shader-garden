@@ -25,20 +25,23 @@ async function tryWebgpu(canvas, wgslSrc) {
   return { runtime: gpu, backend: 'webgpu', reason: 'wgsl-port', res: { ...res, duration_ms: performance.now() - t0 } };
 }
 
-function tryWebgl2(canvas, glslSrc) {
+function tryWebgl2(canvas, glslSrc, maxDpr) {
   let gl;
-  try { gl = new GL2Runtime(canvas); } catch { return null; }
+  try { gl = new GL2Runtime(canvas, { maxDpr }); } catch { return null; }
   const t0 = performance.now();
   const res = gl.setShader(glslSrc);
   return { runtime: gl, backend: 'webgl2', reason: 'fallback', res: { ...res, duration_ms: performance.now() - t0 } };
 }
 
 // opts: { prefer: 'auto'|'webgl2'|'webgpu', glslSrc?, wgslSrc?, canvasClass,
-//         fpsBadge?, onLost?: 'rebuild'|'release'|fn, bus?, organ?, onChange? }
+//         fpsBadge?, onLost?: 'rebuild'|'release'|fn, bus?, organ?, onChange?,
+//         maxDpr? (PERF-2: webgl2-only per-mount DPR cap, see webgl2.js),
+//         onPerf?: ({fps, ms, emaMs, renderScale}) => void, ~1Hz, PERF-2 }
 export async function runtimeHost(host, opts) {
   const h = { runtime: null, backend: null, ok: false, log: '', duration_ms: 0 };
   let disposed = false, gen = 0;
   let scale = 1, autoScale = true, lowSince = 0, highSince = 0; // ladder state
+  let emaMs = null; // PERF-2: smoothed ms/frame for the honest HUD readout
 
   function emit(type, data) {
     if (opts.bus) opts.bus.emit(type, { organ: opts.organ, ...data });
@@ -66,7 +69,7 @@ export async function runtimeHost(host, opts) {
     const my = ++gen;
     if (h.runtime) { try { h.runtime.dispose(); } catch { /* gone */ } }
     h.runtime = null;
-    scale = 1; autoScale = true; lowSince = 0; highSince = 0; // fresh mount/rebuild starts the ladder clean
+    scale = 1; autoScale = true; lowSince = 0; highSince = 0; emaMs = null; // fresh mount/rebuild starts the ladder clean
     host.replaceChildren(); // fresh canvas each (re)build — one context type per canvas
     const canvas = document.createElement('canvas');
     if (opts.canvasClass) canvas.className = opts.canvasClass;
@@ -74,7 +77,7 @@ export async function runtimeHost(host, opts) {
 
     let picked = null;
     if (opts.prefer !== 'webgl2' && opts.wgslSrc) picked = await tryWebgpu(canvas, opts.wgslSrc);
-    if (!picked && opts.prefer !== 'webgpu' && opts.glslSrc) picked = tryWebgl2(canvas, opts.glslSrc);
+    if (!picked && opts.prefer !== 'webgpu' && opts.glslSrc) picked = tryWebgl2(canvas, opts.glslSrc, opts.maxDpr);
     if (disposed || my !== gen) { picked?.runtime?.dispose(); return; }
 
     if (!picked) { canvas.remove(); h.backend = null; h.ok = false; h.log = ''; opts.onChange?.(); return; }
@@ -85,7 +88,13 @@ export async function runtimeHost(host, opts) {
 
     if (opts.fpsBadge) wirePerf(runtime, opts.fpsBadge, () => scale);
     const reportPerf = runtime.onPerf; // wirePerf's badge formatter, if any — chain the ladder onto it
-    runtime.onPerf = (perf) => { reportPerf?.(perf); ladder(perf.fps); };
+    runtime.onPerf = (perf) => {
+      // EMA over the ~1Hz samples — one honest, slightly-smoothed number for
+      // a compact HUD, distinct from wirePerf's raw per-second fps badge.
+      emaMs = emaMs == null ? perf.ms : emaMs * 0.8 + perf.ms * 0.2;
+      reportPerf?.(perf); ladder(perf.fps);
+      opts.onPerf?.({ fps: perf.fps, ms: perf.ms, emaMs, renderScale: scale });
+    };
     runtime.onContextLost = () => {
       if (disposed || my !== gen) return;
       emit('runtime.lost.v1', { backend, rebuilt: opts.onLost !== 'release' });

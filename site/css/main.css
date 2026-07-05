@@ -113,6 +113,7 @@ a:hover { text-decoration: underline; }
 .badge-fit { color: var(--cyan); font-variant-numeric: tabular-nums; }
 .badge-backend { color: #c4b5fd; }
 .badge-fps { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 8em; } /* PERF-0: "fps · scale" */
+.badge-perf { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 8em; } /* PERF-2: "ms · scale", always-on honest HUD */
 
 .pill {
   padding: 0.2em 0.8em;
@@ -600,6 +601,16 @@ a:hover { text-decoration: underline; }
   border-radius: 999px;
   padding: 0.25em 0.5em;
   font: 600 0.72rem var(--font);
+}
+/* PERF-2: garden topbar quality selector — same pill treatment as buffer-chan-select */
+.garden-quality-select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.25em 0.5em;
+  font: 600 0.72rem var(--font);
+  cursor: pointer;
 }
 
 .code-editor {

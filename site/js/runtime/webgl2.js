@@ -109,8 +109,13 @@ export class GL2Runtime {
   /** @type {((ev: Event) => void) | null} */
   onContextLost = null;
 
-  /** @param {HTMLCanvasElement} canvas */
-  constructor(canvas) {
+  /**
+   * @param {HTMLCanvasElement} canvas
+   * @param {{maxDpr?: number}} [opts] — maxDpr overrides DEFAULT_DPR_CAP for
+   *   this instance (PERF-2: heavier mounts like the garden's raymarch pin a
+   *   tighter cap than the site-wide default).
+   */
+  constructor(canvas, opts = {}) {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
     if (!gl) throw new Error('WebGL2 is not supported on this device/browser');
 
@@ -124,6 +129,7 @@ export class GL2Runtime {
 
     this._clock = createClock();
     this._detachMouse = attachMouse(canvas, this._clock);
+    this._maxDpr = opts.maxDpr ?? DEFAULT_DPR_CAP;
     this._renderScale = 1;
     this._customUniforms = {}; // name -> value, GARDEN-0's tune sliders + probe toggle
     this._customLocations = {}; // name -> WebGLUniformLocation, cleared on relink
@@ -399,10 +405,10 @@ export class GL2Runtime {
     return { shader, ok, log: gl.getShaderInfoLog(shader) ?? '' };
   }
 
-  /** Drawing-buffer size = client size × min(DPR, 1.5) × renderScale. */
+  /** Drawing-buffer size = client size × min(DPR, this._maxDpr) × renderScale. */
   _resize() {
     const canvas = this._canvas;
-    const dpr = Math.min(window.devicePixelRatio || 1, DEFAULT_DPR_CAP) * this._renderScale;
+    const dpr = Math.min(window.devicePixelRatio || 1, this._maxDpr) * this._renderScale;
     const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
     const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
     if (canvas.width !== w || canvas.height !== h) {

@@ -15,7 +15,11 @@ FILES = [
     ("site/js/core/layout.js", 150, None),
     # PERF-0 (2026-07-03): +30 LOC for the adaptive-quality ladder — raised
     # 90 -> 120 deliberately, noted in the ED-3+PERF-0 commit message.
-    ("site/js/core/runtime-host.js", 120, None),
+    # 120 -> 132: PERF-2 (2026-07-04) — maxDpr passthrough to the webgl2
+    # tryWebgl2() helper, plus an EMA over onPerf's ~1Hz ms samples and an
+    # opts.onPerf callback so a mount (the garden) can show an honest
+    # ms/frame + renderScale HUD. Actual 129/132. Raised deliberately.
+    ("site/js/core/runtime-host.js", 132, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.
@@ -94,7 +98,10 @@ FILES = [
     ("site/assets/organs.json", None, 4096),
     # COMP-0 (v2 §7.5, item 23): iChannel plumbing + render-to-texture.
     # post-ADM-A baseline was 350/350 LOC each; budget is baseline + 120/130.
-    ("site/js/runtime/webgl2.js", 470, None),
+    # 470 -> 480: PERF-2 — constructor takes an optional {maxDpr} so a
+    # per-mount cap (e.g. the garden's raymarch) can pin tighter than the
+    # site-wide DEFAULT_DPR_CAP. Actual 472/480. Raised deliberately.
+    ("site/js/runtime/webgl2.js", 480, None),
     ("site/js/runtime/webgpu.js", 480, None),
     # wrap.js also rolls up into the admission aggregate below (net -30 from
     # runtimes, per the admission budget); this row is the COMP-0 hard cap.

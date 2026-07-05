@@ -111,6 +111,18 @@ const { nodes: expectedNodes, edges: expectedEdges } = analyzeConnections(compon
   check('(5) the "simplified stand-in, not real buffer producer/consumer edges" text is present',
     bodyText.includes('This is a simplified stand-in, not a real buffer producer/consumer edge.'));
 
+  // (6) Legibility regression guard: the overlay is opened over the garden
+  // scene (bright sky/terrain) — a near-transparent backdrop washes out
+  // every text element under it, so pin the backdrop opacity deterministically
+  // rather than relying on a human eyeballing a screenshot every time.
+  const bgAlpha = await page.evaluate(() => {
+    const bg = getComputedStyle(document.querySelector('.dgc-overlay')).backgroundColor;
+    const m = /rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*(?:,\s*([\d.]+)\s*)?\)/.exec(bg);
+    return m ? (m[1] === undefined ? 1 : Number(m[1])) : null;
+  });
+  check('(6) the overlay backdrop is near-opaque (alpha >= 0.85) — legible over the bright garden scene',
+    bgAlpha != null && bgAlpha >= 0.85, `backgroundColor alpha=${bgAlpha}`);
+
   check('no console errors', errors.length === 0, errors.join(' | '));
   await page.close();
 }

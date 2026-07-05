@@ -798,7 +798,16 @@ a:hover { text-decoration: underline; }
   z-index: 3;
   opacity: 1;
   transform: translateY(0) scale(1);
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition: opacity 0.18s ease, transform 0.18s ease, right 0.18s ease;
+}
+/* D1 (wave-4) mutual avoidance: both panels dock to the right edge — a tall
+   probe panel (long blurb + tunes + source) can reach high enough to
+   collide with the uniform inspector docked above it. When the inspector is
+   open, shift the probe panel left by the inspector's own width (kept in
+   the same `min(17rem, calc(50vw - 2rem))` formula so the two never drift
+   out of sync) + a small gap, so neither ever visually overlaps the other. */
+.viewer-stage:has(.garden-uniform-inspector:not([hidden])) .probe-panel {
+  right: calc(1rem + min(17rem, calc(50vw - 2rem)) + 0.6rem);
 }
 /* Open/close (GARDEN-IDE): .probe-panel-enter is set on creation then
    removed a couple rAFs later (panel.js); .probe-panel-exit is set right
@@ -1103,6 +1112,13 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
   padding: 1rem 1.3rem 1.3rem;
   overflow: auto;
+  /* Legibility fix: .glass's shared --panel (rgba(255,255,255,0.045)) is
+     nearly transparent and reads fine over anatomy's normal dark routes,
+     but this overlay is opened over the BRIGHT garden scene — the thin
+     backdrop let the sky/terrain wash out every text element beneath it.
+     Override with a near-opaque dark backdrop, independent of whatever's
+     rendering underneath (dgc-graph.mjs asserts alpha >= 0.85). */
+  background: rgba(8, 12, 16, 0.92);
 }
 .dgc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
 .dgc-head h2 { margin: 0; }

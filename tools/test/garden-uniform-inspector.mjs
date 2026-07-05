@@ -58,6 +58,17 @@ async function freshPage(errors) {
     const after = await page.evaluate((n) => document.querySelector(`.garden-uniform-row[data-name="${n}"] .garden-uniform-value`)?.textContent, rangeName);
     check('(1) the inspector\'s displayed value changes within one 10 Hz tick of a slider move', before !== after, `before=${before} after=${after}`);
   }
+
+  // Mutual avoidance: both the inspector (top-right) and the probe panel
+  // (bottom-right, open from the click above) dock to the same edge — the
+  // CSS-only :has() offset in main.css must keep their rendered rects from
+  // ever overlapping, not just "look fine in one screenshot."
+  const overlap = await page.evaluate(() => {
+    const a = document.querySelector('.garden-uniform-inspector').getBoundingClientRect();
+    const b = document.querySelector('.probe-panel').getBoundingClientRect();
+    return !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+  });
+  check('(1) the uniform inspector and an open probe panel never visually overlap', !overlap);
   check('(1) no console errors', errors.length === 0, errors.join(' | '));
   await page.close();
 }

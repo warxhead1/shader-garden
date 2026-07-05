@@ -652,6 +652,54 @@ async function openCharacterEditor(page, errors) {
   await page.close();
 }
 
+/* ---------- (o) modify-flow fixes: edited chip + backend-switch toast (wave-3 §2) ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await forceTextareaFallback(page);
+  await openCharacterEditor(page, errors);
+
+  const meta = await characterComponent(page);
+  await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.6'));
+  await sleep(900);
+
+  await page.click('.probe-panel .collapse-btn'); // animated close
+  await sleep(400);
+  check('(o) the panel actually closed', (await page.$('.probe-panel')) === null);
+
+  const editedVisible = await page.$$eval('.garden-tray-item', (items) => {
+    const item = items.find((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() === 'Bouncing Figure');
+    const chip = item?.querySelector('.garden-tray-edited-chip');
+    return chip ? !chip.hidden : null;
+  });
+  check('(o) the tray marks the edited component with a visible "edited" chip after the panel closes', editedVisible === true, 'got ' + editedVisible);
+
+  // Edit tracking is per-component, not global — nothing else should light up.
+  const otherEdited = await page.$$eval('.garden-tray-item', (items) => items
+    .filter((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() !== 'Bouncing Figure')
+    .some((it) => !it.querySelector('.garden-tray-edited-chip').hidden));
+  check('(o) no other component is marked edited', otherEdited === false);
+
+  check('(o) no console errors across the edit-then-close flow', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+// F1's backend-switch toast can't be exercised at runtime in this harness:
+// puppeteer's SwiftShader-backed Chrome never reports a WebGPU adapter
+// (browser.mjs's own header: "the WebGPU path does NOT execute headless"),
+// so rh.backend can never actually BE 'webgpu' here to trip the branch —
+// same limitation every other WebGPU-only row in the launch checklist has.
+// Static regression net instead: the toast call must live inside the exact
+// same conditional the rebuild call already does.
+{
+  const page = await browser.newPage();
+  await gotoSafe(page, BASE + '/index.html', { waitUntil: 'networkidle2', timeout: 20000 });
+  const src = await page.evaluate(() => fetch('js/organs/garden/index.js').then((r) => r.text()));
+  const gated = /if \(rh\.backend === 'webgpu'\) \{\s*await rh\.rebuild\(\{ prefer: 'webgl2' \}\);\s*toast\('Switched to WebGL2 for live editing'\);/.test(src);
+  check('(o) the WebGL2-switch toast is gated on the same condition as the rebuild (WebGPU untestable headless)', gated);
+  await page.close();
+}
+
 await browser.close();
 server.kill();
 console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');

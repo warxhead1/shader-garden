@@ -97,7 +97,10 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
   source.append(code);
   panelBody.append(source);
 
-  const editBtn = el('button', 'btn btn-small', 'Edit here');
+  // Wave-3 F3: btn-primary gives "Edit here" real visual weight — it's the
+  // in-place, no-navigation option, unlike "Open in editor" below it, and
+  // the two read identically today (same btn-small, no hierarchy at all).
+  const editBtn = el('button', 'btn btn-small btn-primary', 'Edit here');
   editBtn.type = 'button';
   const editHost = el('div', 'component-editor-host');
   editHost.hidden = true;

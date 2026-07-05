@@ -13,7 +13,7 @@ import { centerNotice } from '../../core/loader.js';
 import { runtimeHost } from '../../core/runtime-host.js';
 import { el } from '../../dom.js';
 import { canvasPixelCoords } from '../../runtime/uniforms.js';
-import { compress } from '../../share.js';
+import { compress, toast } from '../../share.js';
 import { parseScene } from './parse.js';
 import { probeAt } from './probe.js';
 import { createProbePanel } from './panel.js';
@@ -165,6 +165,10 @@ export async function mount(ctx) {
   function recompileWithBody(component, body) {
     if (body === component.source) editedBodies.delete(component.id);
     else editedBodies.set(component.id, body);
+    // F2: the single choke point every hand-edit AND variant swap already
+    // goes through — editedBodies.has() is the truth, so this stays correct
+    // (including clearing on revert-to-pristine) with no separate code path.
+    tray.setEdited(component.id, editedBodies.has(component.id));
     if (!rh.runtime) return { ok: false, log: '', messages: [] };
     const res = rh.runtime.setShader(buildSceneSource());
     if (res.ok) rh.runtime.setUniforms(tuneValues);
@@ -301,7 +305,15 @@ export async function mount(ctx) {
         // nav-away mid-rebuild just leaves an orphaned runtime the loader's
         // own superseded-mount cleanup already handles via this organ's
         // returned cleanup() calling rh.dispose().
-        if (rh.backend === 'webgpu') await rh.rebuild({ prefer: 'webgl2' });
+        // F1: a visitor who was proud of seeing "WebGPU" in the badge
+        // deserves to know why it just became "WebGL2" — one auto-
+        // dismissing toast, exactly once per rebuild (this branch only
+        // ever runs once per mount: rh.backend permanently stays 'webgl2'
+        // afterward, so the condition itself is the once-per-rebuild guard).
+        if (rh.backend === 'webgpu') {
+          await rh.rebuild({ prefer: 'webgl2' });
+          toast('Switched to WebGL2 for live editing');
+        }
         const { mountComponentEditor } = await import('./edit.js');
         return mountComponentEditor({
           component,

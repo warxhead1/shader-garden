@@ -20,7 +20,12 @@ import { el } from '../../dom.js';
  *   onHoverConnection: (componentId: string|null) => void,  // wave-3 §3a — hovering a connection pill
  *   onMeasure: () => Promise<void>,                        // work item 4 — explicit, never automatic
  * }}
- * @returns {{ el: HTMLElement, setCost: (id: string, ms: number|null) => void, destroy: () => void }}
+ * @returns {{
+ *   el: HTMLElement,
+ *   setCost: (id: string, ms: number|null) => void,
+ *   setEdited: (id: string, edited: boolean) => void,  // F2 — the "you changed this" chip
+ *   destroy: () => void,
+ * }}
  */
 export function createComponentTray({ components, connections, onHover, onSelect, onNavigate, onHoverConnection, onMeasure }) {
   const tray = el('aside', 'garden-tray glass');
@@ -49,6 +54,7 @@ export function createComponentTray({ components, connections, onHover, onSelect
   list.setAttribute('role', 'listbox');
 
   const costChips = new Map();
+  const editedChips = new Map();
   const items = components.map((c, i) => {
     const li = el('li', 'garden-tray-item');
     li.setAttribute('role', 'option');
@@ -57,6 +63,13 @@ export function createComponentTray({ components, connections, onHover, onSelect
     const nameRow = el('div', 'garden-tray-item-name');
     nameRow.append(c.name);
     if (c.tunes.length) nameRow.append(el('span', 'garden-tray-item-count', `${c.tunes.length} tune${c.tunes.length > 1 ? 's' : ''}`));
+    // F2: mirrors costChips exactly — hidden until index.js's
+    // recompileWithBody says this component actually has a live edit (a
+    // hand edit OR a non-pristine variant swap, same editedBodies truth).
+    const editedChip = el('span', 'garden-tray-edited-chip', 'edited');
+    editedChip.hidden = true;
+    editedChips.set(c.id, editedChip);
+    nameRow.append(editedChip);
     const cost = el('span', 'garden-tray-chip', '');
     costChips.set(c.id, cost);
     nameRow.append(cost);
@@ -123,6 +136,11 @@ export function createComponentTray({ components, connections, onHover, onSelect
     chip.textContent = ms == null ? '—' : `${ms.toFixed(1)}ms`;
   }
 
+  function setEdited(id, edited) {
+    const chip = editedChips.get(id);
+    if (chip) chip.hidden = !edited;
+  }
+
   tray.append(head, list);
-  return { el: tray, setCost, destroy() {} };
+  return { el: tray, setCost, setEdited, destroy() {} };
 }

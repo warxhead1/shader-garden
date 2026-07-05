@@ -76,6 +76,24 @@ jobs:
       - name: garden-wgsl-parity
         working-directory: tools/test
         run: node garden-wgsl-parity.mjs 2>&1 | tee out/logs/garden-wgsl-parity.log
+      - name: garden-camera
+        working-directory: tools/test
+        run: node garden-camera.mjs 2>&1 | tee out/logs/garden-camera.log
+      - name: garden-locomotion-parity
+        working-directory: tools/test
+        run: node garden-locomotion-parity.mjs 2>&1 | tee out/logs/garden-locomotion-parity.log
+      - name: garden-uniform-inspector
+        working-directory: tools/test
+        run: node garden-uniform-inspector.mjs 2>&1 | tee out/logs/garden-uniform-inspector.log
+      - name: dgc-graph
+        working-directory: tools/test
+        run: node dgc-graph.mjs 2>&1 | tee out/logs/dgc-graph.log
+      - name: garden-attribution
+        working-directory: tools/test
+        run: node garden-attribution.mjs 2>&1 | tee out/logs/garden-attribution.log
+      - name: attribution-page
+        working-directory: tools/test
+        run: node attribution-page.mjs 2>&1 | tee out/logs/attribution-page.log
       - name: comp0
         working-directory: tools/test
         run: node comp0.mjs 2>&1 | tee out/logs/comp0.log

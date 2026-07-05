@@ -1,55 +1,90 @@
-// Real WebGPU execution evidence for the garden page.
+// Real WebGPU execution evidence for the garden page, headless-in-CI (via a
+// virtual X display, not chromium's own `--headless=new`).
 //
-// browser.mjs's launch() uses chrome-headless-shell, which has no
-// navigator.gpu at all — that's why smoke.mjs's (l)/(h) checks pin WebGL2 as
-// the expected headless badge. This harness instead drives the FULL chromium
-// binary (not the headless-shell variant), which DOES expose navigator.gpu
-// under headless=new with the swiftshader ANGLE/Vulkan backend — PROVIDED the
-// page is loaded from a real http(s) origin. The gotcha that cost the most
-// time bisecting: navigator.gpu is gated on a secure context, and Chrome does
-// not treat a freshly-opened about:blank/data: page as secure enough to
-// expose it — only navigating to a real http://127.0.0.1 (loopback, spec's
-// "potentially trustworthy" exception) origin surfaces the binding. No
-// puppeteer launch-flag workaround (ignoreDefaultArgs, raw spawn + connect)
-// was needed once that was understood; puppeteer's own default args are
-// actually necessary here (bare chromium launches without them hang before
-// ever opening the DevTools port in this environment).
+// Three things had to be untangled to get here — each cost real bisection
+// time, so pinning them for the next person:
 //
-// Headless ceiling (verified, not assumed): navigator.gpu, requestAdapter(),
-// and requestDevice() all succeed headless — the sanity gate below passes.
-// But the GPUDevice is then spontaneously destroyed by the headless GPU
-// process ~37ms later (device.lost resolves with reason 'destroyed', "A
-// valid external Instance reference no longer exists") before the garden
-// route's runtime finishes standing up its WebGPU renderer. runtime-host's
-// onLost handler (site/js/core/runtime-host.js) can't re-acquire an adapter
-// mid-mount and correctly rebuilds on WebGL2 instead. This reproduces under
-// both `--use-angle=swiftshader` and real-Vulkan-ANGLE headless, and does
-// NOT reproduce headed on a real GPU — so headless can only prove the
-// graceful-degradation contract (env sanity + a clean WebGL2 landing), never
-// the WebGPU badge itself. That badge is the manual launch-checklist row
-// (tools/launch_checklist.md), automated here as an opt-in headed mode.
+// 1. browser.mjs's launch() uses chrome-headless-shell, which has no
+//    navigator.gpu at all (see its own header comment). This harness drives
+//    the FULL chromium/chrome binary instead.
+//
+// 2. navigator.gpu is gated on a secure context, and a freshly-opened
+//    about:blank/data: page in Puppeteer does NOT count as secure enough to
+//    expose it — only navigating to a real http://127.0.0.1 origin (the
+//    spec's loopback "potentially trustworthy" exception) surfaces the
+//    binding. No puppeteer launch-flag workaround (ignoreDefaultArgs, raw
+//    spawn + connect) was needed once that was understood — puppeteer's own
+//    default args are actually load-bearing here (a bare chromium spawn
+//    without them never even opens the DevTools port in this environment).
+//
+// 3. Once navigator.gpu/requestAdapter/requestDevice/canvas.getContext
+//    ('webgpu')/shader-compile were all confirmed genuinely working, the
+//    SITE still fell back to WebGL2. Root cause: under chromium's
+//    `--headless=new` (the Ozone "headless" platform), a WebGPU device dies
+//    ("A valid external Instance reference no longer exists") within ~1s of
+//    being put into active use — reproduced with BOTH the swiftshader
+//    software backend AND the real NVIDIA Vulkan backend, and even with a
+//    single non-competing runtimeHost() mount (not a double-mount/race
+//    artifact). Under a virtual X11 display (Xvfb) with headed chromium
+//    (no `--headless` switch at all), the identical device stays stable
+//    indefinitely. So: this harness re-execs itself under `xvfb-run` when
+//    not already running under a usable display, and launches chromium
+//    HEADED (headless: false) against that virtual display. Still fully
+//    unattended/CI-safe — just not chromium's own headless mode.
+//
+// 4. This still needs real Vulkan (`--use-angle=vulkan`, the default below).
+//    GitHub-hosted `ubuntu-latest` runners have no GPU at all, so the
+//    obvious next question is whether `--use-angle=swiftshader` (the
+//    software backend) survives under this same Xvfb+headed setup. Verified
+//    empirically: no. `requestAdapter()` resolves to null in real page
+//    content — not an exception, not a slow warm-up (retried 6x over 9s) —
+//    across every combination tried: bare `--use-angle=swiftshader`, adding
+//    `--enable-unsafe-swiftshader` (which DOES flip the adapter's
+//    chrome://gpu status from "Blocklisted - crbug.com/40057808: CPU
+//    adapters not fully tested or conformant" to "Available", but doesn't
+//    change what a real page can get), `--use-webgpu-adapter=swiftshader`,
+//    `--ignore-gpu-blocklist`/`--ignore-gpu-blacklist`, and masking this
+//    machine's real Vulkan ICDs via `VK_ICD_FILENAMES` (to rule out the
+//    host's own NVIDIA driver interfering with backend selection — it
+//    doesn't; same null result with it hidden). So: real WebGPU execution
+//    proof needs an actual GPU, full stop — neither chromium's native
+//    headless mode (point 3, gets a device but it dies) nor Xvfb+headed
+//    swiftshader (this point, never gets an adapter at all) is a
+//    substitute on a GPU-less runner. `SG_ANGLE=swiftshader` is left wired
+//    in below for whoever revisits this with a self-hosted GPU runner or a
+//    newer Chrome build; the CI workflow does not rely on it passing.
 //
 // Usage:
-//   node tools/test/webgpu-live.mjs             headless: degradation contract
-//   SG_HEADED=1 node tools/test/webgpu-live.mjs  headed, real GPU: WebGPU badge
+//   node tools/test/webgpu-live.mjs                    default: real Vulkan
+//   SG_ANGLE=swiftshader node tools/test/webgpu-live.mjs   software backend (see point 4 — does not currently pass)
 import { createRequire } from 'node:module';
-import { globSync } from 'node:fs';
+import { globSync, mkdirSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { serveSite, sleep, gotoSafe } from './browser.mjs';
 
 const require = createRequire(import.meta.url);
+
+// --- self-wrap under Xvfb (see point 3 above) -------------------------
+if (!process.env.SG_UNDER_XVFB) {
+  const r = spawnSync('xvfb-run', ['-a', '-s', '-screen 0 1280x800x24', process.execPath, ...process.argv.slice(1)], {
+    stdio: 'inherit',
+    env: { ...process.env, SG_UNDER_XVFB: '1' },
+  });
+  process.exit(r.status ?? 1);
+}
+
 const puppeteer = require('puppeteer-core');
-const HEADED = !!process.env.SG_HEADED;
 
 // Screenshots land here — override with SG_WEBGPU_OUT for a scratch/report dir.
 const SCRATCH = process.env.SG_WEBGPU_OUT
-  || (() => { require('node:fs').mkdirSync(new URL('./out', import.meta.url), { recursive: true }); return new URL('./out', import.meta.url).pathname; })();
+  || (() => { const p = new URL('./out', import.meta.url).pathname; mkdirSync(p, { recursive: true }); return p; })();
 
 function fullChromiumPath() {
   const env = process.env.SG_CHROMIUM;
   if (env) return env;
   const candidates = ['/usr/lib/chromium/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
   for (const c of candidates) {
-    try { if (require('node:fs').statSync(c).isFile()) return c; } catch { /* try next */ }
+    try { if (statSync(c).isFile()) return c; } catch { /* try next */ }
   }
   // fall back to a puppeteer-managed "Google Chrome for Testing" build, if one is cached
   const home = process.env.HOME || '';
@@ -65,24 +100,29 @@ function check(name, cond, detail) {
   if (!ok) failed = true;
   return ok;
 }
-function skip(name, reason) {
-  console.log(`SKIP ${name} (${reason})`);
-}
 
 const { server, base: BASE } = await serveSite();
 let browser;
 try {
   browser = await puppeteer.launch({
     executablePath: fullChromiumPath(),
-    headless: HEADED ? false : 'new',
-    // The swiftshader/Vulkan forcing is what makes navigator.gpu exist at
-    // all under headless (see file header) — on a real GPU headed run these
-    // flags aren't needed, and forcing swiftshader there would defeat the
-    // point of the row (verifying WebGPU on real hardware).
-    args: HEADED
-      ? ['--no-sandbox']
-      : ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=swiftshader'],
-    defaultViewport: { width: 1440, height: 900 },
+    headless: false, // see point 3 — chromium's own headless mode kills the WebGPU device
+    args: [
+      '--no-sandbox',
+      '--enable-unsafe-webgpu',
+      '--enable-features=Vulkan',
+      // SG_ANGLE lets this be re-verified against the software backend
+      // instead of assuming the real-hardware ANGLE backend this was
+      // authored against — see point 4 above: it does not currently pass.
+      // --enable-unsafe-swiftshader unblocks the adapter in chrome://gpu's
+      // own listing but not in real page content, so it's included for
+      // completeness rather than because it fixes anything.
+      `--use-angle=${process.env.SG_ANGLE || 'vulkan'}`,
+      ...(process.env.SG_ANGLE === 'swiftshader' ? ['--enable-unsafe-swiftshader'] : []),
+      '--window-position=0,0',
+      '--window-size=1280,800',
+    ],
+    defaultViewport: { width: 1280, height: 800 },
   });
 
   const page = await browser.newPage();
@@ -94,9 +134,7 @@ try {
   // anything the site's own badge says — an environment that can't do
   // WebGPU at all would otherwise just silently show the WebGL2 fallback
   // and this harness would misreport that as "the WGSL path never got
-  // exercised" rather than "WebGPU itself isn't available here". This gate
-  // holds in both modes — it's the device destruction AFTER this point that
-  // is headless-only (see file header).
+  // exercised" rather than "WebGPU itself isn't available here".
   await gotoSafe(page, `${BASE}/index.html`, { waitUntil: 'domcontentloaded', timeout: 20000 });
   const gpuProbe = await page.evaluate(async () => {
     const hasGpu = !!navigator.gpu;
@@ -132,12 +170,7 @@ try {
   await sleep(1500);
 
   const backendBadge = await page.$eval('.badge-backend', (el) => el.textContent.trim()).catch(() => null);
-  if (HEADED) {
-    check('backend badge reads WebGPU', backendBadge === 'WebGPU', 'badge=' + backendBadge);
-  } else {
-    skip('backend badge reads WebGPU', 'headless GPU-process instability destroys the device ~37ms post-adapter — see file header; run SG_HEADED=1 on real hardware for this row');
-    check('backend badge lands on the WebGL2 fallback (graceful degradation)', backendBadge === 'WebGL2', 'badge=' + backendBadge);
-  }
+  check('backend badge reads WebGPU', backendBadge === 'WebGPU', 'badge=' + backendBadge);
   await page.screenshot({ path: `${SCRATCH}/wgpu-1-badge.png`, fullPage: true });
   console.log('  screenshot: wgpu-1-badge.png, badge text = ' + JSON.stringify(backendBadge));
 
@@ -153,7 +186,7 @@ try {
   check('no console errors across the whole run', consoleErrors.length === 0, consoleErrors.join(' | '));
   if (consoleErrors.length) console.log('  console errors: ' + JSON.stringify(consoleErrors, null, 1));
 
-  console.log(JSON.stringify({ headed: HEADED, gpuProbe, backendBadge, probeTitle, consoleErrors }, null, 1));
+  console.log(JSON.stringify({ gpuProbe, backendBadge, probeTitle, consoleErrors }, null, 1));
 } finally {
   if (browser) await browser.close().catch(() => {});
   server.kill();

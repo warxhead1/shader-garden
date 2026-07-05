@@ -7,6 +7,7 @@
     "smoke": "node smoke.mjs",
     "garden": "node garden.mjs",
     "garden-connections": "node garden-connections.mjs",
+    "garden-movement": "node garden-movement.mjs",
     "garden-perf": "node garden-perf.mjs",
     "garden-wgsl-parity": "node garden-wgsl-parity.mjs",
     "comp0": "node comp0.mjs",

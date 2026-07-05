@@ -30,6 +30,15 @@ export function wrapGlsl(src, channels = 0) {
   return GLSL_PRELUDE + decl + src + GLSL_EPILOGUE;
 }
 
+// `custom` is a fixed 16-float bank (4 vec4f, so it satisfies WGSL's 16-byte
+// array-of-vec4 alignment for free) backing GL2Runtime.setUniforms()'s WGSL
+// equivalent — see wgCustomUniformNames()/genCustomAccessors() below. WGSL
+// has no free-standing named-uniform binding model (no getUniformLocation-
+// by-name equivalent), so a kernel can't just declare `uniform float NAME;`
+// the way GLSL does; this bank + the `@sg-uniforms` directive is the WGSL
+// substitute — see ARCHITECTURE.md § "The Garden" for the convention.
+export const WGSL_CUSTOM_UNIFORM_SLOTS = 16;
+
 export const WGSL_PRELUDE = `struct SGUniforms {
   res: vec4f,
   mouse: vec4f,
@@ -37,6 +46,7 @@ export const WGSL_PRELUDE = `struct SGUniforms {
   dt: f32,
   frame: f32,
   _pad: f32,
+  custom: array<vec4f, 4>,
 }
 @group(0) @binding(0) var<uniform> U: SGUniforms;
 
@@ -46,6 +56,29 @@ fn sg_vertex(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
   return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
 }
 `;
+
+// A single directive line, anywhere in the raw (pre-wrap) user source:
+//   // @sg-uniforms NAME1 NAME2 ...
+// Assigns each name a bank slot by position (max WGSL_CUSTOM_UNIFORM_SLOTS).
+// Not part of js/organs/garden/parse.js's @component/@tune/@end grammar —
+// this is a runtime-level convention consumed only by wrap.js/webgpu.js.
+const SG_UNIFORMS_DIRECTIVE_RE = /^\/\/\s*@sg-uniforms\s+(.+)$/m;
+
+/** @returns {string[]} custom-uniform names in bank-slot order (possibly empty). */
+export function wgCustomUniformNames(src) {
+  const m = SG_UNIFORMS_DIRECTIVE_RE.exec(src);
+  if (!m) return [];
+  return m[1].trim().split(/\s+/).slice(0, WGSL_CUSTOM_UNIFORM_SLOTS);
+}
+
+const SWIZZLE = ['x', 'y', 'z', 'w'];
+
+/** One `fn NAME() -> f32 { return U.custom[i].c; }` per name, in bank-slot order. */
+function genCustomAccessors(names) {
+  return names
+    .map((name, i) => `fn ${name}() -> f32 { return U.custom[${i >> 2}].${SWIZZLE[i & 3]}; }\n`)
+    .join('');
+}
 
 export const WGSL_EPILOGUE = `
 @fragment
@@ -64,7 +97,12 @@ export const WGSL_PRELUDE_LINES = (WGSL_PRELUDE + '\n').split('\n').length - 1;
 // Extra lines a channel decl block adds — callers add this to WGSL_PRELUDE_LINES.
 export const wgChanLines = (n) => (n ? 1 + n : 0);
 
+// Extra lines the custom-uniform accessor block adds (one `fn NAME() {...}`
+// line per name) — callers add this to WGSL_PRELUDE_LINES same as wgChanLines.
+export const wgCustomLines = (src) => wgCustomUniformNames(src).length;
+
 export function wrapWgsl(src, channels = 0) {
   const decl = channels ? `@group(0) @binding(1) var sg_samp: sampler;\n` + Array.from({ length: channels }, (_, i) => `@group(0) @binding(${2 + i}) var iChannel${i}: texture_2d<f32>;\n`).join('') : '';
-  return WGSL_PRELUDE + '\n' + decl + src + '\n' + WGSL_EPILOGUE;
+  const customDecl = genCustomAccessors(wgCustomUniformNames(src));
+  return WGSL_PRELUDE + '\n' + decl + customDecl + src + '\n' + WGSL_EPILOGUE;
 }

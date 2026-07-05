@@ -1,0 +1,222 @@
+// Shader Garden — wave-3 item E acceptance tests (player-controller
+// movement: keyboard integrator + touch joystick, one shared move vector).
+// Usage: node tools/test/garden-movement.mjs   (first: npm ci in tools/test)
+//
+// Covers:
+//   (a) holding 'd' increases uCharPosX over successive frames (spy on
+//       GL2Runtime.setUniforms, same technique garden.mjs's armSpies uses).
+//   (b) no movement while a tune-slider <input> or the mini-editor has
+//       focus — the inEditableChrome guard (dom.js) must hold WASD/arrows.
+//   (c) the circular play-radius clamp holds: driving in one direction long
+//       enough to cross it never pushes the position past PLAY_RADIUS.
+//   (d) the touch joystick writes into the SAME uniform path as the
+//       keyboard — real Puppeteer touch/mobile emulation flips
+//       matchMedia('(pointer: coarse)') in this headless Chrome (verified
+//       empirically before writing this file), so the joystick's own
+//       production gate is exercised directly rather than bypassed with a
+//       test-only hook.
+//   (e) no console errors across the whole session.
+// Prints "all-PASS" and exits 0 only if every check passed.
+import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+
+const { server, base: BASE } = await serveSite();
+const browser = await launch();
+let failed = false;
+
+function check(name, cond, detail) {
+  const ok = !!cond;
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' (' + detail + ')' : ''}`);
+  if (!ok) failed = true;
+  return ok;
+}
+
+function freshPage(errors, viewportOpts) {
+  return browser.newPage().then(async (page) => {
+    if (viewportOpts) await page.setViewport(viewportOpts);
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    page.on('pageerror', (e) => errors.push(String(e)));
+    return page;
+  });
+}
+
+// Same GL2Runtime.setUniforms spy garden.mjs's armSpies uses — patched on
+// the prototype so it takes effect regardless of when the instance under
+// test was constructed (method lookup happens at call time).
+async function armSpies(page) {
+  await page.evaluateOnNewDocument(() => {
+    window.__uniformCalls = [];
+    import('./js/runtime/webgl2.js').then((mod) => {
+      const orig = mod.GL2Runtime.prototype.setUniforms;
+      mod.GL2Runtime.prototype.setUniforms = function (values) {
+        window.__uniformCalls.push({ ...values });
+        return orig.call(this, values);
+      };
+    }).catch(() => {});
+  });
+}
+
+/* ---------- (a) holding 'd' increases uCharPosX across frames ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await page.click('.garden-canvas'); // canvas isn't focusable, but a click ensures no stray focus sits on an input
+
+  await page.keyboard.down('d');
+  await sleep(600);
+  await page.keyboard.up('d');
+  await sleep(150); // let the idle-exit frame land so no further calls trickle in
+
+  const posCalls = await page.evaluate(() => window.__uniformCalls.filter((c) => 'uCharPosX' in c).map((c) => c.uCharPosX));
+  check('(a) holding d produced multiple uCharPosX writes', posCalls.length >= 2, 'got ' + posCalls.length);
+  const strictlyIncreasing = posCalls.every((v, i) => i === 0 || v > posCalls[i - 1]);
+  check('(a) uCharPosX strictly increases across those writes', strictlyIncreasing, JSON.stringify(posCalls));
+  check('(a) uCharPosX ends up positive (moved in +x)', posCalls.length > 0 && posCalls[posCalls.length - 1] > 0, JSON.stringify(posCalls));
+
+  check('(a) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (b) no movement while a tune-slider or the mini-editor has focus ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+
+  // Bouncing Figure sits at the same screen-point oracle every other garden
+  // test uses (character center-frame regardless of iTime) and has two
+  // @tune sliders (BOUNCE_HEIGHT, BOUNCE_SPEED) — real production UI, not a
+  // synthetic input planted for this test.
+  await page.mouse.click(720, 380);
+  await sleep(300);
+  const opened = await page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
+  check('(b) opened the Bouncing Figure panel (has @tune sliders)', opened === 'Bouncing Figure', 'got ' + opened);
+
+  await page.focus('.probe-tune-range');
+  await page.evaluate(() => { window.__uniformCalls.length = 0; }); // ignore panel-open noise, isolate the held-key window
+
+  await page.keyboard.down('d');
+  await sleep(500);
+  await page.keyboard.up('d');
+  await sleep(150);
+
+  const movedWhileFocused = await page.evaluate(() => window.__uniformCalls.some((c) => 'uCharPosX' in c || 'uCharPosZ' in c));
+  check('(b) no uCharPos writes while a tune slider has focus', !movedWhileFocused);
+
+  // Range input's own native behavior isn't blocked (only our listener's
+  // preventDefault is skipped) — confirm the guard is the reason nothing
+  // moved, not some unrelated breakage: focus a plain control-free spot
+  // (blur back to body) and confirm the SAME key now does move the figure.
+  await page.evaluate(() => document.activeElement.blur());
+  await page.evaluate(() => { window.__uniformCalls.length = 0; });
+  await page.keyboard.down('d');
+  await sleep(500);
+  await page.keyboard.up('d');
+  await sleep(150);
+  const movedAfterBlur = await page.evaluate(() => window.__uniformCalls.some((c) => 'uCharPosX' in c));
+  check('(b) the same key DOES move the figure once focus leaves the slider (guard is the cause, not a stuck listener)', movedAfterBlur);
+
+  check('(b) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (c) play-radius clamp holds ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await armSpies(page);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await page.click('.garden-canvas');
+
+  // PLAY_RADIUS=3.2, MOVE_SPEED=1.8 units/s (index.js) — crossing the radius
+  // in one axis takes ~1.8s of real hold time; 4s gives ample margin even
+  // under headless SwiftShader's slower/irregular frame cadence (position
+  // integration uses real elapsed dt, so total distance only depends on
+  // wall-clock hold time, not frame rate).
+  await page.keyboard.down('d');
+  await sleep(4000);
+  await page.keyboard.up('d');
+  await sleep(150);
+
+  const calls = await page.evaluate(() => window.__uniformCalls.filter((c) => 'uCharPosX' in c));
+  const last = calls[calls.length - 1];
+  check('(c) the clamp produced at least one uCharPosX write', !!last, 'calls=' + calls.length);
+  if (last) {
+    const dist = Math.hypot(last.uCharPosX ?? 0, last.uCharPosZ ?? 0);
+    check('(c) final distance from origin is at (not past) the 3.2 play radius', dist <= 3.21 && dist >= 3.1, 'dist=' + dist);
+  }
+
+  check('(c) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (d) touch joystick writes through the same uniform path ---------- */
+{
+  const errors = [];
+  // Real touch/mobile emulation, not a bypass: setViewport({isMobile,
+  // hasTouch}) flips matchMedia('(pointer: coarse)') in this headless
+  // Chrome (verified directly before writing this test) — joystick.js's own
+  // production gate decides to build the nub, exactly as a real phone would
+  // trip it. No test-only hook was added to joystick.js for this.
+  const page = await freshPage(errors, { width: 400, height: 700, isMobile: true, hasTouch: true });
+  await armSpies(page);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+
+  const coarse = await page.evaluate(() => matchMedia('(pointer: coarse)').matches);
+  check('(d) coarse-pointer emulation actually took effect', coarse);
+
+  const nub = await page.waitForSelector('.garden-joystick', { timeout: 4000 }).catch(() => null);
+  check('(d) the joystick nub is built under coarse-pointer emulation', !!nub);
+  if (nub) {
+    const box = await nub.boundingBox();
+    const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+    await page.evaluate(() => { window.__uniformCalls.length = 0; });
+
+    // Pointer events (mouse-typed, since headless Chrome has no real
+    // touchscreen) — joystick.js listens for pointerdown/move/up, which
+    // PointerEvent unifies with touch on a real device; this drives the
+    // exact same listeners a finger drag would.
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx + 30, cy - 10, { steps: 5 }); // drag toward +x, slightly -z
+    await sleep(120);
+    await page.mouse.up();
+    await sleep(150);
+
+    const posCalls = await page.evaluate(() => window.__uniformCalls.filter((c) => 'uCharPosX' in c || 'uCharPosZ' in c));
+    check('(d) dragging the joystick produced uCharPos writes through setUniforms (same path as keyboard)', posCalls.length >= 1, 'got ' + posCalls.length);
+    const grewPositiveX = posCalls.some((c) => (c.uCharPosX ?? 0) > 0);
+    check('(d) the drag direction (+x) is reflected in uCharPosX', grewPositiveX, JSON.stringify(posCalls));
+  }
+
+  check('(d) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+/* ---------- (e) desktop (non-coarse) never builds the joystick ---------- */
+{
+  const errors = [];
+  const page = await freshPage(errors);
+  await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  const nub = await page.$('.garden-joystick');
+  check('(e) no joystick DOM on a regular (fine-pointer) desktop viewport', nub === null);
+  check('(e) no console errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+await browser.close();
+server.kill();
+console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');
+process.exit(failed ? 1 : 0);

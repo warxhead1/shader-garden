@@ -84,6 +84,14 @@ FILES = [
     # Raised deliberately, this commit.
     ("site/js/organs/provenance/index.js", 280, None),
     ("site/js/organs/anatomy/index.js", 300, None),
+    # wave-4 Area E: the DGC/producer-consumer teaching overlay (Shift+D) —
+    # own organ, own budget row, kept out of the garden aggregate (§0.5 of
+    # the wave-4 blueprint: none of the tight existing aggregates had room).
+    # Renders one card per garden component + one directed-edge SVG (mirrors
+    # anatomy's own card/edge substrate) plus the dispatch-order list and the
+    # mandatory teaching disclaimer. Actual 145/250. Raised deliberately,
+    # this commit.
+    ("site/js/organs/dgc-graph/index.js", 250, None),
     # SEED-1 (V2_BLUEPRINT.md item 15): ~450 LOC target / 600 max, excluding
     # the forked runtime (site/js/seed/runtime.js, uncapped here — it's a
     # deliberate byte-for-byte snapshot per ruling C8, not first-party code

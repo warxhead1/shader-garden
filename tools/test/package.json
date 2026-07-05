@@ -14,7 +14,8 @@
     "loader": "node loader.mjs",
     "anatomy": "node anatomy.mjs",
     "garden-wgsl-parity": "node garden-wgsl-parity.mjs",
-    "garden-uniform-inspector": "node garden-uniform-inspector.mjs"
+    "garden-uniform-inspector": "node garden-uniform-inspector.mjs",
+    "dgc-graph": "node dgc-graph.mjs"
   },
   "dependencies": {
     "puppeteer-core": "25.3.0"

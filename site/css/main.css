@@ -1090,6 +1090,40 @@ a:hover { text-decoration: underline; }
 .anatomy-layout-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
 .anatomy-layout-msg { color: var(--muted); font-size: 0.82rem; }
 
+/* ================= dgc-graph overlay (wave-4 Area E) ================= */
+/* Shares #region-overlay with anatomy (.anatomy-overlay-region's [hidden]
+   rule already covers this organ too — no second region, no CSS needed for
+   that part) and reuses anatomy's card/edge visual language deliberately. */
+
+.dgc-overlay {
+  position: fixed;
+  inset: 1rem;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.3rem 1.3rem;
+  overflow: auto;
+}
+.dgc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
+.dgc-head h2 { margin: 0; }
+.dgc-nongoal { margin: 0 0 0.3rem; font-size: 0.82rem; color: var(--cyan); }
+.dgc-explainer { margin: 0 0 0.5rem; font-size: 0.8rem; line-height: 1.5; color: var(--muted); }
+.dgc-body { display: flex; flex-direction: column; gap: 1.1rem; margin-top: 0.5rem; }
+.dgc-section h3 { margin: 0 0 0.5rem; font-size: 0.95rem; color: var(--muted); }
+
+.dgc-graph-wrap { position: relative; }
+.dgc-edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.dgc-edge { stroke: var(--muted); stroke-width: 1.5; }
+.dgc-edge-const { stroke-dasharray: 4 4; opacity: 0.6; }
+.dgc-edge-call { opacity: 0.85; }
+.dgc-cards { position: relative; display: flex; flex-wrap: wrap; gap: 0.8rem; }
+.dgc-card { min-width: 12rem; padding: 0.6rem 0.8rem; border-radius: 0.6rem; font: 0.78rem/1.5 var(--mono); }
+.dgc-card-id { font-weight: 700; font-size: 0.92rem; }
+.dgc-card-meta, .dgc-card-writes, .dgc-card-reads, .dgc-card-depends { color: var(--muted); }
+
+.dgc-dispatch-note { margin: 0 0 0.5rem; font-size: 0.8rem; color: var(--muted); }
+.dgc-dispatch-list { margin: 0; padding-left: 1.2rem; font: 0.85rem var(--mono); }
+
 /* ================= misc ================= */
 
 @media (prefers-reduced-motion: reduce) {

@@ -9,9 +9,14 @@
 // the WebGL2 backend's output.
 
 import { createClock, attachMouse } from './uniforms.js';
-import { WGSL_PRELUDE_LINES as PRELUDE_LINES, wrapWgsl, wgChanLines } from './wrap.js';
+import {
+  WGSL_PRELUDE_LINES as PRELUDE_LINES, wrapWgsl, wgChanLines,
+  wgCustomUniformNames, wgCustomLines, WGSL_CUSTOM_UNIFORM_SLOTS,
+} from './wrap.js';
 
-const UNIFORM_BYTES = 48; // res(16) + mouse(16) + time/dt/frame/_pad(16)
+// res(16) + mouse(16) + time/dt/frame/_pad(16) + the WGSL_CUSTOM_UNIFORM_SLOTS-float bank (64)
+const UNIFORM_BYTES = 48 + WGSL_CUSTOM_UNIFORM_SLOTS * 4;
+const CUSTOM_OFFSET_FLOATS = 12; // res+mouse+time/dt/frame/_pad = 12 floats before the bank
 // See webgl2.js's DEFAULT_DPR_CAP comment — same PERF-0 rationale, same value.
 const DEFAULT_DPR_CAP = 1.5;
 const RENDER_SCALE_MIN = 0.25;
@@ -93,6 +98,15 @@ export class GPURuntime {
       size: UNIFORM_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    // GARDEN-0-on-WebGPU: setUniforms()'s WGSL equivalent — see wrap.js's
+    // `@sg-uniforms` directive. this._customNames is the active shader's
+    // bank-slot -> name list (empty for a kernel with no directive);
+    // this._customValues is name -> value and persists across setShader()
+    // the same way GL2Runtime's _customUniforms does. A name absent from
+    // the active shader's directive is silently ignored (never written).
+    this._customNames = [];
+    this._customValues = {};
 
     // COMP-0: bind group layout depends on the active shader's channel count
     // (0-4), cached per count since most kernels never change it.
@@ -200,7 +214,7 @@ export class GPURuntime {
     if (this._lost || this._disposed) return { ok: false, log: 'device lost', messages: [] };
     const full = wrapWgsl(wgslSrc, channels);
     const userLineCount = wgslSrc.split('\n').length;
-    const offset = PRELUDE_LINES + wgChanLines(channels);
+    const offset = PRELUDE_LINES + wgChanLines(channels) + wgCustomLines(wgslSrc);
 
     this._device.pushErrorScope('validation');
     const module = this._device.createShaderModule({ code: full });
@@ -231,6 +245,18 @@ export class GPURuntime {
       },
       primitive: { topology: 'triangle-list' },
     });
+    // GARDEN-1 probe readback (readPixel()): a second pipeline against the
+    // SAME module/layout, targeting a fixed 'rgba8unorm' format regardless
+    // of the canvas's own preferred format (often 'bgra8unorm' — reading
+    // raw bytes back from that would put the shader's R channel at byte
+    // offset 2, not 0). One extra pipeline object per setShader() call;
+    // never touches the canvas.
+    const probePipeline = this._device.createRenderPipeline({
+      layout: this._layoutFor(channels).pipelineLayout,
+      vertex: { module, entryPoint: 'sg_vertex' },
+      fragment: { module, entryPoint: 'sg_fragment', targets: [{ format: 'rgba8unorm' }] },
+      primitive: { topology: 'triangle-list' },
+    });
     const pipeErr = await this._device.popErrorScope();
     if (pipeErr) {
       // No position survives pipeline creation — always whole-doc.
@@ -242,12 +268,31 @@ export class GPURuntime {
     }
 
     this._pipeline = pipeline;
+    this._probePipeline = probePipeline;
     this._channelCount = channels;
+    this._customNames = wgCustomUniformNames(wgslSrc); // stale locations from the old shader are moot — read by name, not location
     this._rebuildBindGroup();
     return { ok: true, log, messages };
   }
 
-  _writeUniforms(time, dt, frame, mouse, w = this._canvas.width, h = this._canvas.height) {
+  /**
+   * Set named float uniforms beyond the runtime's fixed five — GARDEN-0-on-
+   * WebGPU's `@tune` sliders + probe toggle (see wrap.js's `@sg-uniforms`
+   * directive). Values persist across setShader() the same way
+   * GL2Runtime.setUniforms() does; a name the active shader's directive
+   * doesn't declare is silently ignored (never written to the bank).
+   */
+  setUniforms(values) {
+    Object.assign(this._customValues, values);
+  }
+
+  /**
+   * @param {Record<string, number>} [customOverride] - GARDEN-1 readPixel():
+   *   custom-uniform values for THIS write only, never merged into
+   *   this._customValues — a name present here wins for this frame; any
+   *   other active custom name still reads its persisted setUniforms() value.
+   */
+  _writeUniforms(time, dt, frame, mouse, w = this._canvas.width, h = this._canvas.height, customOverride = null) {
     const u = this._uniformData;
     u[0] = w;
     u[1] = h;
@@ -261,11 +306,20 @@ export class GPURuntime {
     u[9] = dt;
     u[10] = frame;
     u[11] = 0;
+    for (let i = 0; i < this._customNames.length; i++) {
+      const name = this._customNames[i];
+      const v = customOverride && Object.prototype.hasOwnProperty.call(customOverride, name)
+        ? customOverride[name] : this._customValues[name];
+      u[CUSTOM_OFFSET_FLOATS + i] = v ?? 0;
+    }
     this._device.queue.writeBuffer(this._uniformBuf, 0, u);
   }
 
-  /** @param {GPUTextureView} [view] — defaults to the canvas; renderTo() passes an offscreen view. */
-  _encodeFrame(view = this._context.getCurrentTexture().createView()) {
+  /**
+   * @param {GPUTextureView} [view] — defaults to the canvas; renderTo()/readPixel() pass an offscreen view.
+   * @param {GPURenderPipeline} [pipeline] — defaults to the live pipeline; readPixel() passes _probePipeline.
+   */
+  _encodeFrame(view = this._context.getCurrentTexture().createView(), pipeline = this._pipeline) {
     const encoder = this._device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
@@ -275,7 +329,7 @@ export class GPURuntime {
         storeOp: 'store',
       }],
     });
-    pass.setPipeline(this._pipeline);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, this._bindGroup);
     pass.draw(3);
     pass.end();
@@ -395,6 +449,71 @@ export class GPURuntime {
   }
 
   /**
+   * GARDEN-1 — the WebGPU equivalent of webgl2.js's synchronous probe
+   * readPixels: render one frame into a dedicated offscreen 'rgba8unorm'
+   * texture (never the canvas — organs/garden/probe.js's "restore" redraw
+   * that webgl2.js needs is therefore a no-op on this backend, since the
+   * visible canvas was never touched) and read back one pixel.
+   *
+   * Necessarily async (WebGPU has no synchronous readback), but the
+   * render+copy commands are enqueued in one synchronous stretch with no
+   * `await` between _writeUniforms/_encodeFrame and the queue.submit()
+   * below — the only await is mapAsync(), by which point the offscreen
+   * work is already enqueued. `customOverride` (see _writeUniforms) is
+   * scoped to this call alone, so a concurrent rAF frame during that await
+   * still renders the canvas from persisted setUniforms() state, never
+   * this call's override.
+   *
+   * @param {number} x - drawing-buffer pixel x
+   * @param {number} y - drawing-buffer pixel y, GL convention (bottom-left
+   *   origin — matches webgl2.js's readPixels/canvasPixelCoords contract)
+   * @param {number} timeSeconds
+   * @param {Record<string, number>} [customOverride] - e.g. `{ uProbe: 1 }`
+   * @returns {Promise<Uint8Array|null>} [r,g,b,a] 0-255, or null if the
+   *   pixel is off-canvas or there's no live pipeline/lost device
+   */
+  async readPixel(x, y, timeSeconds, customOverride) {
+    if (!this._pipeline || this._lost || this._disposed) return null;
+    const w = this._canvas.width, h = this._canvas.height;
+    const px = Math.round(x);
+    const py = h - 1 - Math.round(y); // GL bottom-left -> texture top-left
+    if (px < 0 || py < 0 || px >= w || py >= h) return null;
+
+    if (!this._probeTex || this._probeTexW !== w || this._probeTexH !== h) {
+      this._probeTex?.destroy();
+      this._probeTex = this._device.createTexture({
+        size: [w, h],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+      });
+      this._probeTexW = w;
+      this._probeTexH = h;
+    }
+    this._writeUniforms(timeSeconds, 0, 0, [0, 0, 0, 0], w, h, customOverride);
+    this._encodeFrame(this._probeTex.createView(), this._probePipeline);
+
+    // WebGPU's minimum copyTextureToBuffer row-pitch alignment — one pixel
+    // needs 4 bytes, but bytesPerRow must still be a multiple of 256.
+    const BYTES_PER_ROW = 256;
+    const readBuf = this._device.createBuffer({
+      size: BYTES_PER_ROW,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this._device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: this._probeTex, origin: { x: px, y: py } },
+      { buffer: readBuf, bytesPerRow: BYTES_PER_ROW },
+      { width: 1, height: 1 },
+    );
+    this._device.queue.submit([encoder.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const out = new Uint8Array(readBuf.getMappedRange().slice(0, 4));
+    readBuf.unmap();
+    readBuf.destroy();
+    return out;
+  }
+
+  /**
    * COMP-0: an offscreen render target usable as an iChannel source — a
    * texture sized (w,h) in the canvas's format. `feedback:true` allocates a
    * second texture and ping-pongs across renderTo() calls: self-feedback is
@@ -437,8 +556,10 @@ export class GPURuntime {
     if (this._resizeObserver) this._resizeObserver.disconnect();
     if (this._detachMouse) this._detachMouse();
     try { this._uniformBuf.destroy(); } catch { /* already gone */ }
+    try { this._probeTex?.destroy(); } catch { /* already gone */ }
     try { this._context.unconfigure(); } catch { /* not configured */ }
     try { this._device.destroy(); } catch { /* already lost */ }
     this._pipeline = null;
+    this._probePipeline = null;
   }
 }

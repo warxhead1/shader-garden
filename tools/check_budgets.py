@@ -18,8 +18,11 @@ FILES = [
     # 120 -> 132: PERF-2 (2026-07-04) — maxDpr passthrough to the webgl2
     # tryWebgl2() helper, plus an EMA over onPerf's ~1Hz ms samples and an
     # opts.onPerf callback so a mount (the garden) can show an honest
-    # ms/frame + renderScale HUD. Actual 129/132. Raised deliberately.
-    ("site/js/core/runtime-host.js", 132, None),
+    # ms/frame + renderScale HUD.
+    # 132 -> 145: GARDEN-1 — rebuild(overrides) lets a caller (the garden
+    # organ's editing seam) permanently pin a mount onto a specific backend.
+    # Both raises land in the same wave-2 merge. Actual 135/145.
+    ("site/js/core/runtime-host.js", 145, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.
@@ -102,10 +105,20 @@ FILES = [
     # per-mount cap (e.g. the garden's raymarch) can pin tighter than the
     # site-wide DEFAULT_DPR_CAP. Actual 472/480. Raised deliberately.
     ("site/js/runtime/webgl2.js", 480, None),
-    ("site/js/runtime/webgpu.js", 480, None),
+    # 480 -> 580: GARDEN-1 (garden-webgpu wave 2) — setUniforms()'s WGSL
+    # equivalent (a custom-uniform bank + name registry) and readPixel()
+    # (the offscreen probe-readback primitive: a second rgba8unorm pipeline
+    # + copyTextureToBuffer/mapAsync path), both needed to run GARDEN-0's
+    # scene on this backend at all. Actual 565/580. Raised deliberately,
+    # this commit.
+    ("site/js/runtime/webgpu.js", 580, None),
     # wrap.js also rolls up into the admission aggregate below (net -30 from
     # runtimes, per the admission budget); this row is the COMP-0 hard cap.
-    ("site/js/runtime/wrap.js", 70, None),
+    # 70 -> 115: GARDEN-1 adds the `@sg-uniforms` directive parser
+    # (wgCustomUniformNames) + accessor-function generator (genCustomAccessors)
+    # that wrapWgsl() now injects — webgpu.js's WGSL side of setUniforms().
+    # Actual 108/115. Raised deliberately, this commit.
+    ("site/js/runtime/wrap.js", 115, None),
     # COMP-1 (v2 §7.3 item 24): DAG validation shared by the composition
     # player and admission's SG-S08 rule — kept OUT of the admission
     # aggregate below (its byte budget was already near its COMP-0 cap) since
@@ -159,7 +172,10 @@ AGGREGATES = [
     # admitComposition()/runCompositionWorker() (SG-S08 + per-pass SG-Sxx +
     # the composed sacrificial watchdog). Actual at merge: 1093 LOC / 49426
     # bytes; caps raised for headroom. Raised deliberately, this commit.
-    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 51200),
+    # 51200 -> 53248 bytes: GARDEN-1's wrap.js growth (see its own row above)
+    # rolls up into this aggregate; LOC stays under the existing cap.
+    # Actual 1137 LOC / 51763 bytes. Raised deliberately, this commit.
+    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 53248),
     # GARDEN-0 (v2 §8.29): the whole organ, one cap — parse/probe/panel/index.
     # 700 -> 1150: GARDEN-IDE "depth" wave — component tray + keyboard nav
     # (tray.js), the static connections analyzer (connections.js, has its own

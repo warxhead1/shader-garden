@@ -384,6 +384,10 @@ SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCen
   // from here, so skipping straight to a sentinel is not a visual
   // approximation, it's the same "terrain isn't the nearest surface"
   // conclusion the real computation would reach, without paying for it.
+  // CONTRACT: this bound assumes sg_biome_hills() stays within [0,1] (the
+  // pristine body and both shipped terrain variants clamp to that). An
+  // edited terrain body exceeding 1.0 will see ascending rays skip terrain
+  // that is actually reachable — clamp your biome function, not this ceil.
   float terrainCeil = SG_TERRAIN_HEIGHT_RNG * max(TERRAIN_SCALE, 0.05) + 0.02;
   float t = 0.05;
   float hitKind = COMP_TERRAIN; // which candidate was closest last — decides the fallback below

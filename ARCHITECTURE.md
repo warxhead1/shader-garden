@@ -471,8 +471,10 @@ rt.getClock()                   // the shared clock: { time, dt, frame, mouse, r
 rt.seek(t) / rt.step(dt?)       // scrub / manual single-frame advance while stopped, then redraw (ED-3)
 rt.setRenderScale(s)            // multiplier on the DPR-capped buffer size, clamped [0.25, 2] (PERF-0)
 rt.setUniforms({name: n})       // named float uniforms beyond the fixed five — GARDEN-0's
-                                 // @tune sliders + probe toggle (GL2 only; merges, persists
-                                 // across setShader(), unknown names silently ignored)
+                                 // @tune sliders + probe toggle; merges, persists across
+                                 // setShader(), unknown names silently ignored. Both backends
+                                 // (WGSL side: wrap.js's `@sg-uniforms` directive + a fixed
+                                 // 16-float bank — see § "The Garden" below)
 rt.setChannels([tex, ...])      // COMP-0: bind up to 4 WebGLTextures as iChannel0..
 rt.createTarget(w, h, {feedback}) // COMP-0: offscreen render target; feedback:true ping-pongs
 rt.renderTo(target, t)          // COMP-0: renderOnce's off-screen sibling

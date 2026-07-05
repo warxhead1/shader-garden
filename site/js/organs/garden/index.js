@@ -1,9 +1,13 @@
 // Shader Garden — organs/garden/index.js
-// "/garden" organ (GARDEN-0). A single raymarched GLSL scene made of named,
-// probe-able components — see assets/garden/scene.glsl's header and
-// ARCHITECTURE.md § "The Garden" for the annotation convention this reads.
-// GL2-only by design (prefer: 'webgl2') — a WGSL port is future work, not a
-// v2 requirement.
+// "/garden" organ (GARDEN-0/GARDEN-1). A single raymarched scene made of
+// named, probe-able components — see assets/garden/scene.{glsl,wgsl}'s
+// headers and ARCHITECTURE.md § "The Garden" for the annotation convention
+// this reads (byte-identical in both source files — parse.js never knows
+// which backend actually rendered). prefer: 'auto': WebGPU when
+// scene.wgsl loads and compiles, WebGL2 otherwise. Live component editing
+// (GARDEN-IDE, edit.js) is GLSL-only — opening "Edit here" on a
+// WebGPU-backed mount transparently rebuilds it onto WebGL2 first (see
+// openProbe's onEditHere below).
 
 import { centerNotice } from '../../core/loader.js';
 import { runtimeHost } from '../../core/runtime-host.js';
@@ -87,6 +91,15 @@ export async function mount(ctx) {
     root.append(notice);
     return () => notice.remove();
   }
+  // Best-effort: a missing/broken scene.wgsl just means runtimeHost's
+  // prefer:'auto' never gets a WGSL candidate and falls straight to WebGL2 —
+  // never a hard failure the way the GLSL fetch above is (GLSL is the only
+  // source GARDEN-IDE can ever splice-recompile, so it's load-bearing).
+  let sceneWgslSrc;
+  try {
+    const res = await fetch('assets/garden/scene.wgsl');
+    if (res.ok) sceneWgslSrc = await res.text();
+  } catch { /* WebGL2-only for this mount */ }
   // A nav-away during the fetch above is invisible to the loader until this
   // mount() call returns (loader mid-mount staleness gap) — bail before
   // spending a live GL context on a route nobody's looking at anymore.
@@ -163,17 +176,21 @@ export async function mount(ctx) {
 
   function onBuild() {
     if (!rh) return; // fires once synchronously during the initial build, before rh is assigned
-    backendBadge.textContent = rh.backend === 'webgl2' ? 'WebGL2' : 'no GPU';
+    backendBadge.textContent = rh.backend === 'webgpu' ? 'WebGPU' : rh.backend === 'webgl2' ? 'WebGL2' : 'no GPU';
     if (!rh.backend) {
-      stage.append(centerNotice('WebGL2 is not available in this browser.'));
+      stage.append(centerNotice('No GPU backend is available in this browser.'));
       return;
     }
     // A context-loss rebuild recompiles from the pristine glslSrc closed
     // over at runtimeHost() mount time — reassemble any session edits back
     // in before re-applying slider values, same reason as the line below.
+    // editedBodies is only ever non-empty once GARDEN-IDE has run, which
+    // permanently pins this mount to WebGL2 (see openProbe's onEditHere) —
+    // so `rh.runtime.setShader` here is always the synchronous GL2 one.
     if (editedBodies.size) rh.runtime.setShader(buildSceneSource());
     // Re-applies current slider values after a fresh build — including a
-    // context-loss rebuild, where the new GL2Runtime starts with none set.
+    // context-loss rebuild, where the fresh runtime starts with none set.
+    // Both backends support setUniforms() (GARDEN-1).
     rh.runtime.setUniforms(tuneValues);
     applyQualityUniform();
   }
@@ -207,7 +224,7 @@ export async function mount(ctx) {
 
   let rh;
   rh = await runtimeHost(stage, {
-    prefer: 'webgl2', glslSrc: sceneSrc, canvasClass: 'viewer-canvas garden-canvas',
+    prefer: 'auto', glslSrc: sceneSrc, wgslSrc: sceneWgslSrc, canvasClass: 'viewer-canvas garden-canvas',
     fpsBadge, onLost: 'rebuild', bus, organ: 'garden', onChange: onBuild,
     maxDpr: GARDEN_MAX_DPR, onPerf: fmtPerf,
   });
@@ -250,6 +267,16 @@ export async function mount(ctx) {
         rh.runtime?.setUniforms({ [name]: v });
       },
       async onEditHere(onSourceChanged) {
+        // GARDEN-IDE's live recompile is GLSL-only — a WebGPU-backed mount
+        // rebuilds onto WebGL2 first, transparently, and stays there for
+        // the rest of this mount's life (runtime-host.js's rebuild()
+        // permanently merges the override — no thrashing back to WebGPU on
+        // a later context-loss rebuild). ctx.alive() isn't re-checked here:
+        // this await is short (one fresh WebGL2 context, no network), and a
+        // nav-away mid-rebuild just leaves an orphaned runtime the loader's
+        // own superseded-mount cleanup already handles via this organ's
+        // returned cleanup() calling rh.dispose().
+        if (rh.backend === 'webgpu') await rh.rebuild({ prefer: 'webgl2' });
         const { mountComponentEditor } = await import('./edit.js');
         return mountComponentEditor({
           component,
@@ -287,6 +314,10 @@ export async function mount(ctx) {
           ? component.source
           : await loadVariantBody(component.id, variant).catch(() => null);
         if (nextBody == null) return null;
+        // Variant bodies are GLSL, spliced through the same recompile path
+        // as hand edits — same backend seam as onEditHere: a WebGPU-backed
+        // mount pins onto WebGL2 first (and stays there — see onEditHere).
+        if (rh.backend === 'webgpu') await rh.rebuild({ prefer: 'webgl2' });
         const res = recompileWithBody(component, nextBody);
         if (!res.ok) return null;
         if (variant.pristine) variantChoices.delete(component.id);
@@ -317,6 +348,11 @@ export async function mount(ctx) {
     // fetches the measurement machinery.
     async onMeasure() {
       if (!rh.runtime) return;
+      // measure.js stubs GLSL bodies and re-times via the synchronous GL2
+      // readback — same backend seam as editing and variants: measuring a
+      // WebGPU-backed mount pins it onto WebGL2 first (and it stays there).
+      if (rh.backend === 'webgpu') await rh.rebuild({ prefer: 'webgl2' });
+      if (!rh.runtime) return;
       const { measureComponentCosts } = await import('./measure.js');
       const results = await measureComponentCosts({ runtime: rh.runtime, components, editedBodies, buildSceneSource, tuneValues });
       for (const [id, ms] of results) tray.setCost(id, ms);
@@ -332,15 +368,23 @@ export async function mount(ctx) {
     if (e.target.closest('.probe-panel, .garden-tray')) return; // dragging a slider/tray item isn't a canvas gesture
     downAt = [e.clientX, e.clientY];
   }
-  function onPointerUp(e) {
+  // async: WebGPU's probeAt() has no synchronous readback (see probe.js).
+  // WebGL2's own probeAt() resolves in the same microtask either way, so
+  // this costs GL2 nothing observable.
+  async function onPointerUp(e) {
     if (!downAt || e.target.closest('.probe-panel, .garden-tray')) { downAt = null; return; }
     const [dx0, dy0] = downAt;
     downAt = null;
     if (Math.hypot(e.clientX - dx0, e.clientY - dy0) > CLICK_SLOP) return; // an orbit drag, not a click
     if (!rh.runtime) return;
-    const canvas = rh.runtime.canvas;
+    const runtime = rh.runtime;
+    const canvas = runtime.canvas;
     const [px, py] = canvasPixelCoords(canvas, e.clientX, e.clientY);
-    const id = probeAt(rh.runtime, px, py);
+    const id = await probeAt(runtime, px, py);
+    // The mount (or just this runtime, via a context-loss rebuild) may have
+    // gone away while awaiting a WebGPU readback — re-check before touching
+    // rh/the (possibly stale) runtime again.
+    if (rh.runtime !== runtime) return;
     if (id == null || id < 1 || id > components.length) return;
     openProbe(components[id - 1], id);
   }

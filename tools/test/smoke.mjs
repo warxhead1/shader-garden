@@ -987,10 +987,14 @@ async function buttonState(page, text) {
 // (v) without the operator flag, Anatomy shows no export control at all.
 {
   const page = await browser.newPage();
-  // Gallery keeps network activity alive (hero canvas, thumbs) — networkidle2
-  // (section 1's own choice for this route), not networkidle0, which never
-  // resolves here.
-  await gotoSafe(page, BASE + '/index.html#/', { waitUntil: 'networkidle2', timeout: 20000 });
+  // domcontentloaded + a .card wait, NOT networkidle2: this section only
+  // needs boot.js's hotkey listener live (proven by the gallery organ having
+  // mounted), and the gallery's hero canvas + thumbs keep network activity
+  // going long enough that idle-based waits can time out on slow machines —
+  // this exact goto was the first CI-runner casualty (2-core GitHub runner,
+  // 20s×2 nav timeout, late in the suite when the browser is heaviest).
+  await gotoSafe(page, BASE + '/index.html#/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+  await page.waitForSelector('.card', { timeout: 15000 });
   await page.keyboard.down('Shift');
   await page.keyboard.press('KeyA');
   await page.keyboard.up('Shift');

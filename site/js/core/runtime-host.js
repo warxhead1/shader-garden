@@ -87,13 +87,34 @@ export async function runtimeHost(host, opts) {
     h.runtime = null;
     scale = 1; autoScale = true; lowSince = 0; highSince = 0; emaMs = null; // fresh mount/rebuild starts the ladder clean
     host.replaceChildren(); // fresh canvas each (re)build — one context type per canvas
-    const canvas = document.createElement('canvas');
+    let canvas = document.createElement('canvas');
     if (opts.canvasClass) canvas.className = opts.canvasClass;
     host.append(canvas);
 
     let picked = null;
-    if (opts.prefer !== 'webgl2' && opts.wgslSrc) picked = await tryWebgpu(canvas, opts.wgslSrc);
-    if (!picked && opts.prefer !== 'webgpu' && opts.glslSrc) picked = tryWebgl2(canvas, opts.glslSrc, opts.maxDpr);
+    const attemptedWebgpu = opts.prefer !== 'webgl2' && !!opts.wgslSrc;
+    if (attemptedWebgpu) picked = await tryWebgpu(canvas, opts.wgslSrc);
+    if (!picked && opts.prefer !== 'webgpu' && opts.glslSrc) {
+      // A canvas's context type locks in on first getContext() call — a
+      // WebGPU attempt above may already have claimed this one as 'webgpu'
+      // even though it went on to fail (a bad WGSL kernel gets a context
+      // fine and only fails at compile/pipeline time), so a second
+      // getContext('webgl2') on the SAME element silently returns null
+      // instead of falling back (verified empirically: canvas.getContext
+      // ('webgpu') then ('webgl2') === null, no exception). Give WebGL2 a
+      // fresh canvas whenever a WebGPU attempt was actually made (not just
+      // whenever wgslSrc exists — prefer:'webgl2' never touches the canvas
+      // at all, so reusing it there is correct, not just harmless), so a
+      // failed WGSL kernel degrades to WebGL2 instead of dead-ending with
+      // no backend at all.
+      if (attemptedWebgpu) {
+        const fresh = document.createElement('canvas');
+        if (opts.canvasClass) fresh.className = opts.canvasClass;
+        canvas.replaceWith(fresh);
+        canvas = fresh;
+      }
+      picked = tryWebgl2(canvas, opts.glslSrc, opts.maxDpr);
+    }
     if (disposed || my !== gen) { picked?.runtime?.dispose(); return; }
 
     if (!picked) { canvas.remove(); h.backend = null; h.ok = false; h.log = ''; opts.onChange?.(); return; }

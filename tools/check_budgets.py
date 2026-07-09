@@ -28,7 +28,16 @@ FILES = [
     # stall where a context that loses immediately on every rebuild retried
     # forever with nothing to observe it. Lands on top of GARDEN-1's cap in
     # this cherry-pick. Actual 168/180. Raised deliberately.
-    ("site/js/core/runtime-host.js", 180, None),
+    # 180 -> 195: wave-4 fallback-fragility fix — a canvas's context type
+    # locks in on first getContext() call, so a WebGPU attempt that gets a
+    # context but then fails to compile/link left build()'s WebGL2 fallback
+    # attempt with nowhere to go (same canvas, second context type, always
+    # null) — the site landed on "no GPU" instead of degrading cleanly.
+    # build() now swaps in a fresh canvas for the WebGL2 attempt whenever a
+    # WebGPU attempt was actually made. Found via real-GPU verification (this
+    # repo's headless suite has no navigator.gpu to have caught it either
+    # way). Actual 186/195. Raised deliberately.
+    ("site/js/core/runtime-host.js", 195, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.
@@ -192,7 +201,10 @@ AGGREGATES = [
     # circuit breaker (see runtime-host.js's own cap comment) cherry-picked
     # on top of the wave-2 union above. Actual 729 LOC / 29934 bytes.
     # Raised deliberately.
-    ("site/js/core/*.js", 750, 30720),
+    # 750 -> 765 LOC / 30720 -> 31744 bytes: wave-4's fresh-canvas fallback
+    # fix (see runtime-host.js's own cap comment). Actual 745 LOC / 30827
+    # bytes. Raised deliberately.
+    ("site/js/core/*.js", 765, 31744),
     # 31744 -> 35840 bytes: ADM-C (V2_BLUEPRINT.md item 13) adds the GLSL
     # sacrificial worker path (sac-worker.js) and the full report.js UI
     # (badge hover legend, findings, preview, timing strip, copy button) —

@@ -158,8 +158,19 @@ jobs:
         working-directory: tools/test
         run: node webgpu-live.mjs 2>&1 | tee out/logs/webgpu-live.log
 
+      - name: webgpu-fallback (broken-WGSL → WebGL2 regression — non-blocking, same GPU constraint)
+        id: webgpu_fallback
+        continue-on-error: true
+        # Same runner-class limitation as webgpu-live above: the canvas
+        # context-type-lock regression only reproduces where navigator.gpu
+        # exists and a real adapter answers, which GitHub's GPU-less runners
+        # can't provide. Runs for its log value; a self-hosted GPU runner
+        # makes both of these real gates.
+        working-directory: tools/test
+        run: node webgpu-fallback.mjs 2>&1 | tee out/logs/webgpu-fallback.log
+
       - name: Upload screenshot/log artifacts on failure
-        if: failure() || steps.webgpu_live.outcome == 'failure'
+        if: failure() || steps.webgpu_live.outcome == 'failure' || steps.webgpu_fallback.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: test-battery-failure-artifacts

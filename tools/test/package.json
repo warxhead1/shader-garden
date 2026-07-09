@@ -28,6 +28,7 @@
     "servesite": "node servesite.mjs",
     "perf": "node perf.mjs",
     "webgpu-live": "node webgpu-live.mjs",
+    "webgpu-fallback": "node webgpu-fallback.mjs",
     "shots": "node shots.mjs"
   },
   "dependencies": {

@@ -5,18 +5,49 @@
       "sourceKernel": "biome-rolling-hills",
       "note": "Octave persistence (a constant 0.53 in the source kernel) became the TERRAIN_ROUGHNESS slider for the garden."
     },
-    "sky":       { "kind": "handmade" },
-    "character": { "kind": "handmade" },
-    "shadow":    { "kind": "handmade" },
-    "pond":      { "kind": "handmade" },
-    "grass":     { "kind": "handmade" },
-    "clouds":    { "kind": "handmade" },
-    "rocks":     { "kind": "handmade" }
+    "sky": {
+      "kind": "handmade"
+    },
+    "character": {
+      "kind": "handmade"
+    },
+    "shadow": {
+      "kind": "handmade"
+    },
+    "pond": {
+      "kind": "handmade"
+    },
+    "grass": {
+      "kind": "handmade"
+    },
+    "clouds": {
+      "kind": "handmade"
+    },
+    "rocks": {
+      "kind": "handmade"
+    },
+    "peers": {
+      "kind": "handmade",
+      "note": "Every peer is the local character body reused verbatim — one shared sg_figure_sdf, not a second figure implementation — so other players are made of exactly the same code you are."
+    },
+    "lectern": {
+      "kind": "handmade"
+    },
+    "sponge": {
+      "kind": "handmade",
+      "note": "A Menger sponge. The whole project started here: the idea was hide-and-seek inside one."
+    }
   },
   "variants": {
     "terrain": {
-      "river-valley":   { "kind": "evolved", "sourceKernel": "biome-river-valley" },
-      "mountain-peaks": { "kind": "evolved", "sourceKernel": "biome-mountain-peaks" }
+      "river-valley": {
+        "kind": "evolved",
+        "sourceKernel": "biome-river-valley"
+      },
+      "mountain-peaks": {
+        "kind": "evolved",
+        "sourceKernel": "biome-mountain-peaks"
+      }
     }
   }
 }

@@ -270,6 +270,27 @@ function shimPage(page) {
   const rawWaitForSelector = page.waitForSelector.bind(page);
   page.waitForSelector = (sel, opts = {}) => rawWaitForSelector(sel, { state: 'attached', ...opts });
 
+  // Puppeteer: waitForFunction(fn, options, ...args)
+  // Playwright: waitForFunction(fn, arg, options)
+  // The parameters are TRANSPOSED, and getting it wrong is silent: the
+  // options object arrives inside the page as the function's argument, the
+  // call throws in page context, and a caller's .catch() swallows it — so
+  // the wait resolves wrong and every timing assertion built on it quietly
+  // rots. Detect the puppeteer shape and refuse it rather than guess, since
+  // Playwright takes exactly one arg and no remapping is faithful.
+  const rawWaitForFunction = page.waitForFunction.bind(page);
+  const PP_OPTION_KEYS = ['timeout', 'polling'];
+  page.waitForFunction = (fn, arg, opts) => {
+    const looksLikePuppeteerOptions = arg && typeof arg === 'object' && !Array.isArray(arg)
+      && Object.keys(arg).length > 0 && Object.keys(arg).every((k) => PP_OPTION_KEYS.includes(k));
+    if (looksLikePuppeteerOptions && opts === undefined) {
+      throw new Error('browser.mjs: waitForFunction(fn, {timeout/polling}, ...) is the PUPPETEER signature. '
+        + 'Playwright is waitForFunction(fn, arg, options) — pass the options THIRD, and bundle any page '
+        + 'arguments into the single `arg`.');
+    }
+    return rawWaitForFunction(fn, arg, opts);
+  };
+
   // evaluateOnNewDocument -> addInitScript (9 suites). Same semantics: runs
   // before any page script on every navigation, including iframes.
   page.evaluateOnNewDocument = (fn, ...args) => page.addInitScript({ content:
@@ -297,21 +318,30 @@ function shimPage(page) {
   const reqHandlers = [];
   let routing = false;
   const rawOn = page.on.bind(page);
+  let plainRequestObservers = 0;
   page.on = (ev, handler) => {
-    if (ev === 'request') {
-      // Puppeteer requires setRequestInterception(true) BEFORE handlers can
-      // settle requests. Registering the other way round would silently
-      // route this handler to the plain listener path, where the Request it
-      // receives has no continue()/abort() at all — so fail loudly instead
-      // of half-working.
-      if (!routing) throw new Error("browser.mjs: page.on('request') before setRequestInterception(true) — "
-        + 'enable interception first, or this handler cannot settle requests.');
-      reqHandlers.push(handler);
-      return page;
-    }
+    // Two legitimate puppeteer patterns, and they need different plumbing:
+    //   - interception ON  -> the handler settles requests (continue/abort/
+    //     respond), so it must run inside the route handler.
+    //   - interception OFF -> a pure OBSERVER that only reads req.url().
+    //     Perfectly valid and common; it just cannot settle anything.
+    // Only the ordering that mixes them is ambiguous, so only that throws
+    // (below, in setRequestInterception) — an observer registered here on
+    // its own is passed straight through.
+    if (ev === 'request' && routing) { reqHandlers.push(handler); return page; }
+    if (ev === 'request') plainRequestObservers += 1;
     return rawOn(ev, handler);
   };
   page.setRequestInterception = async (on) => {
+    // The genuinely ambiguous case: handlers registered as plain observers,
+    // then interception switched on afterwards. Those handlers are already
+    // bound to the observer path, where the Request they receive has no
+    // continue()/abort() at all — so they would look enabled and silently
+    // fail to settle anything. Fail here, where the mistake is.
+    if (on && plainRequestObservers > 0) {
+      throw new Error("browser.mjs: setRequestInterception(true) called AFTER page.on('request') was registered "
+        + `(${plainRequestObservers} observer(s)). Enable interception first, or those handlers cannot settle requests.`);
+    }
     if (on && !routing) {
       routing = true;
       await page.route('**/*', async (route) => {

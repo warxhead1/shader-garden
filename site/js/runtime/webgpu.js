@@ -126,6 +126,14 @@ export class GPURuntime {
     // Serializes setShader() calls — see setShader().
     this._shaderChain = Promise.resolve();
 
+    // MP-4 (multiplayer-spec.md §6.1): prepareShader() stamps each call with
+    // the value of _prepareSeq at the moment it's MADE (not when it resolves)
+    // so commit() can tell "called later" from "resolved later" — see
+    // prepareShader()'s doc comment for why that distinction is the one that
+    // matters for not committing stale state.
+    this._prepareSeq = 0;
+    this._committedSeq = 0;
+
     // Stop rendering if the device is lost (GPU reset, tab backgrounded too long, ...).
     device.lost.then((info) => {
       this._lost = true;
@@ -211,6 +219,57 @@ export class GPURuntime {
   }
 
   async _setShaderNow(wgslSrc, channels = 0) {
+    const built = await this._compilePipeline(wgslSrc, channels);
+    if (built.ok) this._commitPipeline(built);
+    return { ok: built.ok, log: built.log, messages: built.messages };
+  }
+
+  /**
+   * MP-4 (multiplayer-spec.md §6.1): compile `wgslSrc` into a SIDE pipeline
+   * pair without touching the live one — this backend's equivalent of
+   * GL2Runtime.prepareShader(). Unlike setShader(), a prepare is NOT run
+   * through `_shaderChain`: it never mutates runtime state by itself, so
+   * concurrent prepares are safe to have in flight together. What isn't safe
+   * is committing one — `_prepareSeq` stamps each call at the moment it's
+   * MADE, and commit() no-ops once a call stamped LATER has already
+   * committed, so a slow prepare that resolves after a faster, later one
+   * can't stomp the newer world with stale state.
+   *
+   * @param {number} [channels]
+   * @returns {Promise<{ok, log, messages, commit(): void, dispose(): void}>}
+   *   commit() swaps the pipeline in as live (idempotent, no-ops after
+   *   dispose() or after a later prepare's commit() already ran); dispose()
+   *   marks it abandoned. WebGPU pipelines have no explicit release — they're
+   *   GC'd once nothing references them, so dropping this object is enough;
+   *   dispose() exists for parity with GL2Runtime.prepareShader()'s contract.
+   */
+  prepareShader(wgslSrc, channels = 0) {
+    const mySeq = ++this._prepareSeq;
+    return this._compilePipeline(wgslSrc, channels).then((built) => {
+      if (!built.ok) return { ok: false, log: built.log, messages: built.messages, commit() {}, dispose() {} };
+      let settled = false;
+      return {
+        ok: true,
+        log: built.log,
+        messages: built.messages,
+        commit: () => {
+          if (settled) return;
+          settled = true;
+          if (mySeq < this._committedSeq) return; // a later-made prepare already committed
+          this._committedSeq = mySeq;
+          this._commitPipeline(built);
+        },
+        dispose: () => {
+          settled = true; // no GPU object to release — see doc comment above
+        },
+      };
+    });
+  }
+
+  /** Compile+validate `wgslSrc` into a pipeline pair, WITHOUT touching any
+   *  runtime state — shared by setShader() (which commits immediately) and
+   *  prepareShader() (which lets the caller decide when, or whether). */
+  async _compilePipeline(wgslSrc, channels = 0) {
     if (this._lost || this._disposed) return { ok: false, log: 'device lost', messages: [] };
     const full = wrapWgsl(wgslSrc, channels);
     const userLineCount = wgslSrc.split('\n').length;
@@ -249,8 +308,8 @@ export class GPURuntime {
     // SAME module/layout, targeting a fixed 'rgba8unorm' format regardless
     // of the canvas's own preferred format (often 'bgra8unorm' — reading
     // raw bytes back from that would put the shader's R channel at byte
-    // offset 2, not 0). One extra pipeline object per setShader() call;
-    // never touches the canvas.
+    // offset 2, not 0). One extra pipeline object per compile; never touches
+    // the canvas.
     const probePipeline = this._device.createRenderPipeline({
       layout: this._layoutFor(channels).pipelineLayout,
       vertex: { module, entryPoint: 'sg_vertex' },
@@ -267,12 +326,21 @@ export class GPURuntime {
       };
     }
 
-    this._pipeline = pipeline;
-    this._probePipeline = probePipeline;
-    this._channelCount = channels;
-    this._customNames = wgCustomUniformNames(wgslSrc); // stale locations from the old shader are moot — read by name, not location
+    return { ok: true, log, messages, pipeline, probePipeline, channels, customNames: wgCustomUniformNames(wgslSrc) };
+  }
+
+  /** Swap a compiled pipeline pair in as live. The only place `_pipeline`/
+   *  `_probePipeline`/`_channelCount`/`_customNames` get rebuilt, so
+   *  setShader() and prepareShader()'s commit() leave identical state. */
+  _commitPipeline(built) {
+    this._pipeline = built.pipeline;
+    this._probePipeline = built.probePipeline;
+    this._channelCount = built.channels;
+    // Custom uniforms are read by NAME out of this._customValues every frame
+    // (see _writeUniforms) — nothing is "location"-shaped here to go stale,
+    // so swapping this list is the entire persistence story on this backend.
+    this._customNames = built.customNames;
     this._rebuildBindGroup();
-    return { ok: true, log, messages };
   }
 
   /**

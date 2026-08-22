@@ -74,6 +74,14 @@ void main() {
  *                              working program keeps rendering (live-recompile
  *                              UX). messages[] is compiler diagnostics remapped
  *                              to user-source line numbers (§ ARCHITECTURE.md).
+ *   prepareShader(src, ch)   — MP-4 (multiplayer-spec.md §6.1): compiles into a
+ *                              SIDE program while the live one keeps rendering
+ *                              untouched, so a remote player's commit can never
+ *                              blank this client's world (I4) while it links.
+ *                              Promise<{ok, log, messages, commit(), dispose()}>
+ *                              — call commit() to swap it live, or dispose() to
+ *                              release it unswapped. setShader() is this plus
+ *                              an immediate commit(), kept synchronous.
  *   start() / stop()         — run/pause the rAF loop (clock is pause-aware)
  *   renderOnce(timeSeconds)  — set the clock to a time and draw one frame
  *                              synchronously (thumbnails)
@@ -163,6 +171,67 @@ export class GL2Runtime {
    *   position survives linking).
    */
   setShader(src, channels = 0) {
+    const begun = this._beginPrepare(src, channels);
+    if (!begun.program) return { ok: false, log: begun.log, messages: begun.messages };
+    // Synchronous path: no polling, finish immediately and commit right away
+    // — this is exactly prepareShader()'s no-KHR fallback, just auto-applied,
+    // which is what keeps this signature synchronous (multiplayer-spec.md §6.1).
+    const result = this._finishPrepare(begun.program, begun.fragLog, begun.userLineCount, begun.offset);
+    if (result.ok) result.commit();
+    return { ok: result.ok, log: result.log, messages: result.messages };
+  }
+
+  /**
+   * MP-4 (multiplayer-spec.md §6.1): compile+link `src` into a SIDE program.
+   * The live program keeps rendering, untouched, for as long as the caller
+   * withholds commit() — this is what lets a remote player's `commit` message
+   * be validated locally before it can ever blank this client's world (I4).
+   *
+   * If `KHR_parallel_shader_compile` is available, the link result is polled
+   * once per rAF via COMPLETION_STATUS_KHR instead of reading LINK_STATUS
+   * right after linkProgram() — LINK_STATUS forces the driver to block until
+   * linking is done, which is exactly the hitch this exists to remove.
+   * Without the extension we fall back to that same synchronous read:
+   * correct, just hitchy — its absence is never a failure.
+   *
+   * @param {string} src
+   * @param {number} [channels]
+   * @returns {Promise<{ok: boolean, log: string, messages: object[], commit(): void, dispose(): void}>}
+   *   commit() swaps the side program in as live (idempotent, no-ops after
+   *   dispose()); dispose() deletes it unswapped (idempotent, no-ops after
+   *   commit()) — a prepared-but-never-committed program must not leak GL
+   *   objects, e.g. from a griefer spamming broken commits.
+   */
+  prepareShader(src, channels = 0) {
+    const gl = this._gl;
+    const begun = this._beginPrepare(src, channels);
+    if (!begun.program) return Promise.resolve(begun);
+
+    const finish = () => this._finishPrepare(begun.program, begun.fragLog, begun.userLineCount, begun.offset);
+    const parallel = gl.getExtension('KHR_parallel_shader_compile');
+    if (!parallel) return Promise.resolve(finish());
+
+    return new Promise((resolve) => {
+      const poll = () => {
+        // A context loss mid-poll means COMPLETION_STATUS_KHR would never
+        // flip true (the driver is gone) — bail into finish() rather than
+        // spin forever; _finishPrepare's isContextLost() guard reports ok.
+        if (gl.isContextLost() || gl.getProgramParameter(begun.program, parallel.COMPLETION_STATUS_KHR)) {
+          resolve(finish());
+          return;
+        }
+        requestAnimationFrame(poll);
+      };
+      requestAnimationFrame(poll);
+    });
+  }
+
+  /** Compile the fragment stage and kick off linking. Shared first half of
+   *  setShader()/prepareShader(). On a compile failure, returns the final
+   *  {ok:false,...} result directly (with inert commit/dispose so callers
+   *  can treat both branches uniformly); on success returns the in-flight
+   *  program plus the bits _finishPrepare() needs to remap diagnostics. */
+  _beginPrepare(src, channels) {
     const gl = this._gl;
     const userLineCount = src.split('\n').length;
     const offset = PRELUDE_LINES + channels;
@@ -173,20 +242,55 @@ export class GL2Runtime {
     if (!fragOk) {
       gl.deleteShader(frag);
       const messages = parseGlLog(fragLog, userLineCount, offset);
-      return { ok: false, log: fragLog, messages: messages.length ? messages : [wholeDocMessage(fragLog)] };
+      return {
+        ok: false,
+        log: fragLog,
+        messages: messages.length ? messages : [wholeDocMessage(fragLog)],
+        commit() {},
+        dispose() {},
+      };
     }
-
     const program = gl.createProgram();
     gl.attachShader(program, this._vert);
     gl.attachShader(program, frag);
     gl.linkProgram(program);
     gl.deleteShader(frag); // linked (or failed); shader object no longer needed
+    return { program, fragLog, userLineCount, offset };
+  }
+
+  /** Read the (by now settled) link result and build the commit()/dispose()
+   *  pair. Shared finalize step for prepareShader()'s synchronous and polled
+   *  paths — the only difference between them is what runs before this. */
+  _finishPrepare(program, fragLog, userLineCount, offset) {
+    const gl = this._gl;
     if (!gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
       const log = gl.getProgramInfoLog(program) ?? '';
       gl.deleteProgram(program);
-      return { ok: false, log, messages: [wholeDocMessage(log)] };
+      return { ok: false, log, messages: [wholeDocMessage(log)], commit() {}, dispose() {} };
     }
+    let settled = false; // guards against a stray commit() after dispose() or a double commit()
+    return {
+      ok: true,
+      log: '',
+      messages: parseGlLog(fragLog, userLineCount, offset),
+      commit: () => {
+        if (settled) return;
+        settled = true;
+        this._commitProgram(program);
+      },
+      dispose: () => {
+        if (settled) return;
+        settled = true;
+        gl.deleteProgram(program);
+      },
+    };
+  }
 
+  /** Swap `program` in as the live one. The only place `_uniforms` and
+   *  `_customLocations` get rebuilt, so setShader() and prepareShader()'s
+   *  commit() are guaranteed to leave the runtime in the same state. */
+  _commitProgram(program) {
+    const gl = this._gl;
     if (this._program) gl.deleteProgram(this._program);
     this._program = program;
     this._uniforms = {
@@ -197,8 +301,14 @@ export class GL2Runtime {
       iMouse: gl.getUniformLocation(program, 'iMouse'),
     };
     for (let i = 0; i < 4; i++) this._uniforms['iChannel' + i] = gl.getUniformLocation(program, 'iChannel' + i);
-    this._customLocations = {}; // stale locations from the old program are invalid
-    return { ok: true, log: '', messages: parseGlLog(fragLog, userLineCount, offset) };
+    // Custom-uniform locations are per-program; clearing them forces _drawCore
+    // to re-resolve each one lazily against the new program on its next draw.
+    // The values in this._customUniforms are untouched, so every @tune slider
+    // survives the swap (the persistence guarantee documented at setUniforms()
+    // above) — that lazy re-resolve on next draw IS "re-apply _customUniforms"
+    // (multiplayer-spec.md §6.1): there is nothing else to push, since the
+    // draw loop already reads values from the bank fresh every frame.
+    this._customLocations = {};
   }
 
   /**

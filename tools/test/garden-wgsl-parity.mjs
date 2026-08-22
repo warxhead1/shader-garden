@@ -73,33 +73,41 @@ for (let i = 0; i < n; i++) {
 // deliberately, one named entry at a time — never widen it with a wildcard.
 const NON_TUNE_NAMES = ['uProbe', 'uProbeSel', 'SG_QUALITY', 'uCharPosX', 'uCharPosZ',
   'uCharYaw', 'uCharGaitDist', 'uCharSpeed01', 'uCamMode', 'uPrevCamMode', 'uCamBlend'];
-// Multiplayer names come AFTER the tunes in the directive (they were appended
-// with the peers/lectern/sponge components). All four gate a component or a
-// lectern highlight and default to 0, which is exactly what makes the solo
-// route unchanged (I3) — an unset uniform reads 0 and every gated body takes
-// its early-out. uPeer* is deliberately absent: peers are GLSL-only (spec
-// §0.5 C1), 50 scalars that cannot fit the bank, so scene.wgsl carries a
-// miss-stub for parity and multiplayer pins to WebGL2.
-const MP_NAMES = ['uSpongeOn', 'uLeaseHeld', 'uLeaseHue', 'uLecternOn'];
+// Multiplayer names come AFTER the tunes in the directive (they were
+// appended with the peers/lectern/sponge components). The gate uniforms
+// default to 0 and every gated body early-outs on 0, which is what leaves
+// the solo route unchanged (I3).
+//
+// The peer scalars ARE here, on the WebGPU path. They were briefly absent
+// when wrap.js's bank held 32 floats and 25 were spent, which had forced
+// multiplayer to be declared WebGL2-only. The bank is now 128, so WebGPU
+// renders peers like any other backend. This list is generated in the same
+// order sg_peers_sdf unrolls them.
+const PEER_FIELDS = ['Act', 'X', 'Z', 'Yaw', 'Gait', 'Speed', 'Hue'];
+const PEER_NAMES = ['uPeerCount', ...Array.from({ length: 7 }, (_, i) =>
+  PEER_FIELDS.map((f) => `uPeer${i}${f}`)).flat()];
+const MP_NAMES = [...PEER_NAMES, 'uLeaseHeld', 'uLeaseHue', 'uSpongeOn', 'uLecternOn'];
 const expectedCustomNames = [...NON_TUNE_NAMES, ...wgsl.tunes.map((t) => t.name), ...MP_NAMES];
 const actualCustomNames = wgCustomUniformNames(wgslSrc);
-check('@sg-uniforms declares uProbe + uProbeSel + every @tune name + the MP gates, in that order',
+check('@sg-uniforms declares uProbe + uProbeSel + every @tune name + the MP names, in that order',
   JSON.stringify(actualCustomNames) === JSON.stringify(expectedCustomNames),
   `expected=${JSON.stringify(expectedCustomNames)} actual=${JSON.stringify(actualCustomNames)}`);
 
-// Bank overflow is the failure mode this file exists to catch, and the check
-// above CANNOT catch it on its own: wgCustomUniformNames() ends in
-// `.slice(0, WGSL_CUSTOM_UNIFORM_SLOTS)`, so a directive that overflows comes
-// back silently truncated rather than erroring. Names past the bank are not
-// merely dropped — they evict nothing and simply never bind, so the shader
-// reads a stale slot and renders plausibly wrong. Count the RAW directive.
+// Bank capacity. wgCustomUniformNames() now THROWS on overflow rather than
+// slicing silently, so this can no longer be a silent miscompile — but the
+// check stays, because it fails with a useful number instead of an exception
+// and because it documents the headroom the multiplayer wave actually needs.
 const rawCustomNames = (wgslSrc.match(/@sg-uniforms\s+(.+)/) || [, ''])[1].trim().split(/\s+/).filter(Boolean);
-check(`@sg-uniforms fits the ${WGSL_CUSTOM_UNIFORM_SLOTS}-slot bank without silent truncation`,
+check(`@sg-uniforms fits the ${WGSL_CUSTOM_UNIFORM_SLOTS}-slot bank`,
   rawCustomNames.length <= WGSL_CUSTOM_UNIFORM_SLOTS,
   `raw=${rawCustomNames.length} slots=${WGSL_CUSTOM_UNIFORM_SLOTS}`);
-check('no uPeer* name reaches the WGSL bank (peers are GLSL-only, spec §0.5 C1)',
-  !rawCustomNames.some((n) => n.startsWith('uPeer')),
-  rawCustomNames.filter((n) => n.startsWith('uPeer')).join(',') || '(none)');
+
+// Peers must be present on BOTH backends. The inverse of this assertion
+// ("no uPeer* reaches the WGSL bank") was correct for exactly as long as
+// multiplayer was pinned to WebGL2; it is now the regression to catch.
+check('every peer scalar reaches the WGSL bank (WebGPU renders peers too)',
+  PEER_NAMES.every((n) => rawCustomNames.includes(n)),
+  `missing=${PEER_NAMES.filter((n) => !rawCustomNames.includes(n)).join(',') || '(none)'}`);
 
 console.log(failed ? '\nFAIL' : '\nall-PASS');
 process.exit(failed ? 1 : 0);

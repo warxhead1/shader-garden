@@ -42,7 +42,21 @@ export function wrapGlsl(src, channels = 0) {
 // uCamBlend) — one deliberate doubling landed with the first of them
 // (uCharYaw), not incrementally per-uniform, so the bank only ever moves
 // once for this wave.
-export const WGSL_CUSTOM_UNIFORM_SLOTS = 32;
+// 32 -> 128: multiplayer. 32 was never a hardware limit, a driver limit, or
+// a measured cost — it was one arbitrary doubling that then became a design
+// constraint, and it had already forced multiplayer to be declared
+// WebGL2-only (peers need 50 scalars and 25 slots were spent). WebGPU is the
+// primary backend; the old backend does not get to cap what the new one can
+// express. 128 floats is 512 bytes of uniform buffer against a 64 KiB
+// minimum guaranteed binding size — roughly 0.8% of the floor — and unused
+// slots cost nothing: they emit no accessor and are never read.
+export const WGSL_CUSTOM_UNIFORM_SLOTS = 128;
+
+// The vec4f count is DERIVED, never written twice. It used to be the literal
+// `array<vec4f, 8>` here while the byte size was computed from the constant
+// in webgpu.js, so raising one and not the other would have desynced the
+// struct from the buffer that fills it — a silent miscompile, not an error.
+const WGSL_CUSTOM_VEC4S = WGSL_CUSTOM_UNIFORM_SLOTS / 4;
 
 export const WGSL_PRELUDE = `struct SGUniforms {
   res: vec4f,
@@ -51,7 +65,7 @@ export const WGSL_PRELUDE = `struct SGUniforms {
   dt: f32,
   frame: f32,
   _pad: f32,
-  custom: array<vec4f, 8>,
+  custom: array<vec4f, ${WGSL_CUSTOM_VEC4S}>,
 }
 @group(0) @binding(0) var<uniform> U: SGUniforms;
 
@@ -73,7 +87,17 @@ const SG_UNIFORMS_DIRECTIVE_RE = /^\/\/\s*@sg-uniforms\s+(.+)$/m;
 export function wgCustomUniformNames(src) {
   const m = SG_UNIFORMS_DIRECTIVE_RE.exec(src);
   if (!m) return [];
-  return m[1].trim().split(/\s+/).slice(0, WGSL_CUSTOM_UNIFORM_SLOTS);
+  const names = m[1].trim().split(/\s+/);
+  // Overflow throws. It used to slice silently, which is the worst available
+  // behaviour: a name past the bank does not merely go missing, it never
+  // binds, so the shader reads whatever is in that slot and renders
+  // plausibly wrong with no error anywhere. Fail at wrap time instead.
+  if (names.length > WGSL_CUSTOM_UNIFORM_SLOTS) {
+    throw new Error(`@sg-uniforms declares ${names.length} names but the bank holds `
+      + `${WGSL_CUSTOM_UNIFORM_SLOTS} (overflow: ${names.slice(WGSL_CUSTOM_UNIFORM_SLOTS).join(', ')}). `
+      + 'Raise WGSL_CUSTOM_UNIFORM_SLOTS in wrap.js — it is a chosen number, not a hardware limit.');
+  }
+  return names;
 }
 
 const SWIZZLE = ['x', 'y', 'z', 'w'];

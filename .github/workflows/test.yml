@@ -58,6 +58,18 @@ jobs:
       # Each is tee'd to its own log under tools/test/out/logs/ so a failure
       # artifact (uploaded below) has every suite's output, not just the one
       # that failed.
+      # The two pure-Node multiplayer suites run FIRST: they need no browser
+      # and no static server, so a protocol or relay break fails the battery
+      # in seconds instead of twenty minutes into the browser suites.
+      # mp-protocol.mjs runs server/test/*.test.mjs via an EXPANDED GLOB, never
+      # `node --test server/test/` — the bare-directory form require()s the
+      # directory on Node 26.x instead of discovering tests.
+      - name: mp-protocol
+        working-directory: tools/test
+        run: node mp-protocol.mjs 2>&1 | tee out/logs/mp-protocol.log
+      - name: mp-relay
+        working-directory: tools/test
+        run: node mp-relay.mjs 2>&1 | tee out/logs/mp-relay.log
       - name: smoke
         working-directory: tools/test
         run: node smoke.mjs 2>&1 | tee out/logs/smoke.log
@@ -133,6 +145,27 @@ jobs:
       - name: perf
         working-directory: tools/test
         run: node perf.mjs 2>&1 | tee out/logs/perf.log
+
+      # Multiplayer browser suites — BLOCKING, unlike the two webgpu-* steps
+      # below. These need only WebGL2, which SwiftShader provides on this
+      # runner class; multiplayer pins to WebGL2 by design (spec §0.5 C1),
+      # so there is no GPU excuse for these to be advisory.
+      # Each starts its own relay in-process on a pid-derived port and dials
+      # it with ?relay=ws://... — site/assets/relay.json stays {"url": null}.
+      - name: mp-clock
+        working-directory: tools/test
+        run: node mp-clock.mjs 2>&1 | tee out/logs/mp-clock.log
+      - name: mp-two-browsers
+        working-directory: tools/test
+        run: node mp-two-browsers.mjs 2>&1 | tee out/logs/mp-two-browsers.log
+      # I4: a receiver must keep rendering when a peer commits broken source.
+      - name: mp-compile-swap
+        working-directory: tools/test
+        run: node mp-compile-swap.mjs 2>&1 | tee out/logs/mp-compile-swap.log
+      # I1/I3: the solo route must be byte-identical in behaviour to pre-MP.
+      - name: mp-solo-parity
+        working-directory: tools/test
+        run: node mp-solo-parity.mjs 2>&1 | tee out/logs/mp-solo-parity.log
 
       - name: Install Xvfb (for webgpu-live.mjs's self-wrap)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb

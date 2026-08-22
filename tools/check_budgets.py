@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check budget caps on site JS files."""
+"""Check budget caps on site JS files and the multiplayer relay."""
 
 import os, glob, sys
 
@@ -282,7 +282,34 @@ AGGREGATES = [
     # 1643/1650 from its own worktree over the same 1521 base. This row is
     # now all three wave-4 slices' union. Actual 1824/1860. Raised
     # deliberately, this merge.
-    ("site/js/organs/garden/*.js", 1860, None),
+    # 1860 -> 2950: the multiplayer wave (docs/multiplayer-spec.md). Pre-MP
+    # this row sat at 1824/1860 — 36 LOC of headroom, so it could not absorb
+    # a whole new subsystem. MP adds 995 LOC: three new client modules
+    # (net.js 446, timesync.js 111, roster.js 80) and index.js's room wiring
+    # (684 -> 992, all of it behind `if (room)`). Rather than let a single
+    # slack aggregate hide future growth in any one of them, each MP module
+    # AND index.js now carries its own row below — this aggregate stays the
+    # organ-wide ceiling, those rows are the per-module guards. Actual
+    # 2819/2950. Raised deliberately, this merge.
+    ("site/js/organs/garden/*.js", 2950, None),
+    # Per-module MP guards (see the aggregate comment above). index.js had no
+    # row of its own before and grew 45% in one wave; it gets one now so the
+    # next growth has to be argued for rather than absorbed. Actual 992/1050.
+    ("site/js/organs/garden/index.js", 1050, None),
+    # net.js: connectRoom() + the frozen module surface in spec §8.1
+    # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
+    ("site/js/organs/garden/net.js", 480, None),
+    # timesync.js: min-RTT offset estimator, spec §3. 111/130.
+    ("site/js/organs/garden/timesync.js", 130, None),
+    # roster.js: peer slot allocation for the flattened uniform bank. 80/100.
+    ("site/js/organs/garden/roster.js", 100, None),
+    # The relay (spec §2). Dependency-free Node, not shipped to the site, but
+    # budgeted for the same reason the site is: room.mjs is a PURE reducer and
+    # stays that way — growth here is the signal that I/O or timers leaked in.
+    # Actuals at the MP merge: 305 / 376 / 246.
+    ("server/relay.mjs", 350, None),
+    ("server/room.mjs", 420, None),
+    ("server/ws.mjs", 290, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/
     # admission-gate/diagnostics-list/doc-adapters/modes/surfaces. Excludes

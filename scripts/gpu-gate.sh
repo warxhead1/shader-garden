@@ -18,8 +18,19 @@ cd "$(dirname "$0")/../tools/test" || exit 1
 
 # Logs go under tools/test/out/ (gitignored), never /tmp: /tmp on this box is
 # a tmpfs, so anything written there is resident RAM.
-LOGS=out/gate-logs
+#
+# One directory PER RUN, never a fixed path. A fixed path made two different
+# kinds of trouble on 2026-08-22: run 2 destroyed run 1's per-suite logs at
+# exactly the moment they were needed to compare two different failures, and a
+# reader still following the old path replayed run 1's output as if it were
+# live — which got reported as the current state of a healthy run. Neither is
+# possible once each run owns its own directory. `latest` is a convenience
+# symlink; anything that must not be misread should use the printed path.
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+LOGS="out/gate-logs/$RUN_ID"
 mkdir -p "$LOGS"
+ln -sfn "$RUN_ID" out/gate-logs/latest
+echo "gpu-gate: logs -> tools/test/$LOGS"
 
 SUITES=(
   smoke garden garden-movement garden-camera garden-locomotion-parity

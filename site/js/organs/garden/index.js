@@ -359,7 +359,15 @@ export async function mount(ctx) {
     if (camBlendRafId == null) camBlendRafId = requestAnimationFrame(tickCamBlend);
   }
   function tickCamBlend(t) {
-    camBlend = Math.min(1, (t - camBlendStart) / CAM_BLEND_MS);
+    // Clamped at BOTH ends. `t` is the rAF callback's timestamp, which is the
+    // time the frame STARTED — and that can precede the performance.now()
+    // taken when the blend was armed, so (t - camBlendStart) goes slightly
+    // negative on the first tick. Math.min alone let that through: measured
+    // -0.00067 on the second sample of a ramp that was otherwise perfectly
+    // monotonic, which is the camera extrapolating a frame the wrong way
+    // before it starts. Rare (garden-camera passed two prior gate runs) and
+    // sub-pixel, but it is a real inversion, not test noise.
+    camBlend = Math.max(0, Math.min(1, (t - camBlendStart) / CAM_BLEND_MS));
     rh.runtime?.setUniforms({ uCamBlend: camBlend });
     camBlendRafId = camBlend < 1 ? requestAnimationFrame(tickCamBlend) : null;
   }

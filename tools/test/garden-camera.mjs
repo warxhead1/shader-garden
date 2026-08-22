@@ -27,7 +27,26 @@
 //   (e) orbit-default byte-identical-at-rest is covered by
 //       garden-locomotion-parity.mjs's test (1) (uCamMode=uPrevCamMode=0)
 //       — not duplicated here.
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+//
+// Real-GPU migration (see browser.mjs's header): the #/garden mount in (a),
+// (c), (d) uses prefer:'auto', which now resolves to WebGPU (GPURuntime),
+// not WebGL2 (GL2Runtime) — this suite asserts on the camera blend/probe
+// behavior itself, not on which backend produced it, so armBlendSpy patches
+// BOTH runtime classes' setUniforms into one array (decision rule: "asserts
+// on output generically" -> let it run WebGPU on the shared real-GPU
+// `browser`).
+//
+// (b) is different: it builds its OWN scratch canvas and calls
+// canvas.getContext('webgl2') directly, then gl.readPixels on it — exactly
+// the "suite is about WebGL2 semantics" case the brief's decision rule
+// calls for pinning. It stays on the shared real-GPU `browser` (an earlier
+// version of browser.mjs's GPU_ARGS set --use-angle=vulkan, which made
+// getContext('webgl2') return null unconditionally — that's fixed upstream
+// now: browser.mjs no longer passes --use-angle at all, and both backends
+// resolve to real hardware — WebGL2 to the integrated AMD Raphael, WebGPU
+// to the discrete RTX 3070 Ti. assertRealWebgl2(page) below guards against
+// silently landing on SwiftShader.
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -48,16 +67,25 @@ function freshPage(errors) {
   });
 }
 
+// Real-GPU migration: the #/garden mount uses prefer:'auto', which now
+// picks WebGPU (GPURuntime) instead of WebGL2 (GL2Runtime) whenever a real
+// adapter is present — see browser.mjs's header. This suite's assertion is
+// about the camera blend ramp itself (uCamBlend), not about which backend
+// produced it, so both runtime classes' setUniforms are patched into the
+// SAME window.__blendCalls array — the decision rule's "asserts on
+// rendering output generically" case.
 async function armBlendSpy(page) {
   await page.evaluateOnNewDocument(() => {
     window.__blendCalls = [];
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const orig = mod.GL2Runtime.prototype.setUniforms;
-      mod.GL2Runtime.prototype.setUniforms = function (values) {
+    const hook = (mod, className) => {
+      const orig = mod[className].prototype.setUniforms;
+      mod[className].prototype.setUniforms = function (values) {
         if ('uCamBlend' in values) window.__blendCalls.push(values.uCamBlend);
         return orig.call(this, values);
       };
-    }).catch(() => {});
+    };
+    import('./js/runtime/webgl2.js').then((mod) => hook(mod, 'GL2Runtime')).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => hook(mod, 'GPURuntime')).catch(() => {});
   });
 }
 
@@ -78,12 +106,17 @@ async function probe(page, x, y) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await assertRealGpu(page);
 
   check('(a) boots in Orbit', await page.$eval('.garden-cam-select', (el) => el.value) === '0');
 
   // Boot itself applies uCamBlend=1 (settled Orbit, see index.js's onBuild) —
-  // clear that leading call so the array below is ONLY the switch's own ramp.
+  // let any late boot writes land, THEN clear, so the array below is ONLY
+  // the switch's own ramp (real-GPU compile can be slower than the
+  // headless-shell baseline this margin was originally sized against).
+  await sleep(500);
   await page.evaluate(() => { window.__blendCalls.length = 0; });
+  await page.bringToFront();
   await page.keyboard.press('2'); // Follow
   await sleep(600); // outlive the ~450ms blend
   check('(a) keyboard 2 switches the select to Follow', await page.$eval('.garden-cam-select', (el) => el.value) === '1');
@@ -106,15 +139,27 @@ async function probe(page, x, y) {
 }
 
 /* ---------- (b) uCamBlend=0.5 is a real cross-fade, not a step function ---------- */
+// WebGL2-pinned via canvas.getContext('webgl2') directly (see header) — on
+// the shared real-GPU `browser`, which now resolves this to the integrated
+// AMD Raphael (not the RTX 3070 Ti WebGPU uses; see assertRealWebgl2 below).
 {
   const errors = [];
   const page = await freshPage(errors);
   await gotoSafe(page, BASE + '/index.html', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
+  await assertRealWebgl2(page);
 
   const src = await (await fetch(BASE + '/assets/garden/scene.glsl')).text();
 
-  const render = (uniforms) => page.evaluate(async (src, uniforms) => {
+  // Playwright's page.evaluate(fn, arg) takes exactly ONE data argument —
+  // unlike puppeteer's variadic evaluate(fn, ...args). A THIRD positional
+  // here is silently read as an `options` object and dropped rather than
+  // reaching the page (MEASURED: no throw, no error — `uniforms` inside the
+  // page function is just `undefined`, so setUniforms(undefined) is a
+  // silent no-op and every render below came back byte-identical). Bundle
+  // into one object instead — see this file's report note for the
+  // browser.mjs-level fix that would remove the need for this per-suite.
+  const render = (uniforms) => page.evaluate(async ({ src, uniforms }) => {
     const { GL2Runtime } = await import('./js/runtime/webgl2.js');
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';
@@ -132,7 +177,7 @@ async function probe(page, x, y) {
     rt.dispose();
     canvas.remove();
     return { pixels: Array.from(pixels) };
-  }, src, uniforms);
+  }, { src, uniforms });
 
   // Orbit -> Follow, mid-transition. Both endpoints computed fresh, plus a
   // blend=0.5 frame — same uCharPosX/Z/Yaw throughout so only uCamBlend varies.

@@ -22,8 +22,17 @@
 //   (g) wave-4 §A: uCharYaw never jumps by more than TURN_RATE*dt in a
 //       single frame across a scripted 180-degree direction reversal (no
 //       instant snap-to).
+//
+// Real-GPU migration (see browser.mjs's header): every section here mounts
+// #/garden with prefer:'auto' and never opens the editor (the one thing
+// that forces a WebGL2 rebuild — see garden.mjs), so on this harness the
+// mount stays on WebGPU (GPURuntime) the whole time. This suite asserts on
+// the uniform WRITES the movement/gait/yaw integrator produces, not on
+// which backend renders them, so armSpies patches BOTH runtime classes'
+// setUniforms into the same window.__uniformCalls array (decision rule:
+// "asserts on output generically" -> let it run WebGPU).
 // Prints "all-PASS" and exits 0 only if every check passed.
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -36,9 +45,19 @@ function check(name, cond, detail) {
   return ok;
 }
 
+// Playwright's setViewportSize(vp) — what shimPage's page.setViewport maps
+// onto — only ever reads {width, height}. Puppeteer's setViewport also
+// carries isMobile/hasTouch, which Playwright instead requires as REAL
+// newPage()/newContext() creation options (Emulation.setDeviceMetricsOverride
+// equivalents aren't settable post-creation). MEASURED: passing
+// {isMobile,hasTouch} through the shim silently drops them — coarse-pointer
+// emulation never took effect, no error, no throw. So isMobile/hasTouch go
+// straight to browser.newPage() (browser.mjs merges opts into its own
+// newPage(), a real Playwright call) instead of through the shim.
 function freshPage(errors, viewportOpts) {
-  return browser.newPage().then(async (page) => {
-    if (viewportOpts) await page.setViewport(viewportOpts);
+  const { isMobile, hasTouch, ...vp } = viewportOpts || {};
+  return browser.newPage(isMobile || hasTouch ? { isMobile, hasTouch } : {}).then(async (page) => {
+    if (Object.keys(vp).length) await page.setViewport(vp);
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     page.on('pageerror', (e) => errors.push(String(e)));
     return page;
@@ -51,13 +70,15 @@ function freshPage(errors, viewportOpts) {
 async function armSpies(page) {
   await page.evaluateOnNewDocument(() => {
     window.__uniformCalls = [];
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const orig = mod.GL2Runtime.prototype.setUniforms;
-      mod.GL2Runtime.prototype.setUniforms = function (values) {
+    const hook = (mod, className) => {
+      const orig = mod[className].prototype.setUniforms;
+      mod[className].prototype.setUniforms = function (values) {
         window.__uniformCalls.push({ ...values });
         return orig.call(this, values);
       };
-    }).catch(() => {});
+    };
+    import('./js/runtime/webgl2.js').then((mod) => hook(mod, 'GL2Runtime')).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => hook(mod, 'GPURuntime')).catch(() => {});
   });
 }
 
@@ -69,7 +90,27 @@ async function armSpies(page) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
-  await page.click('.garden-canvas'); // canvas isn't focusable, but a click ensures no stray focus sits on an input
+  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
+  // MEASURED: this is the FIRST page opened on this browser, and on a cold
+  // module/pipeline cache the mount's window.addEventListener('keydown', ...)
+  // (index.js, attached well after the async runtimeHost() build — line
+  // ~717) can still be un-attached at the moment '.garden-canvas' first
+  // appears in the DOM, so a keydown sent right after waitForSelector can
+  // land before the app is listening for it and silently produce zero
+  // movement. Every later page in this run (b onward) is on a warm cache and
+  // needs no such margin — same real-GPU-is-slower-to-boot effect
+  // garden.mjs's own sleep(2500)-after-nav margin exists for. Polls the fps
+  // badge (populated once the runtime's own render loop starts, which
+  // happens after the async build the keydown listener also waits on) with
+  // a bounded ceiling instead of a single fixed sleep, since real-GPU
+  // pipeline-compile time on this box also varies with contention from
+  // sibling suites/agents running concurrently.
+  for (let i = 0; i < 20; i++) {
+    const fps = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
+    if (fps) break;
+    await sleep(300);
+  }
+  await sleep(500); // margin past first frame for the rest of boot's synchronous setup (incl. the keydown listener) to land
 
   await page.keyboard.down('d');
   await sleep(600);
@@ -94,6 +135,7 @@ async function armSpies(page) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
   // Bouncing Figure sits at the same screen-point oracle every other garden
   // test uses (character center-frame regardless of iTime) and has two
@@ -141,6 +183,7 @@ async function armSpies(page) {
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
   await page.click('.garden-canvas');
+  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
   // PLAY_RADIUS=3.2, MOVE_SPEED=1.8 units/s (index.js) — crossing the radius
   // in one axis takes ~1.8s of real hold time; 4s gives ample margin even
@@ -230,6 +273,7 @@ async function armSpies(page) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
   await page.keyboard.down('d');
   await sleep(600);
@@ -256,19 +300,22 @@ async function armSpies(page) {
   const page = await freshPage(errors);
   await page.evaluateOnNewDocument(() => {
     window.__yawCalls = [];
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const orig = mod.GL2Runtime.prototype.setUniforms;
-      mod.GL2Runtime.prototype.setUniforms = function (values) {
+    const hook = (mod, className) => {
+      const orig = mod[className].prototype.setUniforms;
+      mod[className].prototype.setUniforms = function (values) {
         if ('uCharYaw' in values) window.__yawCalls.push({ yaw: values.uCharYaw, t: performance.now() });
         return orig.call(this, values);
       };
-    }).catch(() => {});
+    };
+    import('./js/runtime/webgl2.js').then((mod) => hook(mod, 'GL2Runtime')).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => hook(mod, 'GPURuntime')).catch(() => {});
   });
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
   // Face +X, then reverse straight to -X — a 180-degree heading flip across
   // one input transition. Both phases (and the transition between them) land

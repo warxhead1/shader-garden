@@ -7,10 +7,21 @@
 //
 // `bundle` is the already-loaded cm-editor.bundle.js module (createEditor/
 // setDiagnostics/glsl/wgsl) — the only file in this tree that imports it.
-export function createCodeMirror(bundle, { doc, onChange }) {
+export function createCodeMirror(bundle, { doc, onChange, readOnly = false }) {
   const editor = bundle.createEditor({ doc, language: null, onChange });
   editor.view.dom.classList.add('code-editor'); // layout/theme hook — same class the textarea used
   editor.view.contentDOM.setAttribute('aria-label', 'Shader source');
+  // Multiplayer §5.2: the read-only mirror. createEditor() (the vendor
+  // chunk's facade, tools/editor-bundle/facade.js) has no readOnly param, so
+  // this blocks typing at the contentDOM level instead of via CM's own
+  // EditorState.readOnly facet — functionally equivalent (no user edits
+  // reach the doc) without a facade/bundle rebuild. setDoc() (this
+  // adapter's setValue) still works — that's how the mirror updates.
+  if (readOnly) {
+    editor.view.contentDOM.contentEditable = 'false';
+    editor.view.contentDOM.setAttribute('aria-readonly', 'true');
+    editor.view.dom.classList.add('code-editor-readonly');
+  }
 
   return {
     el: editor.view.dom,

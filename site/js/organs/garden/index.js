@@ -23,6 +23,11 @@ import { loadVariantManifest, loadVariantBody } from './variants.js';
 import { attributionFor } from './attribution.js';
 import { mountJoystick } from './joystick.js';
 import { createUniformInspector } from './uniform-inspector.js';
+// §6.2 step 2 (receiving a commit): the SAME cheap static reject the
+// share-link surface already uses — gateShareLink() builds a whole
+// admitted/report/scrim result but we only ever read `.admitted` here and
+// never append `.scrim` (that's the share-link organ's own UI, not ours).
+import { gateShareLink } from '../../editor/admission-gate.js';
 
 // A pointerup within this many CSS pixels of the matching pointerdown counts
 // as a probe click; anything farther is an orbit drag (both read the same
@@ -105,9 +110,35 @@ function loadCamMode() {
   return idx >= 0 ? idx : 0;
 }
 
+// Multiplayer (spec docs/multiplayer-spec.md, "The Commons") — §5.1's
+// diegetic lock. Kept in JS only as the trigger for a transition-only `ring`
+// send + the "Take the lectern" affordance; the actual SDF placement lives
+// shader-side (COMP_LECTERN, §5.1) and is NOT duplicated here beyond this
+// one radius check, same discipline PLAY_RADIUS's own comment documents.
+const SG_LECTERN_XZ = [1.6, -1.4];
+const LECTERN_RADIUS = 0.9;
+// §5.1: holder re-arms the server's 20s lease TTL on a timer "comfortably
+// inside" it — 8s gives 2-3 missed beats of slack before the server would
+// ever expire it out from under a still-present holder.
+const LEASE_KEEPALIVE_MS = 8000;
+const MP_NAME_KEY = 'sg.garden.name';
+
+function loadMpName() {
+  try {
+    return localStorage.getItem(MP_NAME_KEY) || '';
+  } catch { return ''; }
+}
+
 export async function mount(ctx) {
   const { root, bus } = ctx;
   root.replaceChildren();
+
+  // §8: "#/garden" and "#/garden/:room" are the SAME organ — this is the
+  // ONLY fork point. `room` presence is what activates the net layer; every
+  // other line below either runs unconditionally (solo behaviour, I1) or is
+  // behind `if (room)` (I3 — no net import, no MP uniform, no MP DOM on the
+  // solo path). Never add a second branch that forks index.js itself.
+  const room = ctx.params.get('room');
 
   const stage = el('div', 'viewer-stage'); // same fullscreen-canvas-host rules the viewer uses
   const topbar = el('div', 'viewer-topbar');
@@ -148,7 +179,46 @@ export async function mount(ctx) {
   uniformsToggle.type = 'button';
   const hint = el('span', 'garden-hint muted', 'drag to orbit · click anything to probe it');
   if (!localStorage.getItem(HINT_SEEN_KEY)) hint.classList.add('garden-hint-pulse');
-  topbar.append(backLink, attribLink, backendBadge, fpsBadge, perfBadge, qualitySelect, camSelect, uniformsToggle, el('div', 'toolbar-spacer'), hint);
+
+  // MP UI shell (spec §5, §7.4, §8) — built ONLY when `room` is present.
+  // I3 requires zero MP DOM on the solo path, so this entire block (and
+  // every element it creates) is gated on `room` and never touched again if
+  // `room` is falsy.
+  let mp = null;
+  if (room) {
+    const statusPill = el('span', 'pill garden-mp-status', 'connecting');
+    const roomBadge = el('span', 'badge garden-mp-room', 'room ' + room);
+    const roster = el('ul', 'garden-roster');
+    const leaseLine = el('div', 'garden-lease-line muted', 'checking the lectern…');
+    const leaseBtn = el('button', 'btn btn-small btn-primary garden-lease-btn', 'Take the lectern');
+    leaseBtn.type = 'button';
+    leaseBtn.hidden = true;
+    const gamePill = el('span', 'pill garden-game-pill', 'lobby');
+    const gameLine = el('div', 'garden-game-line muted', '');
+    const startBtn = el('button', 'btn btn-small btn-ghost garden-game-start', 'Start hide-and-seek');
+    startBtn.type = 'button';
+    startBtn.hidden = true;
+    const ghostNote = el('div', 'garden-ghost-note muted',
+      'the garden is a ghost world — hiding is visual only, you pass through matter');
+    const mpPanel = el('div', 'garden-mp-panel glass');
+    const rosterHead = el('div', 'garden-mp-head', 'Who’s here');
+    const leaseHead = el('div', 'garden-mp-head', 'The lectern');
+    const gameHead = el('div', 'garden-mp-head', 'Hide and seek');
+    mpPanel.append(
+      rosterHead, roster,
+      leaseHead, leaseLine, leaseBtn,
+      gameHead, gamePill, gameLine, startBtn,
+      ghostNote,
+    );
+    stage.append(mpPanel);
+    mp = {
+      statusPill, roomBadge, roster, leaseLine, leaseBtn, gamePill, gameLine, startBtn, mpPanel,
+      selfId: null, holderId: null, phase: 'lobby',
+    };
+  }
+  topbar.append(backLink, attribLink, backendBadge, fpsBadge, perfBadge, qualitySelect, camSelect, uniformsToggle);
+  if (mp) topbar.append(mp.statusPill, mp.roomBadge);
+  topbar.append(el('div', 'toolbar-spacer'), hint);
   root.append(stage, topbar);
 
   let sceneSrc;
@@ -200,13 +270,17 @@ export async function mount(ctx) {
   // one session never accumulates drift. Per component: pristine lines up to
   // and including its `@component` line, then its (possibly edited) body,
   // then resume right at its `@end` line.
-  function buildSceneSource() {
-    if (!editedBodies.size) return sceneSrc;
+  // `overrideBodies` defaults to the live editedBodies map (solo path,
+  // unchanged) — MP's handleRemoteCommit passes a throwaway trial Map so a
+  // not-yet-validated remote body never touches the real editedBodies until
+  // prepareShader() has actually accepted it (I4).
+  function buildSceneSource(overrideBodies = editedBodies) {
+    if (!overrideBodies.size) return sceneSrc;
     const out = [];
     let cursor = 0;
     for (const c of components) {
       out.push(...sceneLines.slice(cursor, c.startLine));
-      const body = editedBodies.get(c.id);
+      const body = overrideBodies.get(c.id);
       out.push(...(body != null ? body.split('\n') : sceneLines.slice(c.startLine, c.endLine - 1)));
       cursor = c.endLine - 1;
     }
@@ -236,6 +310,25 @@ export async function mount(ctx) {
   let panel = null;
   function closePanel(opts) {
     if (panel) { panel.destroy(opts); panel = null; rh.runtime?.setUniforms({ uProbeSel: 0 }); }
+  }
+
+  // --- MP (multiplayer) state — spec §8.1's frozen net.js surface. `net` is
+  // assigned once (below, after the movement integrator exists — getPose
+  // reads charX/charZ/charYaw/gaitDist) but declared here, before the first
+  // onBuild() call, so onBuild's `room && net` check is never a TDZ error.
+  // Every one of these stays at its initial value on the solo path (I3).
+  let net = null;
+  let leaseHeld = 0, leaseHue = 0; // uLeaseHeld/uLeaseHue mirror, reapplied every (re)build below
+  let ring = false;                // lectern-radius membership, for transition-only `ring` sends (§5.1)
+  let readOnlyMirrors = new Map(); // componentId -> live { setBody } handle for an open non-holder editor (§5.2)
+
+  // §5.1/§8.1: uSpongeOn + the lease uniforms are MP-only — NEVER set on the
+  // solo path (I3; mp-solo-parity.mjs asserts a solo mount never touches
+  // them). Reapplied on every (re)build, same "fresh runtime starts with
+  // nothing set" reasoning applyQualityUniform/applyCamUniforms document.
+  function applyMpUniforms() {
+    if (!room) return;
+    rh.runtime?.setUniforms({ uSpongeOn: 1, uLeaseHeld: leaseHeld, uLeaseHue: leaseHue });
   }
 
   // PERF-2: pushes the current quality preset's SG_QUALITY level into the
@@ -298,6 +391,14 @@ export async function mount(ctx) {
     rh.runtime.setUniforms(tuneValues);
     applyQualityUniform();
     applyCamUniforms();
+    // §3.2: rh.rebuild() (context loss, or the WebGL2 pin the editing seam
+    // above already does) builds a fresh runtime whose clock restarts at 0.
+    // Re-arming here — right next to applyCamUniforms(), the exact pattern
+    // this function already uses for quality/camera — is what keeps this
+    // client's iTime from silently drifting off the rest of the room. This
+    // is spec-called-out as the single most likely bug in the whole slice.
+    applyMpUniforms();
+    if (room && net) net.armClock(rh.runtime);
   }
 
   // PERF-2: honest compact HUD next to the fps badge — the same ~1Hz tap
@@ -404,17 +505,34 @@ export async function mount(ctx) {
           toast('Switched to WebGL2 for live editing');
         }
         const { mountComponentEditor } = await import('./edit.js');
-        return mountComponentEditor({
+        // §5.2: one writer, N readers. Outside a room this is always the
+        // holder branch (isHolder === true) — solo behaviour is untouched.
+        const isHolder = !room || lastLease.isSelf;
+        const editor = await mountComponentEditor({
           component,
           initialBody: editedBodies.get(component.id) ?? component.source,
           originalBody: component.source,
-          recompile(body) {
+          readOnly: room ? !isHolder : false,
+          recompile: !room || isHolder ? (body) => {
             const res = recompileWithBody(component, body);
             variantChoices.delete(component.id); // hand-edited — no named stage describes this body anymore
             onSourceChanged();
+            if (room && net && res.ok) net.sendDraft(component.id, body); // §5.2: mirrored to non-holders, never persisted
             return res;
-          },
+          } : undefined,
+          // §6.2 step 1: local validation via prepareShader() BEFORE ever
+          // sending — a body that fails never leaves this machine.
+          onCommit: room && isHolder ? async (body) => {
+            if (!net) return { ok: false, reason: 'no relay' };
+            return net.commit(component.id, body);
+          } : undefined,
         });
+        if (room && !isHolder) {
+          readOnlyMirrors.set(component.id, editor);
+          const rawDestroy = editor.destroy;
+          editor.destroy = (...args) => { readOnlyMirrors.delete(component.id); rawDestroy.apply(editor, args); };
+        }
+        return editor;
       },
       async getEditorHref() {
         const b64 = await compress(buildSceneSource()).catch(() => null);
@@ -529,6 +647,11 @@ export async function mount(ctx) {
   // for a browser session's realistic play time, exactly like iTime already
   // is.
   let charYaw = 0, gaitDist = 0;
+  // §8.1: getPose() reads these SAME locals — the movement integrator is the
+  // one and only source of truth; net.js never gets a second copy to drift
+  // out of sync with. curSpeed01 mirrors moveFrame's own per-frame value
+  // (0 at rest) so a poll between frames still reads something honest.
+  let curSpeed01 = 0;
   const heldKeys = new Set();
   const joystickVec = { x: 0, z: 0 };
   let moveRafId = null;
@@ -548,7 +671,7 @@ export async function mount(ctx) {
     const dt = moveLastT ? (t - moveLastT) / 1000 : 0;
     moveLastT = t;
     const [dx, dz] = currentMoveVector();
-    if (!dx && !dz) { moveRafId = null; moveLastT = 0; return; } // idle-exit: no next frame scheduled
+    if (!dx && !dz) { curSpeed01 = 0; moveRafId = null; moveLastT = 0; return; } // idle-exit: no next frame scheduled
     let nx = charX + dx * MOVE_SPEED * dt;
     let nz = charZ + dz * MOVE_SPEED * dt;
     const d = Math.hypot(nx, nz);
@@ -563,13 +686,14 @@ export async function mount(ctx) {
       const maxTurn = TURN_RATE * dt;
       charYaw += Math.max(-maxTurn, Math.min(maxTurn, delta));
     }
+    curSpeed01 = Math.min(1, Math.hypot(dx, dz)); // currentMoveVector() already normalizes to <= 1
     if (nx !== charX || nz !== charZ) {
       charX = nx; charZ = nz;
-      const speed01 = Math.min(1, Math.hypot(dx, dz)); // currentMoveVector() already normalizes to <= 1
       rh.runtime?.setUniforms({
         uCharPosX: charX, uCharPosZ: charZ,
-        uCharYaw: charYaw, uCharGaitDist: gaitDist, uCharSpeed01: speed01,
+        uCharYaw: charYaw, uCharGaitDist: gaitDist, uCharSpeed01: curSpeed01,
       }); // only on actual change
+      checkRing(); // §5.1: transition-only `ring` send, driven off the same integrator
     }
     moveRafId = requestAnimationFrame(moveFrame);
   }
@@ -606,6 +730,185 @@ export async function mount(ctx) {
     joystickVec.x = x; joystickVec.z = z;
     if (x || z) ensureMoveLoop();
   });
+
+  // ---------------------------------------------------------------------
+  // MP (multiplayer) wiring — spec §3-§7. Everything below this line is
+  // reachable ONLY when `room` is set: `net` stays null and every handler
+  // below is a no-op guard on the solo path (I3). Placed here, after the
+  // movement integrator (charX/charZ/charYaw/gaitDist/curSpeed01) and the
+  // tray/editedBodies machinery above both exist, since getPose and the
+  // commit handlers close over them.
+  // ---------------------------------------------------------------------
+  let lastLease = { holder: null, isSelf: false };
+  let keepaliveTimer = null;
+  let mpEpoch = 0;
+
+  function updateLeaseBtn() {
+    if (!mp) return;
+    const isSelf = lastLease.isSelf;
+    // "Take the lectern" only appears while standing in the ring (§5.1) —
+    // either to claim an unclaimed lease, or to release the one you hold.
+    mp.leaseBtn.hidden = !ring || (lastLease.holder != null && !isSelf);
+    mp.leaseBtn.textContent = isSelf ? 'Release the lectern' : 'Take the lectern';
+  }
+
+  function checkRing() {
+    if (!room) return;
+    const dx = charX - SG_LECTERN_XZ[0], dz = charZ - SG_LECTERN_XZ[1];
+    const next = Math.hypot(dx, dz) < LECTERN_RADIUS;
+    if (next === ring) return; // §5.1: transitions only, never per frame
+    ring = next;
+    net?.setInRing(ring);
+    updateLeaseBtn();
+  }
+
+  function manageKeepalive(isHolder) {
+    if (isHolder) {
+      if (keepaliveTimer == null) keepaliveTimer = setInterval(() => net?.keepLease(), LEASE_KEEPALIVE_MS);
+    } else if (keepaliveTimer != null) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+    }
+  }
+
+  function renderRoster(members) {
+    if (!mp) return;
+    mp.roster.replaceChildren();
+    for (const m of members || []) {
+      const li = el('li', 'garden-roster-item');
+      const swatch = el('span', 'garden-hue-swatch');
+      swatch.style.background = 'hsl(' + Math.round((m.hue ?? 0) * 360) + 'deg 70% 55%)';
+      li.append(swatch, el('span', 'garden-roster-name', m.name || 'guest'));
+      if (mp.holderId != null && mp.holderId === m.id) li.append(el('span', 'badge garden-lease-badge', 'lectern'));
+      mp.roster.append(li);
+    }
+  }
+
+  function renderLease(lease) {
+    if (!mp) return;
+    lastLease = lease || { holder: null, isSelf: false };
+    mp.holderId = lastLease.holder ?? null;
+    leaseHeld = lastLease.holder != null ? 1 : 0;
+    leaseHue = lastLease.holderHue ?? 0;
+    applyMpUniforms();
+    mp.leaseLine.textContent = lastLease.holder == null
+      ? 'unclaimed'
+      : lastLease.isSelf
+        ? 'you hold the lectern'
+        : (lastLease.holderName || 'someone') + ' holds the lectern';
+    updateLeaseBtn();
+    manageKeepalive(lastLease.isSelf);
+  }
+
+  function renderGame(game) {
+    if (!mp || !game) return;
+    mp.phase = game.phase;
+    mp.gamePill.textContent = game.phase;
+    mp.gamePill.className = 'pill garden-game-pill garden-game-' + game.phase;
+    if (game.phase === 'lobby') {
+      mp.gameLine.textContent = 'waiting — press Start with 2+ people in the room';
+      mp.startBtn.hidden = false;
+    } else if (game.phase === 'over') {
+      const scores = Object.entries(game.scores || {}).map(([id, s]) => id + ': ' + s).join(', ');
+      mp.gameLine.textContent = 'round over' + (scores ? ' — ' + scores : '');
+      mp.startBtn.hidden = false;
+    } else if (game.phase === 'hiding') {
+      mp.gameLine.textContent = 'hide! the seeker is blind for now';
+      mp.startBtn.hidden = true;
+    } else {
+      mp.gameLine.textContent = 'seek!';
+      mp.startBtn.hidden = true;
+    }
+  }
+
+  function renderStatus(status) {
+    if (!mp || !status) return;
+    mp.statusPill.textContent = status.message || status.state;
+    mp.statusPill.className = 'pill garden-mp-status garden-mp-status-' + status.state;
+  }
+
+  // §5.3 late-join snapshot: apply EVERY committed body, then build + compile
+  // the whole scene ONCE — never one compile per component (reuses the same
+  // buildSceneSource() the solo path's own recompile flow reassembles from).
+  function applyEditsSnapshot(edits) {
+    if (!edits || !edits.size || !rh.runtime) return;
+    for (const [componentId, body] of edits) {
+      const component = components.find((c) => c.id === componentId);
+      if (!component) continue;
+      if (body == null) editedBodies.delete(componentId); else editedBodies.set(componentId, body);
+      tray.setEdited(componentId, editedBodies.has(componentId));
+    }
+    const res = rh.runtime.setShader(buildSceneSource());
+    if (res.ok) rh.runtime.setUniforms(tuneValues);
+  }
+
+  function rejectRemoteCommit(by) {
+    toast((by ? by + '’s' : 'That') + ' change didn’t compile here — still showing the previous world');
+  }
+
+  // §6.2 step 2 — receiving a commit. Two-sided validation, belt and braces:
+  // the existing admission-gate.js static check as a cheap reject, THEN
+  // prepareShader() (L4, webgl2.js/webgpu.js) against a full scene built
+  // with this ONE change trial-applied (editedBodies itself is untouched
+  // until we know the trial compiles) — only prepareShader().commit() on
+  // success. A failure never blanks the world (I4) and never advances the
+  // locally-applied epoch.
+  async function handleRemoteCommit({ componentId, body, by, epoch }) {
+    if (!rh.runtime) return false;
+    const component = components.find((c) => c.id === componentId);
+    if (!component) return false;
+    const trialBodies = new Map(editedBodies);
+    if (body == null) trialBodies.delete(componentId); else trialBodies.set(componentId, body);
+    const trialSrc = buildSceneSource(trialBodies);
+    const { admitted } = await gateShareLink(trialSrc, 'glsl').catch(() => ({ admitted: false }));
+    if (!admitted) { rejectRemoteCommit(by); return false; }
+    if (typeof rh.runtime.prepareShader !== 'function') { rejectRemoteCommit(by); return false; }
+    const prepared = await rh.runtime.prepareShader(trialSrc).catch(() => null);
+    if (!prepared || !prepared.ok) { prepared?.dispose(); rejectRemoteCommit(by); return false; }
+    prepared.commit();
+    if (body == null) editedBodies.delete(componentId); else editedBodies.set(componentId, body);
+    tray.setEdited(componentId, editedBodies.has(componentId));
+    rh.runtime.setUniforms(tuneValues);
+    mpEpoch = epoch;
+    const mirror = readOnlyMirrors.get(componentId);
+    mirror?.setBody?.(body ?? component.source);
+    return true;
+  }
+
+  // §5.2 — the draft mirror. Only routes to an OPEN read-only editor
+  // instance for this component; if the non-holder never opened "Edit here"
+  // for it, there's nothing to update (the probe panel's static body only
+  // resolves on open, matching solo behaviour).
+  function handleRemoteDraft({ componentId, body }) {
+    readOnlyMirrors.get(componentId)?.setBody?.(body);
+  }
+
+  if (room) {
+    mp.leaseBtn.addEventListener('click', () => {
+      if (!net) return;
+      if (lastLease.isSelf) net.releaseLease();
+      else net.requestLease();
+    });
+    mp.startBtn.addEventListener('click', () => net?.startGame());
+    import('./net.js').then(({ connectRoom }) => {
+      if (!ctx.alive()) return;
+      net = connectRoom({
+        room,
+        name: loadMpName(),
+        getPose: () => ({ x: charX, z: charZ, yaw: charYaw, speed01: curSpeed01, gait: gaitDist }),
+        setPeerUniforms: (obj) => rh.runtime?.setUniforms(obj),
+        onEdits: applyEditsSnapshot,
+        onCommit: handleRemoteCommit,
+        onDraft: handleRemoteDraft,
+        onLease: renderLease,
+        onRoster: renderRoster,
+        onGame: renderGame,
+        onStatus: renderStatus,
+      });
+      net.armClock(rh.runtime); // first arm — onBuild() re-arms on every rebuild thereafter (§3.2)
+      checkRing(); // establish initial ring membership without waiting for the first movement frame
+    }).catch(() => renderStatus({ state: 'failed', message: 'no relay' }));
+  }
 
   let downAt = null;
   function onPointerDown(e) {
@@ -677,6 +980,8 @@ export async function mount(ctx) {
     if (camBlendRafId != null) cancelAnimationFrame(camBlendRafId);
     closePanel({ animate: false });
     tray.destroy();
+    if (keepaliveTimer != null) clearInterval(keepaliveTimer);
+    net?.destroy();
     rh.dispose();
     stage.remove();
     topbar.remove();

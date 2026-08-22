@@ -6,7 +6,7 @@
 // checkout with no vendor chunk a fully working editor. Same facade surface
 // as doc-adapter-codemirror.js — no highlighting/diagnostics rendering here,
 // diagnostics-list.js is the fallback's diagnostic surface (§4).
-export function createTextarea(doc, onChange) {
+export function createTextarea(doc, onChange, opts = {}) {
   const ta = document.createElement('textarea');
   ta.className = 'code-editor';
   ta.spellcheck = false;
@@ -14,6 +14,10 @@ export function createTextarea(doc, onChange) {
   ta.setAttribute('autocapitalize', 'off');
   ta.setAttribute('autocorrect', 'off');
   ta.setAttribute('aria-label', 'Shader source');
+  // Multiplayer §5.2: the native readonly attribute — still fully
+  // programmatically settable via ta.value= (setValue below), which is how
+  // a read-only mirror updates without ever accepting user keystrokes.
+  if (opts.readOnly) ta.readOnly = true;
   ta.value = doc; // property assignment, not user input — never fires 'input'
 
   ta.addEventListener('input', () => onChange(ta.value));

@@ -17,10 +17,17 @@ note() { echo "preflight: FAIL — $*" >&2; fails=$((fails + 1)); }
 # this box and wrong once it is on github.com.
 
 # Local absolute paths leak the developer's directory layout and username into
-# a public tree, and they are also just broken for anyone who clones.
-if git grep -lI -e '/home/eric' -- . >/dev/null 2>&1; then
-  note "tracked files contain a /home/eric absolute path:"
-  git grep -lI -e '/home/eric' -- . >&2
+# a public tree, and they are also just broken for anyone who clones. Matched
+# for ANY user, not just this box's — a contributor's path is no better.
+#
+# The needle is assembled at runtime on purpose: written as a literal, this
+# line would itself be a tracked file containing the pattern, and the check
+# would flag its own source. Excluding this file instead would be worse — it
+# is a shell script full of paths and exactly where such a leak would hide.
+home_needle="/ho""me/[a-z_][a-z0-9_-]*/"
+if git grep -lIE -e "$home_needle" -- . >/dev/null 2>&1; then
+  note "tracked files contain a local absolute home path:"
+  git grep -lIE -e "$home_needle" -- . >&2
 fi
 
 # Agent worktrees live at .claude/worktrees/ INSIDE this working tree. They

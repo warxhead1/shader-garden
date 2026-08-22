@@ -45,11 +45,7 @@ const { nodes: expectedNodes, edges: expectedEdges } = analyzeConnections(compon
   const errors = [];
   const page = await freshPage(errors);
   const requestedUrls = [];
-  // Observation only — browser.mjs now requires setRequestInterception(true)
-  // before any 'request' handler, so every request is explicitly
-  // continue()'d here too (nothing held/aborted/rewritten).
-  await page.setRequestInterception(true);
-  page.on('request', (req) => { requestedUrls.push(req.url()); req.continue().catch(() => {}); });
+  page.on('request', (req) => requestedUrls.push(req.url()));
 
   await gotoSafe(page, `${BASE}/index.html#/`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));

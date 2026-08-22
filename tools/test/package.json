@@ -41,6 +41,7 @@
     "shots": "node shots.mjs"
   },
   "dependencies": {
+    "playwright-core": "1.62.1",
     "puppeteer-core": "25.3.0"
   }
 }

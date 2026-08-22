@@ -47,6 +47,13 @@ jobs:
         with:
           node-version: 22
 
+      # Repository-level checks: public-repo hygiene, workflow config validity,
+      # and that no test suite is orphaned from both gates. Cheap and first, so
+      # a config mistake fails in seconds rather than 20 minutes into the
+      # battery. Same script the pre-push hook runs.
+      - name: Preflight
+        run: ./scripts/preflight.sh
+
       - name: Install harness dependencies
         working-directory: tools/test
         run: npm ci --no-fund --no-audit
@@ -160,6 +167,14 @@ jobs:
       - name: runtime-host-loss
         working-directory: tools/test
         run: node runtime-host-loss.mjs 2>&1 | tee out/logs/runtime-host-loss.log
+      # MP-4 (multiplayer-spec.md §6.1) acceptance for prepareShader()'s
+      # compile-without-swapping contract — the I4 guarantee that a remote
+      # commit can never blank the local world. It shipped with lane L4 and
+      # was gated only by scripts/gpu-gate.sh; its GL2 and WebGPU halves both
+      # pass on a software adapter, so CI can block on it too.
+      - name: runtime-prepare-shader
+        working-directory: tools/test
+        run: node runtime-prepare-shader.mjs 2>&1 | tee out/logs/runtime-prepare-shader.log
       - name: servesite
         working-directory: tools/test
         run: node servesite.mjs 2>&1 | tee out/logs/servesite.log

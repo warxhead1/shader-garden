@@ -12,11 +12,6 @@
 # Use it deliberately. It is not a way to push a red bar.
 set -u
 
-if [ -n "${SG_SKIP_GPU_GATE:-}" ]; then
-  echo "pre-push: GPU gate SKIPPED by SG_SKIP_GPU_GATE." >&2
-  exit 0
-fi
-
 # Nothing to prove when the push deletes a ref or has no new commits.
 only_deletes=1
 while read -r _local_ref local_sha _remote_ref _remote_sha; do
@@ -27,11 +22,21 @@ done
 
 root="$(git rev-parse --show-toplevel)"
 
-echo "pre-push: budgets..."
-if ! python3 "$root/tools/check_budgets.py" >/dev/null 2>&1; then
-  python3 "$root/tools/check_budgets.py" 2>&1 | grep -E '^FAIL' >&2
-  echo "pre-push: BLOCKED — budgets are red." >&2
+# Structural checks first: seconds, and they catch the two classes of damage
+# the GPU gate cannot see — something private reaching a PUBLIC repo, and a CI
+# workflow that will fail on GitHub for a config reason. Budgets live in here
+# too. Deliberately NOT skippable by SG_SKIP_GPU_GATE: that hatch exists for
+# "this push doesn't render anything", which is not a reason to publish a
+# local path or a broken workflow.
+echo "pre-push: preflight (hygiene, CI config, suite coverage, budgets)..."
+if ! "$root/scripts/preflight.sh"; then
+  echo "pre-push: BLOCKED — preflight failed. This repo is public; fix it before pushing." >&2
   exit 1
+fi
+
+if [ -n "${SG_SKIP_GPU_GATE:-}" ]; then
+  echo "pre-push: real-GPU gate SKIPPED by SG_SKIP_GPU_GATE (preflight still ran)." >&2
+  exit 0
 fi
 
 echo "pre-push: real-GPU gate (sequential, several minutes)..."

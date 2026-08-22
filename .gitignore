@@ -3,3 +3,7 @@ __pycache__/
 node_modules/
 tools/test/out/
 site/js/vendor/*.map
+# Agent worktrees and per-session state. These sit INSIDE the working tree, so
+# they are one `git add -A` away from a public commit — see scripts/preflight.sh.
+.claude/
+.sg-wt/

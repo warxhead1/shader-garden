@@ -31,13 +31,27 @@ await new Promise((resolve, reject) => {
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
 const ROOM = 'clock-test';
-const RELAY_URL = `ws://127.0.0.1:${RELAY_PORT}`;
 // net.js's resolveUrl() reads window.location.SEARCH (the real URL's query
 // string, before '#') for the `?relay=` override — NOT the hash's own query
 // string. Confirmed empirically: navigating to
 // ".../index.html#/garden/room?relay=..." leaves location.search empty and
 // the override never fires. The query has to sit before the hash.
-const roomUrl = (room) => `${BASE}/index.html?relay=${encodeURIComponent(RELAY_URL)}#/garden/${room}`;
+//
+// The room ALSO has to be embedded in the relay URL's own path
+// (ws://host:port/<room>), not just left for the `hello` message's `room`
+// field to carry — confirmed empirically (mp-compile-swap.mjs's dev run):
+// relay.mjs picks which Room object a connection belongs to purely from the
+// upgrade request's URL path (`server/relay.mjs`'s `roomId = parts[parts.length
+// - 1] || 'lobby'`); `reduce()`'s `hello` case never reads `msg.room` for
+// routing at all. net.js's connectRoom() never appends `room` to the
+// WebSocket URL it dials — only to the `hello` payload — so a bare
+// `?relay=ws://host:port` override (with no room segment) lands every
+// client in the same fallback "lobby" room regardless of `#/garden/:room`.
+// Flagged in this suite's report as a real cross-lane (net.js/relay.mjs)
+// protocol bug; worked around here by putting the room in the URL path,
+// which relay.mjs DOES honor.
+const relayUrlFor = (room) => `ws://127.0.0.1:${RELAY_PORT}/${room}`;
+const roomUrl = (room) => `${BASE}/index.html?relay=${encodeURIComponent(relayUrlFor(room))}#/garden/${room}`;
 
 function freshPage(errors) {
   return browser.newPage().then((page) => {
@@ -127,11 +141,13 @@ await sleep(2500);
 // TOLERANCE_S: measured, not asserted blind. §3.2's own deadband
 // (RESYNC_EPS=0.05s) is the real per-client bound; on top of it this
 // suite's own sampling (two separate CDP round trips per sampleBoth() call)
-// adds skew. Measured worst case across a real run on this box: ~85ms
-// (RESYNC_EPS's 50ms plus ~35ms of CDP round-trip skew under headless
-// SwiftShader) — 120ms below leaves real margin without hiding a genuine
-// desync; if a run needs more than this, that's a regression to report; not
-// a threshold to keep widening.
+// adds skew. Measured worst case across real runs on this box, room-isolated
+// (see relayUrlFor's header note — an EARLIER draft of this suite shared the
+// relay's fallback "lobby" room with no isolation and measured ~85ms worst
+// case instead): 6-8ms typical, both before and after the forced rebuild.
+// 120ms keeps real margin over that (roughly 2x RESYNC_EPS) without hiding a
+// genuine desync; if a run needs more than this, that's a regression to
+// report, not a threshold to keep widening.
 const CLOCK_TOLERANCE_S = 0.12;
 
 const samples = [];

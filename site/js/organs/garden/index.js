@@ -844,6 +844,15 @@ export async function mount(ctx) {
     if (res.ok) rh.runtime.setUniforms(tuneValues);
   }
 
+  // See handleRemoteCommit: how many times a TLE-only gate result is retried,
+  // and the base backoff between tries (multiplied by the attempt number, so
+  // 500ms then 1000ms). Two retries covers the contention window measured on a
+  // single-GPU box without making a genuinely slow scene feel hung.
+  const REMOTE_GATE_TRIES = 3;
+  const REMOTE_GATE_BACKOFF_MS = 500;
+  // Bumped by every inbound commit so a retry that is overtaken can bail.
+  let remoteCommitGen = 0;
+
   function rejectRemoteCommit(by) {
     toast((by ? by + '’s' : 'That') + ' change didn’t compile here — still showing the previous world');
   }
@@ -870,8 +879,32 @@ export async function mount(ctx) {
     // on an idle solo load). Only .admitted is read; .scrim (a DOM report)
     // is the share-link organ's own UI and is never appended here.
     const { gateShareLink } = await import('../../editor/admission-gate.js');
-    const { admitted } = await gateShareLink(trialSrc, 'glsl').catch(() => ({ admitted: false }));
+    // TLE is the one verdict that is about THIS MACHINE, not about the code.
+    // The gate runs the trial in a sacrificial worker and gives it a fixed
+    // frame budget (admission/index.js WATCHDOG.frameMs); when two live
+    // gardens are already contending for one GPU the worker gets starved and
+    // misses that budget on source that compiles fine in isolation (measured:
+    // the same trial admits OK in ~390-1150ms alone and TLEs at ~1800-1900ms
+    // with a second garden live). Rejecting there would strand this client a
+    // component behind forever — §6.2 has no resync path, so the divergence is
+    // permanent. So TLE alone is retried, with backoff, a bounded number of
+    // times. CE/RE/WA/MLE are verdicts about the SOURCE and are never retried;
+    // the anti-grief semantics that make them a hard reject are untouched.
+    const myGen = ++remoteCommitGen;
+    let admitted = false;
+    for (let attempt = 0; attempt < REMOTE_GATE_TRIES; attempt++) {
+      const res = await gateShareLink(trialSrc, 'glsl').catch(() => ({ admitted: false, report: null }));
+      if (res.admitted) { admitted = true; break; }
+      if (res.report?.verdict !== 'TLE') break; // a verdict about the code — reject now
+      if (attempt + 1 >= REMOTE_GATE_TRIES) break;
+      await new Promise((r) => setTimeout(r, REMOTE_GATE_BACKOFF_MS * (attempt + 1)));
+      // A newer commit overtook this one while we were backing off; that one
+      // owns the world now and re-running this stale trial would apply it out
+      // of order. Drop out without touching the epoch.
+      if (myGen !== remoteCommitGen) return false;
+    }
     if (!admitted) { rejectRemoteCommit(by); return false; }
+    if (myGen !== remoteCommitGen) return false;
     if (typeof rh.runtime.prepareShader !== 'function') { rejectRemoteCommit(by); return false; }
     const prepared = await rh.runtime.prepareShader(trialSrc).catch(() => null);
     if (!prepared || !prepared.ok) { prepared?.dispose(); rejectRemoteCommit(by); return false; }

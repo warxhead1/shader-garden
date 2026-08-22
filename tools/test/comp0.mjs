@@ -207,7 +207,16 @@ await page.close();
 await browser.close();
 server.kill();
 
-/* ---------- 3) WebGPU: code-verified + compile-shape-verified (no real GPU) ---------- */
+/* ---------- 3) WebGPU bind-group SHAPE, against a recording mock ---------- */
+// The mock is not a stand-in for a GPU — it is the only way to make these
+// particular assertions at all. A real GPUDevice gives back opaque handles:
+// createBindGroupLayout() returns a GPUBindGroupLayout with no readable
+// .entries, so "channels=2 binds uniform + sampler + 2 textures at 0-3" is
+// unobservable on real hardware by construction. The mock records the
+// DESCRIPTORS webgpu.js passes down, which is exactly the contract under test.
+// Real-GPU execution — adapter acquisition, device.lost, actual rendering and
+// canvas presentation — is covered by webgpu-live.mjs and webgpu-fallback.mjs
+// against a live NVIDIA adapter, and by the runtime-host-loss.mjs suite.
 
 globalThis.GPUBufferUsage = { UNIFORM: 1, COPY_DST: 2 };
 globalThis.GPUShaderStage = { FRAGMENT: 1 };
@@ -246,7 +255,7 @@ const fakeCanvas = { clientWidth: 64, clientHeight: 64, width: 64, height: 64, a
 const fakeContext = { getCurrentTexture: () => ({ createView: () => ({}) }), unconfigure() {} };
 
 const { GPURuntime } = await import('../../site/js/runtime/webgpu.js');
-console.log('PASS (WebGPU) module imports with zero syntax errors — code-verified, not run on a real GPU headless');
+console.log('PASS (WebGPU) module imports with zero syntax errors — descriptor-shape check; execution lives in webgpu-live.mjs');
 const device = fakeDevice();
 const rt = new GPURuntime(fakeCanvas, device, fakeContext, 'bgra8unorm');
 check('(WebGPU) constructs against a mocked device (constructor shape)', !!rt);
@@ -272,7 +281,7 @@ check('(WebGPU) createTarget({feedback:true}) allocates a ping-pong pair', !!tar
 await rt.renderTo(target, 0.5);
 check('(WebGPU) renderTo() flips target.front for a feedback target (C12 self-feedback)', target.front === 1);
 rt.disposeTarget(target);
-console.log('NOTE (WebGPU) real-GPU execution (device.lost, actual GPU rendering, canvas presentation) is NOT verified by this script — no browser executes WebGPU headless; verify on the manual launch-checklist matrix.');
+console.log('NOTE (WebGPU) this script asserts descriptor SHAPE only. Execution (adapter, device.lost, rendering, presentation) is verified on a real adapter by webgpu-live.mjs, webgpu-fallback.mjs and runtime-host-loss.mjs.');
 
 console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');
 process.exit(failed ? 1 : 0);

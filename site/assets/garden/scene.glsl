@@ -564,6 +564,8 @@ const float SG_LECTERN_BOUND_MARGIN = 0.08;
 
 uniform float uLeaseHeld; // 0/1 — someone currently holds the write lease
 uniform float uLeaseHue;  // 0..1 — that holder's hue (meaningless while uLeaseHeld == 0)
+uniform float uLecternOn; // 0/1 — gates the whole component (I3); unset uniforms default to 0, so
+                           // solo (no MP mount) gets this for free, same trick peers/sponge use.
 
 // A stood-up capsule reads as a stubby pedestal at this scale — reusing
 // sg_capsule (character component, above) rather than writing a bespoke
@@ -572,6 +574,7 @@ uniform float uLeaseHue;  // 0..1 — that holder's hue (meaningless while uLeas
 // sg_lectern_base below), never re-sampled from terrain height inside the
 // march's per-step loop.
 float sg_lectern_sdf(vec3 p, vec3 base) {
+  if (uLecternOn < 0.5) return 1.0e4; // uniform-valued branch: fully coherent, free (I3)
   vec3 mid = base + vec3(0.0, SG_LECTERN_HEIGHT * 0.5, 0.0);
   float toC = length(p - mid);
   if (toC > SG_LECTERN_BOUND_R + SG_LECTERN_BOUND_MARGIN) return toC - SG_LECTERN_BOUND_R;
@@ -704,11 +707,15 @@ SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCen
   // either exhausts its step budget on garbage or free-falls through the
   // hit threshold on the wrong side. Bounded (8 iterations), cheap, and a
   // no-op whenever `ro` starts in open air (the very first sg_scene_min
-  // call already clears 0.01).
+  // call already clears 0.01). Distance-driven step (§0.5 C3): advancing by
+  // the actual (negative) distance magnitude, floored at 0.02 so it can
+  // never stall, guarantees the ray reaches the surface from anywhere
+  // inside the sponge (half-extent 2.2) well within 8 steps — a fixed
+  // 0.06 epsilon only ever covers 0.48 units total and does not.
   for (int i = 0; i < 8; i++) {
     float dEsc = sg_scene_min(ro + rd * t, charCenter, pondWaterY, rockCenter, peerCenter, lecternBase);
     if (dEsc > 0.01) break;
-    t += 0.06;
+    t += max(abs(dEsc), 0.02);
   }
 
   float hitKind = COMP_TERRAIN; // which candidate was closest last — decides the fallback below

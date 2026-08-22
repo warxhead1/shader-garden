@@ -414,7 +414,11 @@ async function openCharacterEditor(page, errors) {
   await sleep(2000);
 
   const trayCount = await page.$$eval('.garden-tray-item', (n) => n.length);
-  check('(h) the tray lists all 8 components', trayCount === 8, 'count=' + trayCount);
+  // 8 -> 11: multiplayer (docs/multiplayer-spec.md §0.5 C2) appends peers,
+  // lectern and sponge AFTER rocks. The count was never the invariant worth
+  // protecting -- stable identity for ids 1..8 is, and every id assertion
+  // below is deliberately untouched. A shift in THOSE is the real regression.
+  check('(h) the tray lists all 11 components', trayCount === 11, 'count=' + trayCount);
 
   check('(h) clicking a tray item opens its probe panel — no canvas pixel-hunting',
     await clickTrayItem(page, 'Weathered Rocks'));
@@ -550,7 +554,7 @@ async function openCharacterEditor(page, errors) {
     name: it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim(),
     chip: it.querySelector('.garden-tray-chip').textContent,
   })));
-  check('(k) every component got a chip', chips.length === 8 && chips.every((c) => c.chip !== ''), JSON.stringify(chips));
+  check('(k) every component got a chip', chips.length === 11 && chips.every((c) => c.chip !== ''), JSON.stringify(chips));
   const skyChip = chips.find((c) => c.name.toLowerCase().includes('sky'))?.chip;
   const terrainChip = chips.find((c) => c.name === 'Rolling Hills (evolved)')?.chip;
   check('(k) sky and terrain report an honest dash, not a fake number', skyChip === '\u2014' && terrainChip === '\u2014', 'sky=' + skyChip + ' terrain=' + terrainChip);

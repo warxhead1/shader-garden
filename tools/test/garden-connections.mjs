@@ -50,7 +50,9 @@ function edgeSet(edges) {
   const { components } = parseScene(sceneSrc);
   const { nodes, edges } = analyzeConnections(components);
 
-  check('(2) all 8 components parsed', components.length === 8, String(components.length));
+  // 8 -> 11: see garden.mjs's note -- three appended multiplayer components.
+  // The per-component identity checks below are deliberately unchanged.
+  check('(2) all 11 components parsed', components.length === 11, String(components.length));
   check('(2) sky defines sg_sky_color', nodes.find((n) => n.id === 'sky').fns.includes('sg_sky_color'));
   check('(2) terrain owns sg_terrain_height', nodes.find((n) => n.id === 'terrain').fns.includes('sg_terrain_height'));
 

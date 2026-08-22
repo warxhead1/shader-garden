@@ -81,8 +81,14 @@ function edgeSet(edges) {
 
   const summary = summarizeConnections(components);
   const terrainUsedBy = summary.get('terrain').usedBy.map((u) => u.id).sort();
-  check('(2) terrain is usedBy character, clouds, grass, pond, rocks',
-    JSON.stringify(terrainUsedBy) === JSON.stringify(['character', 'clouds', 'grass', 'pond', 'rocks']), JSON.stringify(terrainUsedBy));
+  // 8 -> 11: multiplayer (docs/multiplayer-spec.md §0.5 C2) appends peers,
+  // lectern and sponge after rocks; lectern and peers both read terrain
+  // height like the pre-existing five do. Same "count/membership was never
+  // the invariant, stable identity is" precedent as ffeeb04 ("test: accept
+  // the three appended garden components (8 -> 11)"), which fixed the
+  // sibling component-count assertions but missed this usedBy-list one.
+  check('(2) terrain is usedBy character, clouds, grass, lectern, peers, pond, rocks',
+    JSON.stringify(terrainUsedBy) === JSON.stringify(['character', 'clouds', 'grass', 'lectern', 'peers', 'pond', 'rocks']), JSON.stringify(terrainUsedBy));
 }
 
 console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');

@@ -2,9 +2,27 @@
 // perf.mjs measures every BAKED kernel via its #/s/:id route; the garden
 // (assets/garden/scene.glsl) isn't in kernels.json — GARDEN-0 is a
 // standalone route, not a baked kernel — so it needs its own small harness.
-// Same technique and same CAVEAT as perf.mjs (see that file's header): under
-// SwiftShader-headless these numbers are ORDINAL (a ranking + regression
-// signal against themselves), never absolute real-GPU fps truth.
+// Same technique as perf.mjs. UPDATED for the real-GPU migration: this now
+// runs Playwright headed against a real adapter (see browser.mjs's header),
+// so these numbers ARE absolute real-GPU fps truth, not the SwiftShader-era
+// ordinal ranking the previous version of this comment described.
+//
+// IMPORTANT — this file measures on TWO DIFFERENT GPUs, not one, and the
+// two halves of its own output table are not comparable to each other:
+//   - The per-level table (sampleFrames(), forced-sync via raw WebGL2 on a
+//     scratch canvas) resolves to whatever ANGLE hands back for WebGL2 on
+//     this box, measured to be the INTEGRATED GPU (AMD Raphael), not the
+//     discrete one — a driver-level fact, not something this harness
+//     chooses. WebGL2 is only used here for its synchronous readPixels()
+//     trick (see below), never as a deliberate backend pin.
+//   - The live-movement numbers (measureLiveFrameTime(), the real #/garden
+//     mount via its own perfBadge) go through prefer:'auto', which resolves
+//     to WebGPU on this box — the DISCRETE GPU (nvidia/ampere, RTX 3070 Ti).
+// Both adapters are asserted real (assertRealGpu / assertRealWebgl2 below),
+// so neither half is silently SwiftShader — but do not diff the per-level
+// table against the live-movement numbers as if they were the same
+// hardware target. The renderer strings for both are recorded in the output
+// JSON (`gpu` field) precisely so a future reader isn't misled by this.
 //
 // Usage: node tools/test/garden-perf.mjs   (from repo root; npm ci in tools/test first)
 // Measures the scene once per SG_QUALITY level (Low/Medium/High — see
@@ -13,9 +31,16 @@
 // slow frame's real GPU cost is captured even though headless Chrome's rAF
 // cadence alone would hide it. Writes tools/test/out/garden-perf.json;
 // report-only — exits nonzero only on a harness failure, never a slow frame.
+// This stays report-only deliberately: the per-level table and the live
+// numbers measure two different GPUs (see above), so a single hard fps
+// floor across both would either be meaninglessly loose (sized to the
+// integrated GPU) or spuriously strict on the discrete path, or vice versa.
+// A real regression budget belongs on ONE named GPU at a time; splitting
+// this file's two measurement paths onto separate honest budgets is future
+// work, not something to fake here.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, gotoSafe, sleep } from './browser.mjs';
+import { launch, serveSite, gotoSafe, sleep, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 
 // Closer to a real fullscreen mount than perf.mjs's 640x360 kernel-thumbnail
 // size — the garden is a fullscreen hero scene, not a gallery thumbnail.
@@ -54,6 +79,7 @@ async function measureLiveFrameTime(moving) {
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, `${BASE}/index.html#/garden`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
+  const gpu = await assertRealGpu(page).catch((e) => { errors.push('GPU: ' + e.message); return null; }); // prefer:'auto' -> WebGPU on this box; see header note on which GPU that resolves to
   await page.waitForSelector('.badge-perf', { timeout: 8000 }).catch(() => errors.push('no perf badge'));
   await sleep(LIVE_SETTLE_MS);
 
@@ -70,14 +96,19 @@ async function measureLiveFrameTime(moving) {
 
   await page.close();
   const avg_ms = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : null;
-  return { moving, avg_ms, samples: samples.length, error: errors.length ? errors.join(' | ') : null };
+  const gpuDesc = gpu ? `${gpu.vendor}/${gpu.architecture}` : null;
+  return { moving, avg_ms, samples: samples.length, gpu: gpuDesc, error: errors.length ? errors.join(' | ') : null };
 }
 
 // Runs on a scratch canvas (own GL2Runtime instance), same reasoning as
 // perf.mjs's sampleFrames: forced-sync timing can't fight the live page's
 // own rAF-driven render if it's on an entirely separate context.
 async function sampleFrames(page, glslSrc, sgQuality) {
-  return page.evaluate(async (src, quality, warmupMs, measureMs) => {
+  // Playwright's page.evaluate(fn, arg) takes exactly ONE arg, unlike
+  // Puppeteer's page.evaluate(fn, ...args) — not one of browser.mjs's
+  // shimPage() gaps (that only bridges API shape, not call arity), so fixed
+  // at the call site per the migration brief. Bundle into a single object.
+  return page.evaluate(async ({ src, quality, warmupMs, measureMs }) => {
     const { GL2Runtime } = await import('./js/runtime/webgl2.js');
     const canvas = document.createElement('canvas');
     canvas.style.width = '1280px';
@@ -112,10 +143,13 @@ async function sampleFrames(page, glslSrc, sgQuality) {
       prev = now;
     }
 
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : 'unknown';
+
     rt.dispose();
     canvas.remove();
-    return { deltas };
-  }, glslSrc, sgQuality, WARMUP_MS, MEASURE_MS);
+    return { deltas, renderer };
+  }, { src: glslSrc, quality: sgQuality, warmupMs: WARMUP_MS, measureMs: MEASURE_MS });
 }
 
 function stats(deltas) {
@@ -150,16 +184,17 @@ async function measureLevel(level) {
   // mount (not this scratch canvas below) still fails this harness loudly.
   await gotoSafe(page, `${BASE}/index.html#/garden`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
+  await assertRealWebgl2(page).catch((e) => errors.push('WEBGL2: ' + e.message)); // sampleFrames() below is raw WebGL2 — see header note on which GPU that resolves to
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
 
-  let s = null;
+  let s = null, renderer = null;
   if (errors.length === 0) {
     const r = await sampleFrames(page, sceneSrc, level.sgQuality).catch((e) => ({ error: e.message }));
     if (r.error) errors.push('measure: ' + r.error);
-    else s = stats(r.deltas);
+    else { s = stats(r.deltas); renderer = r.renderer; }
   }
   await page.close();
-  return { level: level.name, sg_quality: level.sgQuality, error: errors.length ? errors.join(' | ') : null, ...s };
+  return { level: level.name, sg_quality: level.sgQuality, error: errors.length ? errors.join(' | ') : null, gpu: renderer, ...s };
 }
 
 const results = [];
@@ -181,28 +216,32 @@ const out = {
 };
 writeFileSync(path.join(OUT_DIR, 'garden-perf.json'), JSON.stringify(out, null, 2) + '\n');
 
-console.log(`${'level'.padEnd(10)}${'avg_ms'.padStart(8)}${'p95_ms'.padStart(8)}${'fps'.padStart(7)}`);
+console.log(`${'level'.padEnd(10)}${'avg_ms'.padStart(8)}${'p95_ms'.padStart(8)}${'fps'.padStart(7)}  gpu`);
 for (const r of results) {
   if (r.avg_ms == null) {
     console.log(`${r.level.padEnd(10)}${'-'.padStart(8)}${'-'.padStart(8)}${'-'.padStart(7)}  ERROR: ${r.error}`);
     continue;
   }
-  console.log(`${r.level.padEnd(10)}${r.avg_ms.toFixed(2).padStart(8)}${r.p95_ms.toFixed(2).padStart(8)}${r.fps.toFixed(1).padStart(7)}`);
+  console.log(`${r.level.padEnd(10)}${r.avg_ms.toFixed(2).padStart(8)}${r.p95_ms.toFixed(2).padStart(8)}${r.fps.toFixed(1).padStart(7)}  ${r.gpu || 'unknown'}`);
 }
 console.log(`\nlive movement (real mount, real rAF integrator — perfBadge EMA, ${LIVE_MEASURE_MS}ms window):`);
 for (const r of [idleLive, movingLive]) {
   const label = r.moving ? 'moving (d held)' : 'idle';
   console.log(r.avg_ms == null
     ? `  ${label.padEnd(18)}ERROR: ${r.error}`
-    : `  ${label.padEnd(18)}${r.avg_ms.toFixed(2)} ms  (n=${r.samples})`);
+    : `  ${label.padEnd(18)}${r.avg_ms.toFixed(2)} ms  (n=${r.samples})  gpu=${r.gpu || 'unknown'}`);
 }
 // Report-only comparison, same philosophy as the per-level table above (this
 // file's own header: "exits nonzero only on a harness failure, never a slow
-// frame") — headless SwiftShader timing is ordinal, not absolute, so a hard
-// regression gate here would be exactly the kind of flaky assertion this
-// harness deliberately avoids elsewhere. A generous +30% threshold still
-// gives a real, printed signal for the "near-free" claim without failing
-// the suite on measurement noise.
+// frame"). Now real-GPU absolute timing (not the SwiftShader-era ordinal
+// ranking this comment used to describe), but a hard regression gate still
+// doesn't belong HERE specifically, because idle/moving are measured on the
+// SAME GPU (WebGPU/discrete, both from measureLiveFrameTime) so the relative
+// comparison below is honest — it's the per-level table above that mixes
+// GPUs internally, which is the harness-wide reason this file stays
+// report-only rather than growing a single "the" fps floor (see header). A
+// generous +30% threshold still gives a real, printed signal for the
+// "near-free" claim without failing the suite on measurement noise.
 if (idleLive.avg_ms != null && movingLive.avg_ms != null) {
   const delta = movingLive.avg_ms - idleLive.avg_ms;
   const pct = (delta / idleLive.avg_ms) * 100;

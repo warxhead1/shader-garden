@@ -20,7 +20,7 @@
 import { readFileSync, mkdtempSync, cpSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { launch, serveSite, sleep, SITE_ROOT, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, SITE_ROOT, gotoSafe, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 import { validateComposition } from '../../site/js/runtime/composition-graph.js';
 
 let failed = false;
@@ -82,6 +82,10 @@ function check(name, cond, detail) {
 /* ---------- browser-driven checks ---------- */
 
 const { server, base: BASE } = await serveSite();
+// The composition player (site/js/organs/viewer/composition-player.js) is
+// hard-wired to raw WebGL2 — it never goes through runtime-host's `prefer`
+// knob at all, so this whole file is decision-rule bullet 1: about WebGL2
+// semantics, stays pinned regardless of the site-wide WebGPU default.
 const browser = await launch();
 
 // (2) headless GL2 playback of the shipped demo composition
@@ -92,6 +96,12 @@ const browser = await launch();
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, `${BASE}/index.html#/s/hills-into-icefield`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
+  // assertRealGpu proves the WebGPU adapter is real; this suite's actual
+  // rendering is WebGL2 (composition-player is hard-wired to it), a
+  // separate ANGLE/driver path with no software-adapter protection of its
+  // own, so pin that down too.
+  await assertRealGpu(page);
+  await assertRealWebgl2(page);
   await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
   await sleep(1500);
 

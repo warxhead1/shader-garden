@@ -21,8 +21,11 @@
 //     round-trips: compress/decompress byte-for-byte, and a real navigation
 //     to the minted link boots straight into composition mode, admits, and
 //     renders.
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 
+// The editor's buffer/composition mode runs through composition-player.js,
+// which is hard-wired to raw WebGL2 (no runtime-host `prefer` knob at all —
+// see comp1.mjs's header comment for the full reasoning).
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
 let failed = false;
@@ -96,6 +99,11 @@ async function waitForEditor(page) {
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, `${BASE}/index.html#/edit`, { waitUntil: 'networkidle0' });
+  // assertRealGpu proves the WebGPU adapter is real; the composition canvas
+  // this check reads is WebGL2 (composition-player is hard-wired to it), a
+  // separate driver path with no software-adapter protection of its own.
+  await assertRealGpu(page);
+  await assertRealWebgl2(page);
   await waitForEditor(page);
   await page.click('.buffer-add');
   await sleep(800);
@@ -137,7 +145,10 @@ async function waitForEditor(page) {
 
   const t0 = Date.now();
   const result = await Promise.race([
-    hangPage.evaluate(async (imageSrc, hangSrc) => {
+    // Playwright's page.evaluate(fn, arg) takes exactly ONE arg, unlike
+    // Puppeteer's page.evaluate(fn, ...args) — fixed at the call site (see
+    // garden-perf.mjs's sampleFrames() for the same fix and reasoning).
+    hangPage.evaluate(async ({ imageSrc, hangSrc }) => {
       const { admitComposition } = await import('./js/organs/admission/index.js');
       const passes = [
         { id: 'Image', target: 'screen', channelSlots: [null, null, null, null], feedback: false, fullSource: imageSrc },
@@ -146,7 +157,7 @@ async function waitForEditor(page) {
       const t0 = performance.now();
       const report = await admitComposition(passes, { surface: 'share-link' });
       return { report, ms: performance.now() - t0 };
-    }, CLEAN_IMAGE, HANG_A),
+    }, { imageSrc: CLEAN_IMAGE, hangSrc: HANG_A }),
     sleep(30000).then(() => ({ timedOutInNode: true })),
   ]);
   const wallMs = Date.now() - t0;
@@ -167,9 +178,17 @@ async function waitForEditor(page) {
   }).catch(() => null);
   check('(3) a later admit() still works after the composed TLE — page not wedged', stillWorks === 'OK', 'verdict=' + stillWorks);
 
-  const pid = hangBrowser.process()?.pid;
+  // Puppeteer's browser.process().pid (for a SIGKILL fallback if close()
+  // itself hangs) has no Playwright equivalent: playwright-core's
+  // chromium.launch() exposes no public accessor for the underlying OS
+  // process — confirmed empirically (no `.process`, no `.pid`, nothing on
+  // the prototype chain matching /pid|process/i). This is a real gap versus
+  // the original suite's defense-in-depth, not something browser.mjs can
+  // shim (it would need Playwright's own driver internals). What's left:
+  // the checks above already proved the hang resolves via the in-page
+  // admission watchdog in ~1s (verdict=TLE), not by outliving the process,
+  // so close() racing a timeout is the best available fallback here.
   try { await Promise.race([hangBrowser.close(), sleep(3000)]); } catch { /* ignore */ }
-  if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
 }
 
 /* ---------- (4) multi-pass share link round-trips ---------- */

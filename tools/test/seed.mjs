@@ -119,15 +119,21 @@ async function seedState(page, selector = '#seed') {
 }
 
 async function waitForState(page, want, selector = '#seed', timeout = 8000) {
+  // Playwright's waitForFunction is (pageFunction, arg, options) — a single
+  // `arg` value, not puppeteer's (pageFunction, options, ...args) spread.
+  // Passing {timeout} as if it were an arg silently fed `sel` the options
+  // object here, so document.querySelector(sel) threw "not a valid
+  // selector" on every call (masked because the whole thing is caught below
+  // and only surfaces as a stray console error the (a)/(b)/(c)/... "no
+  // console/page errors" checks then correctly flag).
   return page
     .waitForFunction(
-      (sel, w) => {
+      ({ sel, w }) => {
         const el = document.querySelector(sel);
         return el && el.state === w;
       },
+      { sel: selector, w: want },
       { timeout },
-      selector,
-      want,
     )
     .then(() => true)
     .catch(() => false);
@@ -137,8 +143,13 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
 {
   const { page, errors } = await instrumentedPage();
   const gardenReqs = [];
+  // Observation only (nothing is held/aborted/rewritten) — but browser.mjs
+  // now requires setRequestInterception(true) before any 'request' handler
+  // is registered, so every request is explicitly continue()'d here too.
+  await page.setRequestInterception(true);
   page.on('request', (req) => {
     if (req.url().startsWith(GARDEN)) gardenReqs.push(req.url());
+    req.continue().catch(() => {});
   });
 
   await gotoSafe(page, fixtureUrl(), { waitUntil: 'networkidle0', timeout: 20000 })
@@ -162,8 +173,13 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
 {
   const { page, errors } = await instrumentedPage();
   const gardenReqs = [];
+  // Observation only (nothing is held/aborted/rewritten) — but browser.mjs
+  // now requires setRequestInterception(true) before any 'request' handler
+  // is registered, so every request is explicitly continue()'d here too.
+  await page.setRequestInterception(true);
   page.on('request', (req) => {
     if (req.url().startsWith(GARDEN)) gardenReqs.push(req.url());
+    req.continue().catch(() => {});
   });
   await gotoSafe(page, fixtureUrl({ count: 3 }), { waitUntil: 'networkidle0', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));

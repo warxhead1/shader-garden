@@ -261,6 +261,15 @@ function shimPage(page) {
     return rawGoto(url, { ...opts, waitUntil });
   };
 
+  // waitForSelector defaults differ, and the difference HANGS rather than
+  // errors: puppeteer waits for presence in the DOM, Playwright waits for
+  // VISIBILITY. A suite waiting on a deliberately-collapsed container (the
+  // uniform inspector does exactly this) blocks past any timeout you give
+  // it. Restore puppeteer's contract; callers that genuinely want
+  // visibility can still pass { state: 'visible' } explicitly.
+  const rawWaitForSelector = page.waitForSelector.bind(page);
+  page.waitForSelector = (sel, opts = {}) => rawWaitForSelector(sel, { state: 'attached', ...opts });
+
   // evaluateOnNewDocument -> addInitScript (9 suites). Same semantics: runs
   // before any page script on every navigation, including iframes.
   page.evaluateOnNewDocument = (fn, ...args) => page.addInitScript({ content:
@@ -289,7 +298,17 @@ function shimPage(page) {
   let routing = false;
   const rawOn = page.on.bind(page);
   page.on = (ev, handler) => {
-    if (ev === 'request' && routing) { reqHandlers.push(handler); return page; }
+    if (ev === 'request') {
+      // Puppeteer requires setRequestInterception(true) BEFORE handlers can
+      // settle requests. Registering the other way round would silently
+      // route this handler to the plain listener path, where the Request it
+      // receives has no continue()/abort() at all — so fail loudly instead
+      // of half-working.
+      if (!routing) throw new Error("browser.mjs: page.on('request') before setRequestInterception(true) — "
+        + 'enable interception first, or this handler cannot settle requests.');
+      reqHandlers.push(handler);
+      return page;
+    }
     return rawOn(ev, handler);
   };
   page.setRequestInterception = async (on) => {
@@ -311,11 +330,21 @@ function shimPage(page) {
           // -> Playwright fulfill({status, contentType, body, headers}).
           respond: (r = {}) => { settled = true; return route.fulfill(r); },
         };
+        if (!reqHandlers.length) { await route.continue(); return; }
         for (const h of reqHandlers) {
           await h(facade);
           if (settled) return;
         }
-        if (!settled) await route.continue();
+        // Deliberately NO fallback continue() here. Under puppeteer, an
+        // intercepted request that no handler settles stays pending
+        // FOREVER, and tests rely on exactly that to hold a request open
+        // while they navigate away underneath it. An earlier version of
+        // this shim called route.continue() when nothing settled, which
+        // released every held request immediately and made those tests
+        // vacuous — loader.mjs's stale-mount race then "failed" in a way
+        // that looked precisely like an intermittent product bug, and was
+        // diagnosed as one. A request left pending here is the correct
+        // behaviour, not a leak.
       });
     } else if (!on && routing) {
       routing = false;

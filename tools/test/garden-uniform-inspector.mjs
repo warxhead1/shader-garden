@@ -2,7 +2,7 @@
 // inspector (D1) + getCustomUniforms() snapshot isolation, plus the
 // provenance multi-pass mechanism explainer (D3), gated correctly.
 // Usage: node tools/test/garden-uniform-inspector.mjs (npm ci in tools/test first)
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealWebgl2 } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -28,7 +28,16 @@ async function freshPage(errors) {
   const page = await freshPage(errors);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-uniform-inspector', { timeout: 8000 }).catch(() => errors.push('no garden-uniform-inspector'));
+  // Real bug, not a timing budget: Playwright's waitForSelector defaults to
+  // state:'visible', unlike Puppeteer's (presence-in-DOM). This element is
+  // deliberately hidden/collapsed at this point in the test (see the very
+  // next check), so the visible-by-default wait can NEVER resolve —
+  // confirmed by the element already existing one page.evaluate() call
+  // later regardless of how long the timeout was widened. state:'attached'
+  // restores the Puppeteer-equivalent "wait for it to exist" semantics this
+  // suite actually needs. Not one of browser.mjs's shimPage() gaps (that
+  // bridges API shape, not default-option semantics) — fixed at the call site.
+  await page.waitForSelector('.garden-uniform-inspector', { state: 'attached', timeout: 8000 }).catch(() => errors.push('no garden-uniform-inspector'));
 
   check('(1) inspector starts collapsed', await page.evaluate(() => document.querySelector('.garden-uniform-inspector').hidden === true));
   await page.click('.garden-uniform-toggle');
@@ -79,6 +88,12 @@ async function freshPage(errors) {
   const page = await freshPage(errors);
   await gotoSafe(page, BASE + '/index.html#/', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
+  // GL2Runtime forces its own raw webgl2 context regardless of the site's
+  // WebGPU-preferring default (decision rule bullet 1) — prove it's real
+  // before trusting the isolation check below. NOTE: WebGL2 on this box
+  // resolves to the integrated GPU (AMD Raphael), not the discrete one
+  // WebGPU gets — see garden-perf.mjs's header for the measured reason.
+  await assertRealWebgl2(page).catch((e) => errors.push('WEBGL2: ' + e.message));
 
   const gl2 = await page.evaluate(async () => {
     const mod = await import('./js/runtime/webgl2.js');
@@ -104,7 +119,7 @@ async function freshPage(errors) {
     }).catch((e) => ({ threw: e.message }));
     check('(2) GPURuntime.getCustomUniforms() returns an isolated snapshot too', gpu.skipped || (gpu.returnedIsolated && gpu.liveUnaffected), JSON.stringify(gpu));
   } else {
-    console.log('SKIP (2) WebGPU not available in this headless browser — GL2Runtime check above already covers the accessor contract');
+    console.log('SKIP (2) WebGPU not available in this browser — GL2Runtime check above already covers the accessor contract');
   }
   check('(2) no console errors', errors.length === 0, errors.join(' | '));
   await page.close();

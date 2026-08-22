@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { launch, serveSite, sleep, SITE_ROOT, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, SITE_ROOT, gotoSafe, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 import { validateComposition } from '../../site/js/runtime/composition-graph.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -181,6 +181,9 @@ function runBake(fixturesDir, kernelsPath, args = []) {
 /* ---------- browser-driven checks ---------- */
 
 const { server, base: BASE } = await serveSite();
+// composition-player.js is hard-wired to raw WebGL2 (no runtime-host
+// `prefer` knob at all — decision rule bullet 1, same reasoning as
+// comp1.mjs's identical check).
 const browser = await launch();
 
 // (3) headless GL2 playback of the evolved composition
@@ -191,6 +194,11 @@ const browser = await launch();
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, `${BASE}/index.html#/s/${COMP_ID}`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
+  // assertRealGpu proves the WebGPU adapter is real; the composition canvas
+  // this check reads is WebGL2, a separate driver path with no
+  // software-adapter protection of its own.
+  await assertRealGpu(page);
+  await assertRealWebgl2(page);
   await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
   await sleep(1500);
   const canvases = await page.evaluate(() => document.querySelectorAll('canvas').length).catch(() => -1);

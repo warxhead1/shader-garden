@@ -119,15 +119,21 @@ async function seedState(page, selector = '#seed') {
 }
 
 async function waitForState(page, want, selector = '#seed', timeout = 8000) {
+  // Playwright's waitForFunction is (pageFunction, arg, options) — a single
+  // `arg` value, not puppeteer's (pageFunction, options, ...args) spread.
+  // Passing {timeout} as if it were an arg silently fed `sel` the options
+  // object here, so document.querySelector(sel) threw "not a valid
+  // selector" on every call (masked because the whole thing is caught below
+  // and only surfaces as a stray console error the (a)/(b)/(c)/... "no
+  // console/page errors" checks then correctly flag).
   return page
     .waitForFunction(
-      (sel, w) => {
+      ({ sel, w }) => {
         const el = document.querySelector(sel);
         return el && el.state === w;
       },
+      { sel: selector, w: want },
       { timeout },
-      selector,
-      want,
     )
     .then(() => true)
     .catch(() => false);
@@ -261,7 +267,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
   await gotoSafe(page, `${GARDEN}/embed/contract.html`, { waitUntil: 'networkidle0', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   const settled = await page
-    .waitForFunction(() => window.__conformanceDone === true, { timeout: 30000 })
+    .waitForFunction(() => window.__conformanceDone === true, undefined, { timeout: 30000 })
     .then(() => true)
     .catch(() => false);
   check('(e) contract.html conformance run completes', settled);
@@ -307,7 +313,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     .waitForFunction(() => {
       const el = document.getElementById('unsafe-seed');
       return el && el.shadowRoot && el.shadowRoot.querySelector('.poster');
-    }, { timeout: 10000 })
+    }, undefined, { timeout: 10000 })
     .then(() => true)
     .catch(() => false);
   check('(f) unsafe seed settles on the poster box (forced-click, never autoplays)', gotPoster);
@@ -336,7 +342,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
 
   if (lossSupported) {
     const knockedOff = await page
-      .waitForFunction(() => document.getElementById('unsafe-seed').state !== 'playing', { timeout: 10000 })
+      .waitForFunction(() => document.getElementById('unsafe-seed').state !== 'playing', undefined, { timeout: 10000 })
       .then(() => true)
       .catch(() => false);
     check('(f) context loss knocks the unsafe seed off "playing"', knockedOff);
@@ -386,7 +392,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
   });
   check('(g) viewer topbar has a "Copy embed code" button', clicked);
 
-  await page.waitForFunction(() => window.__clipboard !== null, { timeout: 5000 }).catch(() => {});
+  await page.waitForFunction(() => window.__clipboard !== null, undefined, { timeout: 5000 }).catch(() => {});
   const snippet = await page.evaluate(() => window.__clipboard);
   check('(g) clicking it copies a <shader-seed> snippet', typeof snippet === 'string' && snippet.includes('<shader-seed'), snippet);
   const hasSrc = /<script type="module" src="[^"]+seed@1\.js">/.test(snippet || '');
@@ -409,7 +415,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
       .waitForFunction(() => {
         const el = document.querySelector('shader-seed');
         return el && el.state === 'playing';
-      }, { timeout: 15000 })
+      }, undefined, { timeout: 15000 })
       .then(() => true)
       .catch(() => false);
     check('(g) the copied snippet, replayed verbatim on a blank page, reaches "playing"', ready);
@@ -436,7 +442,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     .waitForFunction(() => {
       const el = document.querySelector('#preview-box shader-seed');
       return el && el.state === 'playing';
-    }, { timeout: 15000 })
+    }, undefined, { timeout: 15000 })
     .then(() => true)
     .catch(() => false);
   check('(h) the floating live preview on the page reaches "playing"', floatingPreviewReady);
@@ -448,7 +454,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     cb.dispatchEvent(new Event('change'));
   });
   await page
-    .waitForFunction(() => /integrity=/.test(document.getElementById('snippet-output').value), { timeout: 5000 })
+    .waitForFunction(() => /integrity=/.test(document.getElementById('snippet-output').value), undefined, { timeout: 5000 })
     .catch(() => {});
   const pinnedSnippet = await page.evaluate(() => document.getElementById('snippet-output').value);
   const hasIntegrity = /integrity="sha384-[A-Za-z0-9+/=]+"/.test(pinnedSnippet);
@@ -461,7 +467,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     .waitForFunction(() => {
       const el = document.querySelector('#preview-box shader-seed');
       return el && el.state === 'playing';
-    }, { timeout: 15000 })
+    }, undefined, { timeout: 15000 })
     .then(() => true)
     .catch(() => false);
   check('(h) the SRI-pinned live preview on the page ALSO reaches "playing" (the hash is correct)', pinnedPreviewReady);
@@ -483,7 +489,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
       .waitForFunction(() => {
         const el = document.querySelector('shader-seed');
         return el && el.state === 'playing';
-      }, { timeout: 15000 })
+      }, undefined, { timeout: 15000 })
       .then(() => true)
       .catch(() => false);
     check(`(h) the copied ${label} snippet, replayed verbatim on a blank page, reaches "playing"`, reached);

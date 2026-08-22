@@ -116,7 +116,13 @@ async function clickTrayItem(page, name) {
       evolved: !!el.querySelector('.probe-origin-evolved'),
       handmade: !!el.querySelector('.probe-origin-handmade'),
     })));
-  check('(3) all 8 garden components are listed', componentRows.length === 8, `got ${componentRows.length}`);
+  // Stale count, not a backend-migration change: scene.glsl now declares 11
+  // @component blocks (sky, terrain, character, shadow, pond, grass, clouds,
+  // rocks, peers, lectern, sponge) — smoke.mjs's own "(w) scene yields at
+  // least 8 probe-able components" check already accounts for 11. This test
+  // still asserts the real invariant (every component the scene declares
+  // shows up here), just against the current true count.
+  check('(3) all 11 garden components are listed', componentRows.length === 11, `got ${componentRows.length}`);
   const terrainRow = componentRows.find((r) => r.name.includes('Rolling Hills'));
   check('(3) terrain is listed as evolved', !!terrainRow && terrainRow.evolved && !terrainRow.handmade);
   const rocksRow = componentRows.find((r) => r.name.includes('Weathered Rocks'));

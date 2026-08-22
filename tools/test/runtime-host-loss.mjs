@@ -20,7 +20,7 @@
 // instead of retrying forever.
 //
 // Usage: node tools/test/runtime-host-loss.mjs   (first: npm ci in tools/test)
-import { launch, serveSite, gotoSafe, sleep } from './browser.mjs';
+import { launch, serveSite, gotoSafe, sleep, assertRealWebgl2 } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -34,6 +34,10 @@ function check(name, cond, detail) {
 }
 
 const page = await browser.newPage();
+// Pinned WebGL2 throughout (runtimeHost() below is called with
+// prefer:'webgl2' directly) — prove it's the real renderer, not a silent
+// SwiftShader downgrade.
+await assertRealWebgl2(page);
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 // Any page that already serves the ES module tree works — runtimeHost() is

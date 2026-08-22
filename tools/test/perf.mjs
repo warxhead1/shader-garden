@@ -2,9 +2,10 @@
 // headlessly, warms it up, then measures per-frame render cost to catch the
 // "quite shite fps" kernels before they reach a real screen.
 //
-// CAVEAT: in CI this runs on SwiftShader (software GL, see browser.mjs) —
-// the numbers are ORDINAL, a ranking + regression signal against each other,
-// not absolute fps truth for a real GPU.
+// CAVEAT: this now runs against a real GPU (see browser.mjs's header) —
+// still worth treating the numbers as ORDINAL, a ranking + regression
+// signal against each other, since box load varies run to run; just no
+// longer SwiftShader-software-GL numbers specifically.
 //
 // NOT sampled via passive requestAnimationFrame deltas: headless Chrome's
 // BeginFrame cadence is decoupled from actual GPU completion — a synthetic
@@ -22,7 +23,7 @@
 // until bake_kernels.py's --perf gate consumes it.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, gotoSafe } from './browser.mjs';
+import { launch, serveSite, gotoSafe, assertRealWebgl2 } from './browser.mjs';
 
 const VIEWPORT = { width: 640, height: 360 };
 const WARMUP_MS = 1000;
@@ -34,7 +35,11 @@ const OUT_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), 'o
 // rAF-driven render. import() is relative to the already-loaded page, same
 // trick smoke.mjs uses for share.js.
 async function sampleFrames(page, glslSrc) {
-  return page.evaluate(async (src, warmupMs, measureMs) => {
+  // Playwright's page.evaluate() takes exactly one arg; a puppeteer-style
+  // multi-arg call throws "Too many arguments." (found the same shape bug
+  // in smoke.mjs's shareLinkFor() earlier in this migration) — bundle into
+  // a single object.
+  return page.evaluate(async ({ src, warmupMs, measureMs }) => {
     const { GL2Runtime } = await import('./js/runtime/webgl2.js');
     const canvas = document.createElement('canvas');
     canvas.style.width = '640px';
@@ -71,7 +76,7 @@ async function sampleFrames(page, glslSrc) {
     rt.dispose();
     canvas.remove();
     return { deltas };
-  }, glslSrc, WARMUP_MS, MEASURE_MS);
+  }, { src: glslSrc, warmupMs: WARMUP_MS, measureMs: MEASURE_MS });
 }
 
 function stats(deltas) {
@@ -85,6 +90,15 @@ function stats(deltas) {
 mkdirSync(OUT_DIR, { recursive: true });
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
+// One-time proof this run is actually on real WebGL2 hardware, not a silent
+// SwiftShader/software fallback — same pattern as runtime-host-loss.mjs.
+// Every measurement below is driven through GL2Runtime.renderOnce() on a
+// scratch canvas (independent of whichever backend the viewer organ itself
+// mounts), so assertRealWebgl2 — not assertRealGpu's WebGPU-adapter check —
+// is the assertion that actually protects what this suite measures.
+const gpuPage = await browser.newPage();
+await assertRealWebgl2(gpuPage);
+await gpuPage.close();
 
 let kernels;
 try {

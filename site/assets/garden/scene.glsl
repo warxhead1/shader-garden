@@ -71,6 +71,13 @@ const float COMP_POND      = 5.0;
 const float COMP_GRASS     = 6.0;
 const float COMP_CLOUDS    = 7.0;
 const float COMP_ROCKS     = 8.0;
+// MP-2/3/5 (docs/multiplayer-spec.md §4.2/§5.1/§7.1): appended, never
+// inserted earlier — parse.js assigns component ids by file order, so
+// these three MUST stay last or every id above shifts and the probe panel
+// (and garden.mjs's id assertions) breaks.
+const float COMP_PEERS     = 9.0;
+const float COMP_LECTERN   = 10.0;
+const float COMP_SPONGE    = 11.0;
 
 // @component sky "Sky & Atmosphere" "A gradient horizon-to-zenith plus a squinted-power sun disc — the cheapest possible sky that still reads as one. No clouds, no scattering sim: one lerp, one pow(), and an additive sun term."
 vec3 sg_sky_color(vec3 rd, float time) {
@@ -173,11 +180,19 @@ const float SG_STRIDE_LEN = 1.1; // world units per full gait cycle — tuned so
                                   // MOVE_SPEED=1.8 walk reads as ~1.6 steps/sec
 float sg_gait_phase() { return fract(uCharGaitDist / SG_STRIDE_LEN); }
 
-// center is precomputed once per pixel by the caller (mainImage) — it only
-// depends on iTime, not on p, and this is called once per raymarch step;
-// recomputing sg_terrain_height() (a 5-octave noise loop) that often was
-// the single biggest cost in the whole scene.
-float sg_character_sdf(vec3 p, vec3 center) {
+// MP-2 (docs/multiplayer-spec.md §4.2): the body SDF, parameterised so
+// sg_peers_sdf (appended after rocks, below) can reuse it for up to 7 other
+// players instead of forking a second copy of six smooth-blended
+// primitives. `yaw`/`gaitPhase`/`speed01` are exactly what sg_character_sdf
+// below reads off the uChar* globals — gaitPhase is already the [0,1)
+// stride-cycle fraction (sg_gait_phase()'s output), not the raw
+// accumulated distance, since a peer only ever gets ITS OWN already-
+// normalized value over the wire (§4.1 flattens to scalars, not a
+// distance the far end would have to replay stride math on). Bounce
+// (squash/stretch, the parabolic hop) is driven by iTime, which is
+// synced across clients as of MP-1 — so every figure this feeds, local or
+// peer, bounces in lockstep for free, no per-peer bounce uniform needed.
+float sg_figure_sdf(vec3 p, vec3 center, float yaw, float gaitPhase, float speed01) {
   float t = sg_bounce_phase(iTime);
 
   // Bounding-sphere early-out: almost every march step, for almost every
@@ -215,7 +230,7 @@ float sg_character_sdf(vec3 p, vec3 center) {
   // compiler re-associating cos(uCharYaw)/sin(uCharYaw) into the chain
   // differently than the old code's absence of them). Literal code
   // preservation sidesteps the question of WHY entirely.
-  if (uCharYaw == 0.0 && uCharGaitDist == 0.0 && uCharSpeed01 <= 0.0) {
+  if (yaw == 0.0 && gaitPhase == 0.0 && speed01 <= 0.0) {
     lp.y /= scaleY;
     lp.xz /= scaleXZ;
 
@@ -234,16 +249,19 @@ float sg_character_sdf(vec3 p, vec3 center) {
     return d * min(scaleY, scaleXZ);
   }
 
-  // Yaw the whole figure to face uCharYaw before any limb math runs, so
-  // every primitive below turns together.
-  float cy = cos(uCharYaw), sy = sin(uCharYaw);
+  // Yaw the whole figure to face `yaw` before any limb math runs, so every
+  // primitive below turns together.
+  float cy = cos(yaw), sy = sin(yaw);
   lp.xz = vec2(lp.x * cy - lp.z * sy, lp.x * sy + lp.z * cy);
 
-  // gp: 0..2pi over one full stride, see sg_gait_phase(). A second, smaller
-  // vertical bob at 2x gait frequency (one dip per footstep, not per
-  // stride) rides underneath the hop's own squash/stretch below.
-  float gp = sg_gait_phase() * 6.28318530718;
-  float gaitBob = sin(gp * 2.0) * 0.03 * uCharSpeed01;
+  // gp: 0..2pi over one full stride — `gaitPhase` IS sg_gait_phase()'s
+  // output (the caller already normalized it; see this function's header
+  // comment for why a peer never has to replay stride math to get here). A
+  // second, smaller vertical bob at 2x gait frequency (one dip per
+  // footstep, not per stride) rides underneath the hop's own squash/stretch
+  // below.
+  float gp = gaitPhase * 6.28318530718;
+  float gaitBob = sin(gp * 2.0) * 0.03 * speed01;
   lp.y -= gaitBob;
 
   lp.y /= scaleY;
@@ -253,7 +271,7 @@ float sg_character_sdf(vec3 p, vec3 center) {
 
   // Lean the upper body into the direction of travel; legs stay in the
   // unleaned `lp` below so they read as planted, not swaying with the torso.
-  float lean = uCharSpeed01 * 0.12; // radians, ~7 deg max
+  float lean = speed01 * 0.12; // radians, ~7 deg max
   vec3 lu = lp;
   lu.yz += vec2(-lean * lp.z, lean * lp.y);
 
@@ -264,7 +282,7 @@ float sg_character_sdf(vec3 p, vec3 center) {
   // above) — the walk formula (gait-phase-driven) takes over as speed
   // increases, mixed FROM the same pre-wave-4 idle formula so a start/stop
   // is a blend, not a pop.
-  float swing = mix(sin(iTime * 3.1), sin(gp) * 0.55, uCharSpeed01);
+  float swing = mix(sin(iTime * 3.1), sin(gp) * 0.55, speed01);
   d = sg_smin(d, sg_capsule(lu, vec3( 0.24, 0.24, 0.0), vec3( 0.27 + 0.07 * swing, -0.12,  0.13 * swing), 0.062), k);
   d = sg_smin(d, sg_capsule(lu, vec3(-0.24, 0.24, 0.0), vec3(-0.27 - 0.07 * swing, -0.12, -0.13 * swing), 0.062), k);
 
@@ -273,11 +291,20 @@ float sg_character_sdf(vec3 p, vec3 center) {
   // front/back stride offset on top of it — the two read as orthogonal
   // motions (swing forward/back AND lift at the knee).
   float tuck = smoothstep(0.12, 0.5, min(t, 1.0 - t)); // legs draw up mid-flight, extend for landing
-  float legSwing = mix(0.0, sin(gp + 3.14159265) * 0.35, uCharSpeed01);
+  float legSwing = mix(0.0, sin(gp + 3.14159265) * 0.35, speed01);
   d = sg_smin(d, sg_capsule(lp, vec3( 0.11, -0.04, 0.0), vec3( 0.11 + legSwing * 0.15, -0.5 + 0.24 * tuck,  0.07 * tuck - legSwing * 0.10), 0.075), k);
   d = sg_smin(d, sg_capsule(lp, vec3(-0.11, -0.04, 0.0), vec3(-0.11 - legSwing * 0.15, -0.5 + 0.24 * tuck, -0.07 * tuck + legSwing * 0.10), 0.075), k);
 
   return d * min(scaleY, scaleXZ); // conservative distance correction for the non-uniform scale
+}
+
+// Thin wrapper: the local player's own body, reading the uChar* globals
+// moveFrame() (index.js) drives — every pre-existing caller (sg_march's
+// dChar, sg_character_normal below, the bounding-sphere early-out inside
+// sg_figure_sdf above) goes through this unchanged, so nothing about the
+// solo route's behavior moves even a ULP.
+float sg_character_sdf(vec3 p, vec3 center) {
+  return sg_figure_sdf(p, center, uCharYaw, sg_gait_phase(), uCharSpeed01);
 }
 
 vec3 sg_character_normal(vec3 p, vec3 center) {
@@ -456,6 +483,171 @@ vec3 sg_rocks_center() {
 }
 // @end
 
+// @component peers "Other Players" "Up to 7 other room members, each one a full sg_figure_sdf reuse of the local character's body — flattened into scalar uPeerN* uniforms because setUniforms() is scalar-float-only on both backends (docs/multiplayer-spec.md §0.2/§4.1). uPeerCount gates the entire component behind one uniform-valued branch, so solo (uPeerCount==0) pays nothing beyond that comparison — the same trick sponge uses below."
+const float SG_PEER_MAX = 7.0;
+
+uniform float uPeerCount;
+
+uniform float uPeer0Act; uniform float uPeer0X; uniform float uPeer0Z; uniform float uPeer0Yaw; uniform float uPeer0Gait; uniform float uPeer0Speed; uniform float uPeer0Hue;
+uniform float uPeer1Act; uniform float uPeer1X; uniform float uPeer1Z; uniform float uPeer1Yaw; uniform float uPeer1Gait; uniform float uPeer1Speed; uniform float uPeer1Hue;
+uniform float uPeer2Act; uniform float uPeer2X; uniform float uPeer2Z; uniform float uPeer2Yaw; uniform float uPeer2Gait; uniform float uPeer2Speed; uniform float uPeer2Hue;
+uniform float uPeer3Act; uniform float uPeer3X; uniform float uPeer3Z; uniform float uPeer3Yaw; uniform float uPeer3Gait; uniform float uPeer3Speed; uniform float uPeer3Hue;
+uniform float uPeer4Act; uniform float uPeer4X; uniform float uPeer4Z; uniform float uPeer4Yaw; uniform float uPeer4Gait; uniform float uPeer4Speed; uniform float uPeer4Hue;
+uniform float uPeer5Act; uniform float uPeer5X; uniform float uPeer5Z; uniform float uPeer5Yaw; uniform float uPeer5Gait; uniform float uPeer5Speed; uniform float uPeer5Hue;
+uniform float uPeer6Act; uniform float uPeer6X; uniform float uPeer6Z; uniform float uPeer6Yaw; uniform float uPeer6Gait; uniform float uPeer6Speed; uniform float uPeer6Hue;
+
+// peerCenter[i] is precomputed ONCE per pixel by mainImage (see charCenter/
+// rockCenter above) — never here, and never inside sg_march's per-step
+// loop: sg_terrain_height is a 5-octave noise call, and this SDF runs once
+// per march step per active peer (up to 7x), so recomputing it per-step
+// would be exactly the regression sg_character_center's own comment
+// already warns about, just multiplied by MAX_PEERS. garden-perf.mjs is
+// the budget that would catch it.
+float sg_peers_sdf(vec3 p, vec3 peerCenter[7], out float hue) {
+  hue = 0.0;
+  if (uPeerCount < 0.5) return 1.0e4; // uniform-valued branch: fully coherent, free (I3)
+  float best = 1.0e4;
+
+  // One guarded block per slot — unrolled because GLSL ES 3.00 has no
+  // uniform arrays here (§0.2: setUniforms() is scalar-float-only, so
+  // there's no `uniform float uPeer[7]` to loop over). Each call to
+  // sg_figure_sdf gets its own bounding-sphere early-out FOR FREE — it's
+  // the same early-out sg_character_sdf already goes through, now living
+  // inside sg_figure_sdf itself instead of duplicated per caller.
+  if (uPeer0Act > 0.5) { float d = sg_figure_sdf(p, peerCenter[0], uPeer0Yaw, uPeer0Gait, uPeer0Speed); if (d < best) { best = d; hue = uPeer0Hue; } }
+  if (uPeer1Act > 0.5) { float d = sg_figure_sdf(p, peerCenter[1], uPeer1Yaw, uPeer1Gait, uPeer1Speed); if (d < best) { best = d; hue = uPeer1Hue; } }
+  if (uPeer2Act > 0.5) { float d = sg_figure_sdf(p, peerCenter[2], uPeer2Yaw, uPeer2Gait, uPeer2Speed); if (d < best) { best = d; hue = uPeer2Hue; } }
+  if (uPeer3Act > 0.5) { float d = sg_figure_sdf(p, peerCenter[3], uPeer3Yaw, uPeer3Gait, uPeer3Speed); if (d < best) { best = d; hue = uPeer3Hue; } }
+  if (uPeer4Act > 0.5) { float d = sg_figure_sdf(p, peerCenter[4], uPeer4Yaw, uPeer4Gait, uPeer4Speed); if (d < best) { best = d; hue = uPeer4Hue; } }
+  if (uPeer5Act > 0.5) { float d = sg_figure_sdf(p, peerCenter[5], uPeer5Yaw, uPeer5Gait, uPeer5Speed); if (d < best) { best = d; hue = uPeer5Hue; } }
+  if (uPeer6Act > 0.5) { float d = sg_figure_sdf(p, peerCenter[6], uPeer6Yaw, uPeer6Gait, uPeer6Speed); if (d < best) { best = d; hue = uPeer6Hue; } }
+  return best;
+}
+
+// Distance-only wrapper (drops the hue out-param) so sg_scene_min and
+// sg_peers_normal — neither of which cares which peer they landed on, only
+// how far away it is — don't have to carry a throwaway `float hue` local.
+float sg_peers_dist(vec3 p, vec3 peerCenter[7]) {
+  float hue;
+  return sg_peers_sdf(p, peerCenter, hue);
+}
+
+vec3 sg_peers_normal(vec3 p, vec3 peerCenter[7]) {
+  const float e = 0.0025;
+  vec2 h = vec2(e, 0.0);
+  return normalize(vec3(
+    sg_peers_dist(p + h.xyy, peerCenter) - sg_peers_dist(p - h.xyy, peerCenter),
+    sg_peers_dist(p + h.yxy, peerCenter) - sg_peers_dist(p - h.yxy, peerCenter),
+    sg_peers_dist(p + h.yyx, peerCenter) - sg_peers_dist(p - h.yyx, peerCenter)
+  ));
+}
+
+// One player's world-space center, ground-following like sg_character_center
+// but without its bounce arc term — peers send a gait phase, not a raw
+// distance to replay JS-side bounce math against, so there's no local
+// arc data to add here; the figure still squash/stretches and swings in
+// place (sg_figure_sdf's `t = sg_bounce_phase(iTime)` is shared, synced
+// clock), it just doesn't hop vertically in world space. A future slice
+// could add an 8th flattened scalar per peer for the arc; not required by
+// this one.
+vec3 sg_peer_center(float x, float z) {
+  return vec3(x, sg_terrain_height(vec2(x, z)) + SG_LEG_LEN, z);
+}
+// @end
+
+// @component lectern "The Lectern" "A pedestal at a fixed diorama location (docs/multiplayer-spec.md §5.1) — the diegetic lock for who may edit the world. Neutral stone when nobody holds the write lease; glows with the holder's own hue while uLeaseHeld is set. Always present, even solo, same as the pond or the rock cluster — it's scenery first, mechanism second."
+const vec2  SG_LECTERN_XZ     = vec2(1.6, -1.4);
+const float SG_LECTERN_RADIUS = 0.35;
+const float SG_LECTERN_HEIGHT = 0.6;
+const float SG_LECTERN_BOUND_R = 0.75;
+const float SG_LECTERN_BOUND_MARGIN = 0.08;
+
+uniform float uLeaseHeld; // 0/1 — someone currently holds the write lease
+uniform float uLeaseHue;  // 0..1 — that holder's hue (meaningless while uLeaseHeld == 0)
+
+// A stood-up capsule reads as a stubby pedestal at this scale — reusing
+// sg_capsule (character component, above) rather than writing a bespoke
+// cylinder SDF for one static prop. Same bounding-sphere early-out shape as
+// rocks/character: base is precomputed once per pixel by mainImage (see
+// sg_lectern_base below), never re-sampled from terrain height inside the
+// march's per-step loop.
+float sg_lectern_sdf(vec3 p, vec3 base) {
+  vec3 mid = base + vec3(0.0, SG_LECTERN_HEIGHT * 0.5, 0.0);
+  float toC = length(p - mid);
+  if (toC > SG_LECTERN_BOUND_R + SG_LECTERN_BOUND_MARGIN) return toC - SG_LECTERN_BOUND_R;
+  return sg_capsule(p, base, base + vec3(0.0, SG_LECTERN_HEIGHT, 0.0), SG_LECTERN_RADIUS);
+}
+
+vec3 sg_lectern_normal(vec3 p, vec3 base) {
+  const float e = 0.0025;
+  vec2 h = vec2(e, 0.0);
+  return normalize(vec3(
+    sg_lectern_sdf(p + h.xyy, base) - sg_lectern_sdf(p - h.xyy, base),
+    sg_lectern_sdf(p + h.yxy, base) - sg_lectern_sdf(p - h.yxy, base),
+    sg_lectern_sdf(p + h.yyx, base) - sg_lectern_sdf(p - h.yyx, base)
+  ));
+}
+
+// Fixed world position, same pattern as sg_rocks_center(): one terrain-
+// height sample per pixel, not per march step.
+vec3 sg_lectern_base() {
+  return vec3(SG_LECTERN_XZ.x, sg_terrain_height(SG_LECTERN_XZ), SG_LECTERN_XZ.y);
+}
+// @end
+
+// @component sponge "The Sponge" "A 4-iteration Menger sponge — the thing worth hiding in, and the origin of this whole idea (docs/multiplayer-spec.md §7.1). Box-fold IFS, not a mesh: each iteration folds space into eighths and carves the cross-shaped middle third, the standard recursive construction unrolled to a fixed loop since neither shader language has recursion. Gated on uSpongeOn so solo pays nothing beyond one comparison (I3), same trick peers uses above."
+const vec3  SG_SPONGE_CENTER = vec3(0.0, 1.9, 0.0);
+const float SG_SPONGE_HALF   = 2.2;
+
+uniform float uSpongeOn; // 0/1 — off in solo (I3); on for the room's hide-and-seek phase
+
+float sg_box(vec3 p, vec3 b) {
+  vec3 d = abs(p) - b;
+  return length(max(d, 0.0)) + min(max(d.x, max(d.y, d.z)), 0.0);
+}
+
+float sg_sponge_sdf(vec3 p) {
+  if (uSpongeOn < 0.5) return 1.0e4; // uniform-valued branch: fully coherent, free (I3)
+
+  vec3 lp = p - SG_SPONGE_CENTER;
+
+  // Cheap spherical bound before paying for the 4-iteration fold below —
+  // same purpose as every other component's bounding-sphere early-out,
+  // just looser (the sponge is a full box, not a point cluster).
+  float toC = length(lp);
+  if (toC > SG_SPONGE_HALF * 1.8) return toC - SG_SPONGE_HALF * 1.6;
+
+  // Normalize into a unit-box IFS space so the fold math below is the
+  // textbook unit-cube Menger sponge, then rescale the resulting distance
+  // back to world units (valid because an SDF scales linearly under
+  // uniform scaling: sdf(p/s)*s == distance in the original space).
+  vec3 up = lp / SG_SPONGE_HALF;
+  float d = sg_box(up, vec3(1.0));
+  float s = 1.0;
+  for (int i = 0; i < 4; i++) {
+    vec3 a = mod(up * s, 2.0) - 1.0;
+    s *= 3.0;
+    vec3 r = abs(1.0 - 3.0 * abs(a));
+    float da = max(r.x, r.y);
+    float db = max(r.y, r.z);
+    float dc = max(r.z, r.x);
+    float c = (min(da, min(db, dc)) - 1.0) / s;
+    d = max(d, c);
+  }
+  return d * SG_SPONGE_HALF;
+}
+
+vec3 sg_sponge_normal(vec3 p) {
+  const float e = 0.0025;
+  vec2 h = vec2(e, 0.0);
+  return normalize(vec3(
+    sg_sponge_sdf(p + h.xyy) - sg_sponge_sdf(p - h.xyy),
+    sg_sponge_sdf(p + h.yxy) - sg_sponge_sdf(p - h.yxy),
+    sg_sponge_sdf(p + h.yyx) - sg_sponge_sdf(p - h.yyx)
+  ));
+}
+// @end
+
 // ---- scene wiring below: not itself a component, just the raymarch that
 // composes the components above and the probe-encode branch in mainImage. ----
 
@@ -464,7 +656,24 @@ const float SG_FOG_DIST = 6.0; // aerial-perspective falloff scale, tuned to the
 
 struct SGHit { float t; float id; };
 
-SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCenter) {
+// MP-5 (docs/multiplayer-spec.md §7.3): minimum distance across every
+// raymarch candidate, ignoring which one is closest — the ray-origin escape
+// below only needs "is this point inside solid", not a hit id, so it calls
+// this instead of duplicating the candidate list sg_march's own per-step
+// loop tracks (which DOES need hitKind, right next to the code that reads
+// it — see below).
+float sg_scene_min(vec3 p, vec3 charCenter, float pondWaterY, vec3 rockCenter, vec3 peerCenter[7], vec3 lecternBase) {
+  float d = p.y - sg_terrain_height(p.xz);
+  d = min(d, sg_character_sdf(p, charCenter));
+  d = min(d, sg_pond_sdf(p, pondWaterY));
+  d = min(d, sg_rocks_sdf(p, rockCenter));
+  d = min(d, sg_peers_dist(p, peerCenter));
+  d = min(d, sg_lectern_sdf(p, lecternBase));
+  d = min(d, sg_sponge_sdf(p));
+  return d;
+}
+
+SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCenter, vec3 peerCenter[7], vec3 lecternBase) {
   // PERF-2: fixed 88-step loop bound unchanged (High == pre-SG_QUALITY
   // behavior); Low/Medium exit after fewer steps, same fallback path a ray
   // that legitimately exhausts 88 steps already takes below.
@@ -484,6 +693,24 @@ SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCen
   // that is actually reachable — clamp your biome function, not this ceil.
   float terrainCeil = SG_TERRAIN_HEIGHT_RNG * max(TERRAIN_SCALE, 0.05) + 0.02;
   float t = 0.05;
+
+  // MP-5 §7.3: there is no collision (docs/multiplayer-spec.md §7.2 — a
+  // hand-mirrored JS collision check would drift the same way index.js's
+  // own comments already reject for SG_POND_XZ/SG_ROCK_XZ, and GPU readback
+  // per frame isn't viable). So `ro` can land inside solid (most likely the
+  // sponge, but this is written against sg_scene_min, not "is it the
+  // sponge specifically"). An SDF march started inside solid never
+  // converges — d stays negative-ish/near-zero forever and the loop below
+  // either exhausts its step budget on garbage or free-falls through the
+  // hit threshold on the wrong side. Bounded (8 iterations), cheap, and a
+  // no-op whenever `ro` starts in open air (the very first sg_scene_min
+  // call already clears 0.01).
+  for (int i = 0; i < 8; i++) {
+    float dEsc = sg_scene_min(ro + rd * t, charCenter, pondWaterY, rockCenter, peerCenter, lecternBase);
+    if (dEsc > 0.01) break;
+    t += 0.06;
+  }
+
   float hitKind = COMP_TERRAIN; // which candidate was closest last — decides the fallback below
   for (int i = 0; i < 88; i++) {
     if (i >= maxSteps) break;
@@ -492,12 +719,19 @@ SGHit sg_march(vec3 ro, vec3 rd, vec3 charCenter, float pondWaterY, vec3 rockCen
     float dChar = sg_character_sdf(p, charCenter);
     float dPond = sg_pond_sdf(p, pondWaterY);
     float dRock = sg_rocks_sdf(p, rockCenter);
+    float peerHue;
+    float dPeers = sg_peers_sdf(p, peerCenter, peerHue);
+    float dLectern = sg_lectern_sdf(p, lecternBase);
+    float dSponge = sg_sponge_sdf(p);
 
     float d = dTerrain;
     hitKind = COMP_TERRAIN;
     if (dChar < d) { d = dChar; hitKind = COMP_CHARACTER; }
     if (dPond < d) { d = dPond; hitKind = COMP_POND; }
     if (dRock < d) { d = dRock; hitKind = COMP_ROCKS; }
+    if (dPeers < d) { d = dPeers; hitKind = COMP_PEERS; }
+    if (dLectern < d) { d = dLectern; hitKind = COMP_LECTERN; }
+    if (dSponge < d) { d = dSponge; hitKind = COMP_SPONGE; }
 
     // Adaptive threshold (looser far away) — standard sphere-tracing
     // tolerance, needed here because dTerrain is a vertical-distance
@@ -571,6 +805,17 @@ SGCam sg_cam_overview(vec3 charCenter) {
   return SGCam(target, ro);
 }
 
+// MP-2/3 (docs/multiplayer-spec.md §4.1/§5.1): every peer and the lectern's
+// glow are identified by a bare 0..1 hue scalar over the wire (§0.2 —
+// flattened, scalar-only), so shading needs its own hue->rgb, not a texture
+// lookup. Pure-hue HSV->RGB at S=1,V=1 — the classic six-piecewise-linear
+// formula, not a color-managed conversion; callers lighten/mix it further
+// (see COMP_PEERS/COMP_LECTERN below) rather than shading a fully saturated
+// color directly.
+vec3 sg_hue_rgb(float hue) {
+  return clamp(abs(mod(hue * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+}
+
 vec3 sg_light(vec3 pos, vec3 rd, vec3 N, vec3 matCol, float t) {
   vec3 sun_dir = normalize(vec3(0.55, 0.42, 0.35));
   vec3 sky_col = vec3(0.45, 0.62, 0.90);
@@ -607,6 +852,25 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec3 charCenter = sg_character_center(iTime);
   float pondWaterY = sg_pond_water_y(SG_POND_XZ);
   vec3 rockCenter = sg_rocks_center();
+  vec3 lecternBase = sg_lectern_base();
+
+  // MP-2 §4.2: precomputed once per pixel, exactly like charCenter/
+  // rockCenter above — see sg_peers_sdf's own comment for why this must
+  // never move into the march's per-step loop. uPeerCount gates the whole
+  // block behind one comparison so solo pays the same single branch
+  // sg_peers_sdf itself pays (I3).
+  vec3 peerCenter[7];
+  peerCenter[0] = vec3(0.0); peerCenter[1] = vec3(0.0); peerCenter[2] = vec3(0.0); peerCenter[3] = vec3(0.0);
+  peerCenter[4] = vec3(0.0); peerCenter[5] = vec3(0.0); peerCenter[6] = vec3(0.0);
+  if (uPeerCount > 0.5) {
+    if (uPeer0Act > 0.5) peerCenter[0] = sg_peer_center(uPeer0X, uPeer0Z);
+    if (uPeer1Act > 0.5) peerCenter[1] = sg_peer_center(uPeer1X, uPeer1Z);
+    if (uPeer2Act > 0.5) peerCenter[2] = sg_peer_center(uPeer2X, uPeer2Z);
+    if (uPeer3Act > 0.5) peerCenter[3] = sg_peer_center(uPeer3X, uPeer3Z);
+    if (uPeer4Act > 0.5) peerCenter[4] = sg_peer_center(uPeer4X, uPeer4Z);
+    if (uPeer5Act > 0.5) peerCenter[5] = sg_peer_center(uPeer5X, uPeer5Z);
+    if (uPeer6Act > 0.5) peerCenter[6] = sg_peer_center(uPeer6X, uPeer6Z);
+  }
 
   // Wave-4 §B: uCamMode picks the active camera; uCamBlend cross-fades FROM
   // whatever uPrevCamMode's camera would be AT THIS INSTANT to the new mode
@@ -645,7 +909,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec3 up = cross(right, fwd);
   vec3 rd = normalize(fwd + uv.x * right * 1.35 + uv.y * up * 1.35);
 
-  SGHit hit = sg_march(ro, rd, charCenter, pondWaterY, rockCenter);
+  SGHit hit = sg_march(ro, rd, charCenter, pondWaterY, rockCenter, peerCenter, lecternBase);
   vec3 col;
   float compId;
 
@@ -678,9 +942,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     } else if (hit.id == COMP_POND) {
       N = sg_pond_normal(pos.xz);
       matCol = vec3(0.0); // unused below — the pond skips the terrestrial lighting model entirely
-    } else { // COMP_ROCKS
+    } else if (hit.id == COMP_ROCKS) {
       N = sg_rocks_normal(pos, rockCenter);
       matCol = mix(vec3(0.40, 0.39, 0.37), vec3(0.62, 0.58, 0.52), clamp(ROCK_ROUNDNESS, 0.0, 1.0));
+    } else if (hit.id == COMP_PEERS) {
+      N = sg_peers_normal(pos, peerCenter);
+      float peerHue;
+      sg_peers_sdf(pos, peerCenter, peerHue); // re-derive at the exact hit point — sg_march only kept a distance/id, not the hue
+      matCol = sg_hue_rgb(peerHue) * 0.7 + vec3(0.18); // lightened tint, same "reads as one object" intent as the local character's warm clay
+    } else if (hit.id == COMP_LECTERN) {
+      N = sg_lectern_normal(pos, lecternBase);
+      vec3 stone = vec3(0.50, 0.49, 0.47);
+      matCol = mix(stone, sg_hue_rgb(uLeaseHue), clamp(uLeaseHeld, 0.0, 1.0) * 0.85);
+    } else { // COMP_SPONGE
+      N = sg_sponge_normal(pos);
+      matCol = mix(vec3(0.30, 0.32, 0.28), vec3(0.55, 0.58, 0.52), clamp(N.y * 0.5 + 0.5, 0.0, 1.0));
     }
 
     // Water is a planar reflection, not a diffuse-lit surface — running it
@@ -688,6 +964,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // samples directly.
     col = (hit.id == COMP_POND) ? sg_pond_color(rd, N) : sg_light(pos, rd, N, matCol, hit.t);
     compId = hit.id;
+
+    // MP-3 §5.1: the lectern glows with the holder's hue rather than just
+    // tinting flat-lit stone — sg_light's ambient+diffuse alone reads as
+    // "grey rock painted a color", not "lit from within". Small, additive,
+    // gated the same as the material mix above.
+    if (hit.id == COMP_LECTERN && uLeaseHeld > 0.5) {
+      col += sg_hue_rgb(uLeaseHue) * 0.22;
+    }
 
     if (hit.id == COMP_TERRAIN) {
       if (grassMask > 0.4) compId = COMP_GRASS;

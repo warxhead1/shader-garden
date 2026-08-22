@@ -270,9 +270,10 @@ export function reduce(room, { from, msg, nowMs }) {
     // Not in spec §2.3's message table, which enumerates every OTHER client
     // message exhaustively but never says how `lobby -> hiding` is actually
     // triggered despite §7.4 requiring ">=2 members, anyone presses Start".
-    // Filling that gap with the obvious message shape rather than leaving
-    // the phase machine unreachable from lobby. Flagged in the lane report.
-    case 'start': {
+    // Filling that gap; type string `game.start` agreed with lane L2
+    // (net.js's startGame()) so the reducer and the client stay in sync
+    // without either side having to guess. Flagged in the lane report.
+    case 'game.start': {
       if (room.game.phase !== 'lobby' || room.members.size < 2) return { room, sends: [] };
       room.game.phase = 'hiding';
       room.game.seekerId = pickSeeker(room);

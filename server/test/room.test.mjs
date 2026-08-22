@@ -227,11 +227,11 @@ test('tick flushes batched poses at POSE_HZ, self excluded', () => {
 test('start requires >=2 members and only fires from lobby', () => {
   let room = createRoom('r1', 0);
   room = join(room, 'a', 'A', 0).room;
-  let r = reduce(room, { from: 'a', msg: { t: 'start' }, nowMs: 0 });
+  let r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
   assert.equal(r.room.game.phase, 'lobby'); // only 1 member
 
   room = join(r.room, 'b', 'B', 0).room;
-  r = reduce(room, { from: 'a', msg: { t: 'start' }, nowMs: 0 });
+  r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
   assert.equal(r.room.game.phase, 'hiding');
   assert.ok(['a', 'b'].includes(r.room.game.seekerId));
   assert.equal(r.room.game.endsAt, 30000);
@@ -242,7 +242,7 @@ test('game phase advances hiding -> seeking -> over -> lobby via tick, seeker ro
   room = join(room, 'a', 'A', 0).room;
   room = join(room, 'b', 'B', 0).room;
   room = join(room, 'c', 'C', 0).room;
-  let r = reduce(room, { from: 'a', msg: { t: 'start' }, nowMs: 0 });
+  let r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
   room = r.room;
   const firstSeeker = room.game.seekerId;
   assert.equal(firstSeeker, 'a'); // first game: join-order[0]
@@ -262,7 +262,7 @@ test('game phase advances hiding -> seeking -> over -> lobby via tick, seeker ro
   assert.equal(room.game.found.size, 0);
 
   // Next game skips the previous seeker ('a' -> 'b').
-  r = reduce(room, { from: 'a', msg: { t: 'start' }, nowMs: 0 });
+  r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
   assert.equal(r.room.game.seekerId, 'b');
 });
 
@@ -270,7 +270,7 @@ test('tag: seeker only, phase seeking only, distance < 0.9', () => {
   let room = createRoom('r1', 0);
   room = join(room, 'a', 'A', 0).room;
   room = join(room, 'b', 'B', 0).room;
-  room = reduce(room, { from: 'a', msg: { t: 'start' }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 }).room;
   assert.equal(room.game.seekerId, 'a');
   room = tick(room, 30000).room; // -> seeking
 
@@ -310,7 +310,7 @@ test('removeMember ends the round early if the seeker disconnects', () => {
   let room = createRoom('r1', 0);
   room = join(room, 'a', 'A', 0).room;
   room = join(room, 'b', 'B', 0).room;
-  room = reduce(room, { from: 'a', msg: { t: 'start' }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 }).room;
   assert.equal(room.game.seekerId, 'a');
 
   const r = removeMember(room, 'a', 5);

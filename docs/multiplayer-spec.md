@@ -58,7 +58,10 @@ it keeps the repo's "no build step, no npm" property intact).
 
 ```
 acceptKey(secWebSocketKey) -> string          // SHA-1 + magic GUID, base64
-decodeFrames(buf) -> { messages: string[], control: [...], rest: Buffer, fatal?: {code, reason} }
+decodeFrames(buf, frag = null) -> { messages, control, rest, frag, fatal?: {code, reason} }
+                             // `frag` carries in-progress fragment reassembly ACROSS calls; the
+                             // caller threads it back in. The original stateless signature could
+                             // not satisfy this section's own cross-call fragmentation requirement.
 encodeText(str) -> Buffer                      // server frames are UNMASKED
 encodeClose(code, reason) -> Buffer
 encodePing() / encodePong(payload) -> Buffer
@@ -86,6 +89,11 @@ Requirements, each a test case:
 createRoom(id, nowMs) -> Room
 reduce(room, { from, msg, nowMs }) -> { room, sends: [{to: id|'*'|'*-except-from', msg}], close?: {to, code, reason} }
 tick(room, nowMs) -> { room, sends: [...] }    // lease expiry, pose flush, game phase advance
+removeMember(room, id, nowMs) -> { room, sends: [...] }
+// removeMember exists because a TCP close carries no protocol message of its
+// own — the socket layer needs a pure entry point to say someone went away. It
+// also ends a round early if the SEEKER left, rather than stranding the room in
+// `seeking` with nobody able to tag.
 ```
 
 `Room`:
@@ -110,12 +118,13 @@ One JSON object per WebSocket text message. `{ t: "<type>", ... }`.
 | `hello` | `protocol`, `room`, `name` | MUST be first. Wrong `protocol` -> close 1002. Room full (`MAX_MEMBERS=8`) -> `error{code:'room_full'}` then close 1013. |
 | `pose` | `x,z,yaw,speed01,gait` | Non-finite or out-of-range -> ignored. Token bucket: `POSE_BUDGET=40` refilled 30/s; overflow -> silently dropped (never a disconnect — a laggy client is not an attacker). |
 | `ring` | `inRing` | asserts the sender is inside the lectern radius. |
-| `lease.request` | — | granted only if `lease.holder == null || expired`, **and** `member.inRing`. Otherwise `lease{...}` unchanged (a denial is just the current truth, not an error). |
+| `lease.request` | — | granted only if `lease.holder == null || expired`, **and** `member.inRing`. Otherwise `lease{...}` unchanged (a denial is just the current truth, not an error). A **denial** goes to the requester only; a **grant / expiry / release** broadcasts to `*`, because that is state everyone needs. `lease.keepalive` broadcasts nothing — re-arming every ~10s is not news. |
 | `lease.keepalive` | — | holder only; re-arms `expiresAt = now + LEASE_TTL_MS`. |
 | `lease.release` | — | holder only. |
 | `draft` | `componentId`, `body` | holder only; relayed to `*-except-from`; **never stored**. `body` capped at `MAX_BODY_BYTES=65536`. |
 | `commit` | `componentId`, `body`, `baseEpoch` | holder only. `baseEpoch !== room.epoch` -> `reject{reason:'stale_epoch', epoch}`. On accept: `edits.set(componentId, body)` (or delete if body equals pristine marker `null`), `epoch++`, broadcast `commit` to `*`. |
 | `tag` | `targetId` | seeker only, phase `seeking`. Server validates **distance only** (see §6.4). |
+| `start` | — | lobby only, >= 2 members. §7.4 requires "anyone presses Start" but the original table had no message for it, leaving `hiding` unreachable. |
 | `ping` | `id`, `clientSendMs` | -> `time`. |
 
 **Server -> client**
@@ -499,7 +508,7 @@ is reserved for the two suites that need a real GPU):
 
 | Suite | Proves |
 |---|---|
-| `mp-protocol.mjs` | `server/room.mjs` reducer + `server/ws.mjs` codec, no sockets, no browser. Lease grant/deny-out-of-ring/expiry/holder-leaves; stale-epoch reject; join snapshot completeness; pose token bucket; every framing case in §2.1. |
+| `mp-protocol.mjs` | **Invoke as `node --test server/test/*.test.mjs` (glob), never `node --test server/test/` (bare directory).** On Node 26.7.0 the bare-directory form `require()`s the path instead of discovering tests — reproduced outside this repo, so it is a runtime behaviour change, not a repo issue. `server/room.mjs` reducer + `server/ws.mjs` codec, no sockets, no browser. Lease grant/deny-out-of-ring/expiry/holder-leaves; stale-epoch reject; join snapshot completeness; pose token bucket; every framing case in §2.1. |
 | `mp-relay.mjs` | Real relay process, two clients using Node's **built-in global `WebSocket`** (no new dependency). Join, pose relay, lease handoff, commit broadcast, oversize rejection, heartbeat close. |
 | `mp-clock.mjs` | Two pages in one room converge to within 50 ms of each other's `iTime`, and re-converge after a forced `rh.rebuild()`. |
 | `mp-two-browsers.mjs` | Two puppeteer pages, one room: B's peer uniforms track A's movement; A's commit changes B's rendered scene; B's lease request is denied while A holds it; B's editor is read-only and mirrors A's draft. |

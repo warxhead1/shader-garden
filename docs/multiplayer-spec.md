@@ -41,29 +41,50 @@ were wrong and would have poisoned a lane. Each was verified by hand before
 being accepted. **Where this section conflicts with a later section, this
 section wins.**
 
-### C1 — the flattened peer uniforms DO NOT fit on WebGPU. Multiplayer is WebGL2-pinned.
+### C1 — SUPERSEDED. Multiplayer runs on WebGPU. The bank was raised, not worked around.
 
-§0.2 said the flattened scalar scheme works through both backends. It does not.
-`wrap.js` defines `WGSL_CUSTOM_UNIFORM_SLOTS = 32` — a fixed 8×`vec4f` bank,
-because WGSL has no name-addressed uniform binding model — and names past slot
-32 are silently truncated. `scene.wgsl`'s `@sg-uniforms` directive already
-spends **21** of those. 50 peer scalars plus the MP toggles need ~54 more.
+**This ruling originally said the opposite**, and the original text is worth
+keeping in outline because the reasoning failed in an instructive way.
 
-The resolution is already in the codebase: **live component editing is
-GLSL-only and already rebuilds a WebGPU mount onto WebGL2** (`index.js`'s
-`openProbe`/`onEditHere`, and `edit.js`'s own header). Multiplayer's core loop
-*is* live editing, so an MP mount pins to WebGL2 on entry, exactly like the
-existing editing seam. On WebGL2 uniforms are name-addressed with no bank at
-all, so the flattened scheme is fine on the only path MP ever runs on.
+It observed, correctly, that `wrap.js` defined `WGSL_CUSTOM_UNIFORM_SLOTS =
+32` — a fixed 8×`vec4f` bank, because WGSL has no name-addressed uniform
+binding model — that `scene.wgsl` already spent 21 of those, that 50 peer
+scalars could not fit, and that names past slot 32 were **silently
+truncated** (so the failure would not even be loud). From that it concluded
+multiplayer should pin to WebGL2, reusing the existing live-editing seam
+which already rebuilds a WebGPU mount onto WebGL2.
 
-Therefore:
-- `scene.wgsl` carries the three new components' **annotations** (so
-  `parse.js`, the tray, and probe stay paired) but their bodies are stubs that
-  return the miss sentinel unconditionally, with a comment saying why.
-- The `@sg-uniforms` directive **does not** gain any peer/lease/sponge name.
-  Adding one silently truncates another and breaks a live uniform.
-- `prepareShader()` on WebGPU (§6.1) stays worth having, but it is **not** on
-  the MP critical path. Do not block on it.
+Every fact in that chain was true. The conclusion was still wrong, because it
+treated `32` as a constraint to design around rather than a number to change.
+It was not a hardware limit, a driver limit, or a measured cost — it was one
+arbitrary doubling (16 → 32 in wave 4) that had hardened into an assumption.
+Designing the *primary* backend's capability around the *fallback*'s
+accidental cap is backwards; WebGPU is the standard the garden is aimed at.
+
+**The actual resolution:**
+
+- `WGSL_CUSTOM_UNIFORM_SLOTS` is now **128** (32×`vec4f`). That is 512 bytes
+  of uniform buffer against WebGPU's 64 KiB *minimum guaranteed* binding
+  size — about 0.8% of the floor. Unused slots emit no accessor and are
+  never read, so the raise costs nothing.
+- The `vec4f` count in `WGSL_PRELUDE` is now **derived** from that constant
+  instead of being a second hardcoded literal. Previously the struct said
+  `array<vec4f, 8>` while `webgpu.js` computed its buffer size from the
+  constant, so raising one without the other would have desynced the struct
+  from the buffer filling it — a silent miscompile.
+- `wgCustomUniformNames()` now **throws** on overflow instead of slicing.
+  Silent truncation was the worst available behaviour: an over-bank name did
+  not go missing, it never bound, so the shader read a stale slot and
+  rendered plausibly wrong with no error anywhere.
+- `scene.wgsl` carries the peer scalars and the real `sg_peers_sdf` body, not
+  stubs. 75 names declared against 128 available.
+
+**Consequences for the rest of this document:** every "MP pins to WebGL2"
+statement below is superseded. MP runs on whichever backend the mount
+selected. The WebGL2 path remains fully supported as the fallback — it is not
+deprecated and its uniform handling is unchanged — but it is no longer the
+only path multiplayer can run on, and no suite should pin to it *on account
+of peers*. `prepareShader()` on WebGPU (§6.1) is back on the critical path.
 
 ### C2 — invariant I1 was impossible as written. Here is the real gate.
 

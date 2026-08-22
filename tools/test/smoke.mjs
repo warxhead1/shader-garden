@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, sleep, gotoSafe, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, SITE_ROOT, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 
 const routes = process.argv.slice(2);
 const DEFAULT_ROUTES = ['#/', '#/s/biome-rolling-hills', '#/edit', '#/edit?k=biome-rolling-hills', '#/garden'];
@@ -29,6 +29,16 @@ const DEFAULT_ROUTES = ['#/', '#/s/biome-rolling-hills', '#/edit', '#/edit?k=bio
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
 let failed = false;
+
+// Prove the browser this whole battery runs in actually got the real GPU —
+// a green smoke suite must not be able to mean "we quietly ran on
+// SwiftShader" (migration brief). One check, on a throwaway page, up front.
+{
+  const gpuPage = await browser.newPage();
+  await gotoSafe(gpuPage, BASE + '/index.html#/', { waitUntil: 'networkidle2', timeout: 20000 });
+  await assertRealGpu(gpuPage);
+  await gpuPage.close();
+}
 
 function check(name, cond, detail) {
   const ok = !!cond;
@@ -74,10 +84,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 `;
 
 async function shareLinkFor(page, source, lang) {
-  return page.evaluate(async (src, l) => {
+  return page.evaluate(async ({ src, l }) => {
     const { compress, absoluteShareUrl } = await import('./js/share.js');
     return absoluteShareUrl(await compress(src), l);
-  }, source, lang);
+  }, { src: source, l: lang });
 }
 
 async function waitForEditor(page) {
@@ -331,10 +341,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   await page.close();
 }
 
-// (h) viewer WebGPU->WebGL2 ladder: headless has no navigator.gpu, so a
-// kernel WITH a WGSL port must still land on WebGL2 — and say so honestly.
+// (h) viewer WebGPU->WebGL2 ladder: this check is about the FALLBACK PATH
+// itself (core/runtime-host.js's tryWebgpu -> tryWebgl2 ladder), not about
+// rendering fidelity — so per the migration brief's decision rule it stays
+// pinned to WebGL2. Under puppeteer headless-shell, navigator.gpu simply
+// didn't exist and the ladder fell through for free; under real-GPU
+// Playwright it does exist, so the same "no WebGPU available" precondition
+// is reproduced deliberately by stubbing navigator.gpu away on this page
+// only (GPURuntime.create() in runtime/webgpu.js already treats a missing
+// navigator.gpu as "no adapter" and returns null, same as it always has).
 {
   const page = await browser.newPage();
+  // Pinned WebGL2, so prove it's the real renderer, not a silent SwiftShader
+  // downgrade (assertRealGpu only inspects the WebGPU adapter — no
+  // protection for a suite that never touches it).
+  await assertRealWebgl2(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'gpu', { get: () => undefined, configurable: true });
+  });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, BASE + '/index.html#/s/biome-rolling-hills', { waitUntil: 'networkidle2', timeout: 20000 })
@@ -459,8 +483,19 @@ async function clickTransportButton(page, label) {
   check('(l) #/garden renders with >0 canvases and no console errors', canvases > 0 && errors.length === 0,
     'canvases=' + canvases + (errors.length ? ' errs=' + errors.join(' | ') : ''));
 
+  // This was written back when the garden scene shipped GLSL only, so
+  // prefer:'auto' always fell straight through to WebGL2 (see the stale
+  // comment near this organ's runtimeHost() call). The scene now also ships
+  // a scene.wgsl, so on a real GPU prefer:'auto' legitimately mounts WebGPU
+  // — garden only forces a rebuild to WebGL2 when live-editing starts (see
+  // organs/garden/index.js's `if (rh.backend === 'webgpu') await
+  // rh.rebuild({ prefer: 'webgl2' })`). The invariant this check actually
+  // guards — the badge honestly names whichever real backend rendered — is
+  // preserved by accepting either; hard-pinning to WebGL2 here would just
+  // reassert a premise the product no longer holds.
   const backendBadge = await page.$eval('.badge-backend', (el) => el.textContent.trim()).catch(() => null);
-  check('(w) #/garden shows the WebGL2 backend badge', backendBadge === 'WebGL2', 'badge=' + backendBadge);
+  check('(w) #/garden shows an honest backend badge (WebGL2 or WebGPU)',
+    backendBadge === 'WebGL2' || backendBadge === 'WebGPU', 'badge=' + backendBadge);
 
   async function probe(x, y) {
     await page.mouse.click(x, y);

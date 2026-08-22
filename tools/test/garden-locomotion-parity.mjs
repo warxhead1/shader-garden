@@ -30,13 +30,15 @@
 //       actual worst case seen, not a guessed-generous number) so a REAL
 //       regression (wrong math, not sub-ULP noise) still fails loudly.
 //   (2) GLSL/WGSL pixel parity at fixed (uCharPosX, uCharPosZ, uCharYaw,
-//       uCharGaitDist, uCharSpeed01) tuples, mid-stride (speed01 > 0) —
-//       WebGPU isn't available in this headless harness (no navigator.gpu;
-//       confirmed empirically, same limitation garden.mjs's own comment on
-//       rh.backend notes for its editor-seam test), so this checks GLSL
-//       against itself at a walking pose as a smoke proof the new uniforms
-//       don't NaN/branch-explode, and documents the real gap: WGSL's actual
-//       GPU compile is unverified in CI. garden-wgsl-parity.mjs already
+//       uCharGaitDist, uCharSpeed01) tuples, mid-stride (speed01 > 0) — the
+//       real-GPU harness DOES expose navigator.gpu now (see the migration
+//       note below this header), but this file never touches it: every
+//       render here goes through GL2Runtime on a scratch canvas by design
+//       (it's a WebGL2-semantics suite, see the decision-rule note below).
+//       This checks GLSL against itself at a walking pose as a smoke proof
+//       the new uniforms don't NaN/branch-explode, and documents the real
+//       remaining gap: WGSL's actual GPU
+//       compile is unverified in CI. garden-wgsl-parity.mjs already
 //       covers the structural (@component/@tune/@sg-uniforms) side.
 //
 // Usage: node tools/test/garden-locomotion-parity.mjs   (npm ci in tools/test first)
@@ -44,7 +46,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { launch, serveSite, gotoSafe } from './browser.mjs';
+import { launch, serveSite, gotoSafe, assertRealWebgl2 } from './browser.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 // The wave-3 merge this wave branched from (see W4_BLUEPRINT.md's own
@@ -64,18 +66,35 @@ function check(name, cond, detail) {
 const oldGlsl = execFileSync('git', ['show', `${BASELINE_SHA}:site/assets/garden/scene.glsl`], { cwd: ROOT, encoding: 'utf8' });
 const newGlsl = readFileSync(join(ROOT, 'site/assets/garden/scene.glsl'), 'utf8');
 
+// Real-GPU migration (see browser.mjs's header): every render in this file
+// goes through its OWN scratch canvas + GL2Runtime, calling
+// canvas.getContext('webgl2') directly and reading back with gl.readPixels
+// — the brief's "suite is about WebGL2 semantics" case, pinned accordingly.
+// Stays on the shared real-GPU launch() (browser.mjs no longer sets
+// --use-angle, which used to make WebGL2 context creation fail entirely —
+// see browser.mjs's own header). WebGL2 here resolves to the integrated AMD
+// Raphael (not the RTX 3070 Ti WebGPU uses) — assertRealWebgl2() below
+// guards against silently landing on SwiftShader instead.
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
 const page = await browser.newPage();
 await gotoSafe(page, BASE + '/index.html', { waitUntil: 'networkidle2', timeout: 20000 });
+await assertRealWebgl2(page);
 
 // Renders `src` on its own scratch canvas (own GL2Runtime instance, own
 // document.body-attached canvas so ResizeObserver/clientWidth sizing works
 // — same reasoning as garden-perf.mjs's sampleFrames), applies `uniforms`,
 // then forced-sync-renders at each iTime in `times` and reads back the
 // WHOLE framebuffer.
+// Playwright's page.evaluate(fn, arg) takes exactly ONE data argument —
+// unlike puppeteer's variadic evaluate(fn, ...args). Extra positionals are
+// silently read as an `options` object and dropped (MEASURED: no throw —
+// `uniforms`/`times` inside the page function came back `undefined`, so
+// setUniforms(undefined) was a silent no-op and every render came back
+// byte-identical regardless of the uniforms actually under test). Bundled
+// into one object instead.
 async function renderSamples(src, uniforms, times) {
-  return page.evaluate(async (src, uniforms, times) => {
+  return page.evaluate(async ({ src, uniforms, times }) => {
     const { GL2Runtime } = await import('./js/runtime/webgl2.js');
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';
@@ -98,7 +117,7 @@ async function renderSamples(src, uniforms, times) {
     rt.dispose();
     canvas.remove();
     return { w, h, frames };
-  }, src, uniforms, times);
+  }, { src, uniforms, times });
 }
 
 const IDLE_UNIFORMS = {
@@ -157,13 +176,13 @@ const TIME_SAMPLES = [0.31, 1.72, 5.29]; // arbitrary, fixed — not on a bounce
       check(`(2) iTime=${TIME_SAMPLES[i]}: frame isn't entirely black (scene actually drew something)`, nonBlack);
     }
   }
-  // NOTE (honest gap): this harness has no navigator.gpu (confirmed empirically —
-  // headless Chrome here never exposes WebGPU, same constraint garden.mjs's
-  // own rh.backend comment documents for the editor-seam test), so the WGSL
-  // side of this wave's camera/locomotion math is reviewed by hand and
-  // mirrored line-for-line against scene.glsl, but its actual GPU compile
-  // is NOT exercised by any automated test in this repo today.
-  console.log('NOTE: WGSL compile is not exercised in this headless harness (no navigator.gpu) — see comment above.');
+  // NOTE (honest gap): this file's real-GPU browser DOES expose
+  // navigator.gpu (see header), but its whole point is raw WebGL2
+  // GL2Runtime pixel comparison on a scratch canvas — nothing here ever
+  // imports webgpu.js or exercises WGSL's actual GPU compile. The WGSL side
+  // of this wave's camera/locomotion math is reviewed by hand and mirrored
+  // line-for-line against scene.glsl instead.
+  console.log('NOTE: WGSL compile is not exercised by this suite (WebGL2-only by design, see comment above) — navigator.gpu is available in this harness but unused here.');
 }
 
 await page.close();

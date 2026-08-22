@@ -48,7 +48,7 @@
 //       other check in this file uses) can open a component's inline editor
 //       and recompile a change, when the vendor chunk is actually built.
 // Prints "all-PASS" and exits 0 only if every check passed.
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -146,16 +146,31 @@ function fpsValue(text) {
 // constructed (method lookup happens at call time via the prototype
 // chain). Best-effort: a failure here just leaves window.__* empty, not a
 // hang — the one assertion reading it would simply fail visibly.
+//
+// Real-GPU migration (see browser.mjs's header): #/garden mounts with
+// prefer:'auto', which now resolves to WebGPU (GPURuntime) whenever probing
+// happens BEFORE "Edit here" is clicked — editing is GLSL-only, so opening
+// the editor is what forces a rebuild onto WebGL2 (see index.js's own
+// comment on rh.backend). setUniforms is patched on BOTH runtime classes
+// into the SAME window.__uniformCalls array so uProbeSel/hover checks that
+// run before any editor is ever opened still see writes. setShader stays
+// GL2Runtime-only: every check that reads window.__setShaderCalls (the
+// syntax-error diagnostic test) only runs AFTER openCharacterEditor has
+// already forced the WebGL2 rebuild, so GPURuntime's setShader is never the
+// one under test there.
 async function armSpies(page) {
   await page.evaluateOnNewDocument(() => {
     window.__uniformCalls = [];
     window.__setShaderCalls = [];
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const origU = mod.GL2Runtime.prototype.setUniforms;
-      mod.GL2Runtime.prototype.setUniforms = function (values) {
+    const hookUniforms = (mod, className) => {
+      const orig = mod[className].prototype.setUniforms;
+      mod[className].prototype.setUniforms = function (values) {
         window.__uniformCalls.push({ ...values });
-        return origU.call(this, values);
+        return orig.call(this, values);
       };
+    };
+    import('./js/runtime/webgl2.js').then((mod) => {
+      hookUniforms(mod, 'GL2Runtime');
       const origS = mod.GL2Runtime.prototype.setShader;
       mod.GL2Runtime.prototype.setShader = function (src, channels) {
         const res = origS.call(this, src, channels);
@@ -163,6 +178,7 @@ async function armSpies(page) {
         return res;
       };
     }).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => hookUniforms(mod, 'GPURuntime')).catch(() => {});
   });
 }
 
@@ -180,15 +196,45 @@ async function clickTrayItem(page, name) {
   return false;
 }
 
+// PRODUCT BUG (real-GPU migration exposed it, confirmed via probe script,
+// see the migration report): #/garden mounts with prefer:'auto', which now
+// genuinely resolves to WebGPU on this harness (see armSpies' header
+// comment) — the FIRST time in this suite's history "Edit here" is clicked
+// against a WebGPU-backed mount (pre-migration SwiftShader-only testing
+// meant rh.backend was always already 'webgl2' at boot, so this branch was
+// dead code, per this file's own former comment on the F1 toast test).
+// index.js's onEditHere() awaits `rh.rebuild({ prefer: 'webgl2' })` to
+// switch backends for live GLSL editing. runtime-host.js's build() does
+// `host.replaceChildren()` on every (re)build — and `host` here IS `stage`,
+// the SAME div index.js also uses as a general UI container
+// (`stage.append(panel.el)` etc). That replaceChildren() evicts the
+// currently-open probe panel (and its `editHost` child) from the live
+// document mid-click. `import('./edit.js')` and `mountComponentEditor(...)`
+// still both resolve fine afterward (MEASURED via a scratch probe: all
+// `/js/editor/*` + cm-editor.bundle.js requests fire) — but
+// `editHost.append(editorApi.el)` lands the editor into a node that is no
+// longer attached to `document`, so it's built successfully yet invisible.
+// `.component-editor .code-editor` never appears. Not a harness artifact
+// (not interception, not waitForSelector semantics — ruled out by direct
+// probing): this is a genuine product break, out of this lane's scope to
+// fix (site/ is off-limits). Returns { opened } instead of throwing so
+// every caller can report ONE honest, clearly-labeled failure instead of
+// crashing or fabricating downstream results against DOM nodes that don't
+// exist.
 async function openCharacterEditor(page, errors) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
   await sleep(2500);
+  await assertRealGpu(page);
   await probe(page, 720, 380); // "Bouncing Figure" — has @tune sliders + SG_LEG_LEN/sg_smin to edit
   await page.click('.probe-panel .btn:not(.probe-edit-link)'); // "Edit here" — the only other .btn in the panel
-  await page.waitForSelector('.component-editor .code-editor', { timeout: 8000 });
+  const opened = await page.waitForSelector('.component-editor .code-editor', { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!opened) return { opened: false };
   await sleep(400);
+  return { opened: true };
 }
 
 /* ---------- (a) lazy-load + editor shows the body + uProbeSel ---------- */
@@ -196,9 +242,18 @@ async function openCharacterEditor(page, errors) {
   const errors = [];
   const page = await freshPage(errors);
   await armSpies(page);
-  await forceTextareaFallback(page);
+  // Request-tracking handler registered BEFORE forceTextareaFallback's, and
+  // deliberately never calls continue()/abort() itself: browser.mjs's
+  // interception bridge runs registered handlers in order and returns as
+  // soon as one SETTLES a request (see its own "Deliberately NO fallback
+  // continue()" comment) — a purely-observing handler registered AFTER a
+  // settling one would simply never run. Registering it first lets it see
+  // every request while still leaving forceTextareaFallback's handler (which
+  // always settles) to actually decide continue/abort.
+  await page.setRequestInterception(true);
   const requestedUrls = [];
   page.on('request', (req) => requestedUrls.push(req.url()));
+  await forceTextareaFallback(page);
 
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
@@ -220,21 +275,38 @@ async function openCharacterEditor(page, errors) {
     editBtns.length === 1 && (await page.$('.probe-edit-link')) !== null);
 
   await editBtns[0].click();
-  await page.waitForSelector('.component-editor .code-editor', { timeout: 8000 });
+  // PRODUCT BUG (see openCharacterEditor's header comment above for the full
+  // mechanism): index.js's onEditHere() rebuilds the WebGPU-backed mount
+  // onto WebGL2 by calling rh.rebuild(), which evicts the whole `stage`
+  // container (including the open probe panel) from the DOM. The editor
+  // still loads and mounts (confirmed below) — it just lands inside a
+  // detached node, so '.component-editor .code-editor' never appears.
+  const opened = await page.waitForSelector('.component-editor .code-editor', { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  check('(a) editor pane becomes visible after "Edit here" (BLOCKED by product bug: rh.rebuild() '
+    + "evicts the probe panel from the DOM via host.replaceChildren() before the dynamic-imported "
+    + 'editor mounts into it, so it renders detached — see migration report)', opened);
   await sleep(400);
 
   const editorHitsAfterClick = requestedUrls.filter((u) => u.includes('/js/editor/'));
-  check('(a) "Edit here" lazy-loads the editor machinery on first click', editorHitsAfterClick.length > 0);
+  check('(a) "Edit here" lazy-loads the editor machinery on first click (loads fine — it\'s the '
+    + 'DOM attachment that\'s broken, not the lazy-load)', editorHitsAfterClick.length > 0);
 
-  const shown = await page.$eval('.component-editor .code-editor', (ta) => ta.value);
-  check('(a) editor pane shows the component body', shown.includes('sg_smin') && shown.includes('sg_character_sdf'));
+  if (opened) {
+    const shown = await page.$eval('.component-editor .code-editor', (ta) => ta.value);
+    check('(a) editor pane shows the component body', shown.includes('sg_smin') && shown.includes('sg_character_sdf'));
 
-  await sleep(150);
-  const gotProbeSelZeroBefore = await page.evaluate(() => window.__uniformCalls.some((c) => 'uProbeSel' in c && c.uProbeSel === 0));
-  await page.click('.probe-panel .collapse-btn');
-  await sleep(400);
-  const gotProbeSelZeroAfter = await page.evaluate(() => window.__uniformCalls.some((c) => 'uProbeSel' in c && c.uProbeSel === 0));
-  check('(a) closing the panel resets uProbeSel to 0', gotProbeSelZeroBefore || gotProbeSelZeroAfter);
+    await sleep(150);
+    const gotProbeSelZeroBefore = await page.evaluate(() => window.__uniformCalls.some((c) => 'uProbeSel' in c && c.uProbeSel === 0));
+    await page.click('.probe-panel .collapse-btn');
+    await sleep(400);
+    const gotProbeSelZeroAfter = await page.evaluate(() => window.__uniformCalls.some((c) => 'uProbeSel' in c && c.uProbeSel === 0));
+    check('(a) closing the panel resets uProbeSel to 0', gotProbeSelZeroBefore || gotProbeSelZeroAfter);
+  } else {
+    check('(a) editor pane shows the component body (BLOCKED — see above)', false);
+    check('(a) closing the panel resets uProbeSel to 0 (BLOCKED — see above)', false);
+  }
 
   check('(a) no console errors', errors.length === 0, errors.join(' | '));
   await page.close();
@@ -245,22 +317,31 @@ async function openCharacterEditor(page, errors) {
   const errors = [];
   const page = await freshPage(errors);
   await forceTextareaFallback(page);
-  await openCharacterEditor(page, errors);
+  const { opened } = await openCharacterEditor(page, errors);
+  check('(b) can open the character editor (BLOCKED by product bug: rh.rebuild() evicts the probe '
+    + 'panel from the DOM before the editor mounts into it — see migration report; this section\'s '
+    + 'remaining checks are unreachable as a direct consequence)', opened);
 
-  const meta = await characterComponent(page);
-  check('(b) SG_LEG_LEN is present in the ground-truth body (test assumes it)', meta.source.includes('SG_LEG_LEN = 0.5'));
-  const benign = meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.52');
+  if (opened) {
+    const meta = await characterComponent(page);
+    check('(b) SG_LEG_LEN is present in the ground-truth body (test assumes it)', meta.source.includes('SG_LEG_LEN = 0.5'));
+    const benign = meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.52');
 
-  await replaceAllAndType(page, benign);
-  await sleep(700); // 300ms debounce + compile + settle margin
+    await replaceAllAndType(page, benign);
+    await sleep(700); // 300ms debounce + compile + settle margin
 
-  const statusPill = await page.$eval('.component-editor-status .pill', (el) => el.textContent).catch(() => null);
-  check('(b) recompile fires and reports ok', statusPill === 'ok', 'pill=' + statusPill);
+    const statusPill = await page.$eval('.component-editor-status .pill', (el) => el.textContent).catch(() => null);
+    check('(b) recompile fires and reports ok', statusPill === 'ok', 'pill=' + statusPill);
 
-  await sleep(1200); // outlive a ~1Hz fps sample so the badge reflects the post-edit frame
-  const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
-  check('(b) canvas is still rendering after the edit (fps badge live)', (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
-  check('(b) zero console errors after a benign edit', errors.length === 0, errors.join(' | '));
+    await sleep(1200); // outlive a ~1Hz fps sample so the badge reflects the post-edit frame
+    const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
+    check('(b) canvas is still rendering after the edit (fps badge live)', (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
+    check('(b) zero console errors after a benign edit', errors.length === 0, errors.join(' | '));
+  } else {
+    check('(b) SG_LEG_LEN is present in the ground-truth body (test assumes it) (BLOCKED — see above)', false);
+    check('(b) recompile fires and reports ok (BLOCKED — see above)', false);
+    check('(b) canvas is still rendering after the edit (fps badge live) (BLOCKED — see above)', false);
+  }
   await page.close();
 }
 
@@ -275,42 +356,51 @@ async function openCharacterEditor(page, errors) {
   const page = await freshPage(errors);
   await armSpies(page);
   await forceTextareaFallback(page);
-  await openCharacterEditor(page, errors);
+  const { opened } = await openCharacterEditor(page, errors);
+  check('(c) can open the character editor (BLOCKED by product bug — see (b)/migration report; '
+    + "this section's remaining checks are unreachable as a direct consequence)", opened);
 
-  const meta = await characterComponent(page);
-  const bodyLines = meta.source.split('\n');
-  const brokenIndex = bodyLines.findIndex((l) => l.includes('float sg_smin'));
-  check('(c) found the target line to corrupt (test assumes it)', brokenIndex >= 0);
-  bodyLines[brokenIndex] = 'float sg_smin( this is not valid glsl @@@';
-  const broken = bodyLines.join('\n');
+  if (opened) {
+    const meta = await characterComponent(page);
+    const bodyLines = meta.source.split('\n');
+    const brokenIndex = bodyLines.findIndex((l) => l.includes('float sg_smin'));
+    check('(c) found the target line to corrupt (test assumes it)', brokenIndex >= 0);
+    bodyLines[brokenIndex] = 'float sg_smin( this is not valid glsl @@@';
+    const broken = bodyLines.join('\n');
 
-  await replaceAllAndType(page, broken);
-  await sleep(700);
+    await replaceAllAndType(page, broken);
+    await sleep(700);
 
-  const statusPill = await page.$eval('.component-editor-status .pill', (el) => el.textContent).catch(() => null);
-  check('(c) recompile reports a compile error', statusPill === 'error', 'pill=' + statusPill);
+    const statusPill = await page.$eval('.component-editor-status .pill', (el) => el.textContent).catch(() => null);
+    check('(c) recompile reports a compile error', statusPill === 'error', 'pill=' + statusPill);
 
-  const raw = await page.evaluate(() => {
-    const last = window.__setShaderCalls[window.__setShaderCalls.length - 1];
-    return last && !last.res.ok ? last.res.messages : null;
-  });
-  check('(c) the runtime reported at least one compiler message', !!raw && raw.length > 0, JSON.stringify(raw));
-  const bodyLineCount = broken.split('\n').length;
-  const expectedLocal = raw && raw.length
-    ? Math.min(Math.max((raw[0].line || 1) - meta.startLine, 1), Math.max(bodyLineCount, 1))
-    : null;
+    const raw = await page.evaluate(() => {
+      const last = window.__setShaderCalls[window.__setShaderCalls.length - 1];
+      return last && !last.res.ok ? last.res.messages : null;
+    });
+    check('(c) the runtime reported at least one compiler message', !!raw && raw.length > 0, JSON.stringify(raw));
+    const bodyLineCount = broken.split('\n').length;
+    const expectedLocal = raw && raw.length
+      ? Math.min(Math.max((raw[0].line || 1) - meta.startLine, 1), Math.max(bodyLineCount, 1))
+      : null;
 
-  const diagLines = await page.$$eval('.component-editor .diag-item', (nodes) => nodes.map((n) => n.textContent));
-  check('(c) a diagnostic is visible', diagLines.length > 0, JSON.stringify(diagLines));
-  const reportedLocalLine = diagLines.length ? Number((/line (\d+):/.exec(diagLines[0]) || [])[1]) : null;
-  check('(c) the diagnostic line number matches the remap math (sceneLine - startLine, clamped into the body)',
-    reportedLocalLine === expectedLocal, 'reported=' + reportedLocalLine + ' expected=' + expectedLocal + ' raw=' + JSON.stringify(raw));
+    const diagLines = await page.$$eval('.component-editor .diag-item', (nodes) => nodes.map((n) => n.textContent));
+    check('(c) a diagnostic is visible', diagLines.length > 0, JSON.stringify(diagLines));
+    const reportedLocalLine = diagLines.length ? Number((/line (\d+):/.exec(diagLines[0]) || [])[1]) : null;
+    check('(c) the diagnostic line number matches the remap math (sceneLine - startLine, clamped into the body)',
+      reportedLocalLine === expectedLocal, 'reported=' + reportedLocalLine + ' expected=' + expectedLocal + ' raw=' + JSON.stringify(raw));
 
-  await sleep(1200);
-  const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
-  check('(c) canvas is STILL rendering the last-good program (never-black) after a syntax error',
-    (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
-  check('(c) no console errors from the intentional compile failure', errors.length === 0, errors.join(' | '));
+    await sleep(1200);
+    const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
+    check('(c) canvas is STILL rendering the last-good program (never-black) after a syntax error',
+      (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
+    check('(c) no console errors from the intentional compile failure', errors.length === 0, errors.join(' | '));
+  } else {
+    check('(c) recompile reports a compile error (BLOCKED — see above)', false);
+    check('(c) a diagnostic is visible (BLOCKED — see above)', false);
+    check('(c) the diagnostic line number matches the remap math (BLOCKED — see above)', false);
+    check('(c) canvas is STILL rendering the last-good program (never-black) (BLOCKED — see above)', false);
+  }
   await page.close();
 }
 
@@ -319,22 +409,30 @@ async function openCharacterEditor(page, errors) {
   const errors = [];
   const page = await freshPage(errors);
   await forceTextareaFallback(page);
-  await openCharacterEditor(page, errors);
+  const { opened } = await openCharacterEditor(page, errors);
+  check('(d) can open the character editor (BLOCKED by product bug — see (b)/migration report; '
+    + "this section's remaining checks are unreachable as a direct consequence)", opened);
 
-  const meta = await characterComponent(page);
-  await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.9'));
-  await sleep(900); // debounce + recompile + the href refresh that follows it
-  const changedScene = await getCurrentFullScene(page);
-  check('(d) the body actually changed before reverting', changedScene.includes('SG_LEG_LEN = 0.9'));
+  if (opened) {
+    const meta = await characterComponent(page);
+    await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.9'));
+    await sleep(900); // debounce + recompile + the href refresh that follows it
+    const changedScene = await getCurrentFullScene(page);
+    check('(d) the body actually changed before reverting', changedScene.includes('SG_LEG_LEN = 0.9'));
 
-  await page.click('.component-editor-status .btn'); // Revert
-  await sleep(900);
-  const revertedScene = await getCurrentFullScene(page);
-  check('(d) Revert restores the original body', revertedScene.includes('SG_LEG_LEN = 0.5') && !revertedScene.includes('SG_LEG_LEN = 0.9'));
+    await page.click('.component-editor-status .btn'); // Revert
+    await sleep(900);
+    const revertedScene = await getCurrentFullScene(page);
+    check('(d) Revert restores the original body', revertedScene.includes('SG_LEG_LEN = 0.5') && !revertedScene.includes('SG_LEG_LEN = 0.9'));
 
-  const statusPill = await page.$eval('.component-editor-status .pill', (el) => el.textContent).catch(() => null);
-  check('(d) Revert recompiles immediately and reports ok', statusPill === 'ok', 'pill=' + statusPill);
-  check('(d) no console errors across the revert flow', errors.length === 0, errors.join(' | '));
+    const statusPill = await page.$eval('.component-editor-status .pill', (el) => el.textContent).catch(() => null);
+    check('(d) Revert recompiles immediately and reports ok', statusPill === 'ok', 'pill=' + statusPill);
+    check('(d) no console errors across the revert flow', errors.length === 0, errors.join(' | '));
+  } else {
+    check('(d) the body actually changed before reverting (BLOCKED — see above)', false);
+    check('(d) Revert restores the original body (BLOCKED — see above)', false);
+    check('(d) Revert recompiles immediately and reports ok (BLOCKED — see above)', false);
+  }
   await page.close();
 }
 
@@ -343,21 +441,27 @@ async function openCharacterEditor(page, errors) {
   const errors = [];
   const page = await freshPage(errors);
   await forceTextareaFallback(page);
-  await openCharacterEditor(page, errors);
+  const { opened } = await openCharacterEditor(page, errors);
+  check('(e) can open the character editor (BLOCKED by product bug — see (b)/migration report; '
+    + "this section's remaining checks are unreachable as a direct consequence)", opened);
 
-  const meta = await characterComponent(page);
-  await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.77'));
-  await sleep(900);
+  if (opened) {
+    const meta = await characterComponent(page);
+    await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.77'));
+    await sleep(900);
 
-  await page.click('.probe-panel .collapse-btn'); // animated close
-  await sleep(400); // outlive the ~0.18s exit transition
-  check('(e) the panel actually closed', (await page.$('.probe-panel')) === null);
+    await page.click('.probe-panel .collapse-btn'); // animated close
+    await sleep(400); // outlive the ~0.18s exit transition
+    check('(e) the panel actually closed', (await page.$('.probe-panel')) === null);
 
-  await probe(page, 720, 380);
-  const sourceText = await page.$eval('.probe-source', (el) => el.textContent);
-  check('(e) re-probing the same component shows the EDITED body, not the stale original',
-    sourceText.includes('0.77') && !sourceText.includes('SG_LEG_LEN = 0.5;'), 'source snippet=' + sourceText.slice(0, 160));
-  check('(e) no console errors across the re-probe flow', errors.length === 0, errors.join(' | '));
+    await probe(page, 720, 380);
+    const sourceText = await page.$eval('.probe-source', (el) => el.textContent);
+    check('(e) re-probing the same component shows the EDITED body, not the stale original',
+      sourceText.includes('0.77') && !sourceText.includes('SG_LEG_LEN = 0.5;'), 'source snippet=' + sourceText.slice(0, 160));
+    check('(e) no console errors across the re-probe flow', errors.length === 0, errors.join(' | '));
+  } else {
+    check('(e) re-probing the same component shows the EDITED body (BLOCKED — see above)', false);
+  }
   await page.close();
 }
 
@@ -366,15 +470,21 @@ async function openCharacterEditor(page, errors) {
   const errors = [];
   const page = await freshPage(errors);
   await forceTextareaFallback(page);
-  await openCharacterEditor(page, errors);
+  const { opened } = await openCharacterEditor(page, errors);
+  check('(f) can open the character editor (BLOCKED by product bug — see (b)/migration report; '
+    + "this section's remaining checks are unreachable as a direct consequence)", opened);
 
-  const meta = await characterComponent(page);
-  await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.81'));
-  await sleep(900);
+  if (opened) {
+    const meta = await characterComponent(page);
+    await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.81'));
+    await sleep(900);
 
-  const scene = await getCurrentFullScene(page);
-  check('(f) "Open in editor" exports the CURRENT (edited) full scene', scene.includes('0.81'));
-  check('(f) no console errors', errors.length === 0, errors.join(' | '));
+    const scene = await getCurrentFullScene(page);
+    check('(f) "Open in editor" exports the CURRENT (edited) full scene', scene.includes('0.81'));
+    check('(f) no console errors', errors.length === 0, errors.join(' | '));
+  } else {
+    check('(f) "Open in editor" exports the CURRENT (edited) full scene (BLOCKED — see above)', false);
+  }
   await page.close();
 }
 
@@ -411,6 +521,15 @@ async function openCharacterEditor(page, errors) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
+  // Real headed browser: this is a later page in a multi-page run, and a
+  // background (non-foreground) tab's requestAnimationFrame is throttled —
+  // the (i) connection-navigation flow below relies on a double-rAF before
+  // its scroll-and-flash effect runs (panel.js's own comment: "same
+  // double-rAF wait as the enter transition... so the panel has real layout
+  // before scrollIntoView runs"), which a throttled/backgrounded tab can
+  // miss inside this section's fixed sleeps. Same class of fix as
+  // garden-camera.mjs/garden-movement.mjs's bringToFront() calls.
+  await page.bringToFront();
   await sleep(2000);
 
   const trayCount = await page.$$eval('.garden-tray-item', (n) => n.length);
@@ -457,7 +576,19 @@ async function openCharacterEditor(page, errors) {
   await clickTrayItem(page, 'Bouncing Figure');
   await sleep(300);
   await page.click('.probe-panel .btn:not(.probe-edit-link)'); // "Edit here"
-  await page.waitForSelector('.component-editor .cm-editor, .component-editor .code-editor', { timeout: 8000 });
+  // Same product bug as (b)-(f) (see openCharacterEditor's header comment):
+  // rh.rebuild() evicts the probe panel from the DOM before the editor
+  // mounts into it. Guard instead of letting an unhandled timeout crash the
+  // whole suite past this point.
+  const opened = await page.waitForSelector('.component-editor .cm-editor, .component-editor .code-editor', { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  check('(l) can open the character editor (BLOCKED by product bug — see (b)/migration report; '
+    + "this section's remaining checks are unreachable as a direct consequence)", opened);
+  if (!opened) {
+    check('(l) no console errors on the real CodeMirror path (BLOCKED — see above)', false);
+    await page.close();
+  } else {
   await sleep(400);
 
   const kind = await page.evaluate(() => (document.querySelector('.component-editor .cm-editor') ? 'cm' : 'textarea'));
@@ -482,6 +613,7 @@ async function openCharacterEditor(page, errors) {
   }
   check('(l) no console errors on the real CodeMirror path', errors.length === 0, errors.join(' | '));
   await page.close();
+  }
 }
 
 /* ---------- (j) terrain stage/variant selector ---------- */
@@ -505,22 +637,42 @@ async function openCharacterEditor(page, errors) {
   // River Valley: the cheap non-pristine stage. Applying it must go through
   // the SAME splice/recompile/export path a hand edit uses -- proven via the
   // real production round-trip (the refreshed "Open in editor" href).
+  //
+  // PRODUCT BUG (same root cause as openCharacterEditor's — see its header
+  // comment): applying a non-pristine stage variant on a WebGPU-backed mount
+  // ALSO triggers `rh.rebuild({ prefer: 'webgl2' })` (index.js's variant
+  // onSelect callback carries the identical "same backend seam as
+  // onEditHere" comment), which evicts the open probe panel from the DOM
+  // the same way "Edit here" does. Guarded instead of letting the panel's
+  // disappearance crash getCurrentFullScene's unguarded $eval.
   await page.click('.probe-stage-btn[data-variant="river-valley"]');
   await sleep(800); // fetch + recompile + href refresh
-  const riverScene = await getCurrentFullScene(page);
-  const RIVER_TOKEN = 'vec2(3.7 * float(i + 1)'; // river-valley.glsl's staggered octave offset -- absent from the pristine body
-  check('(j) selecting River Valley splices its body into the exported scene', riverScene.includes(RIVER_TOKEN));
-  const riverActive = await page.$eval('.probe-stage-btn[data-variant="river-valley"]', (b) => b.classList.contains('probe-stage-active'));
-  check('(j) the applied stage becomes the active one', riverActive === true);
-  const paneShowsRiver = await page.$eval('.probe-source', (el) => el.textContent.includes('vec2(3.7 * float(i + 1)'));
-  check('(j) the read-only source pane re-renders to the variant body', paneShowsRiver === true);
+  const panelSurvivedVariant = (await page.$('.probe-edit-link')) !== null;
+  check('(j) the probe panel survives selecting a non-pristine stage variant (BLOCKED by product bug: '
+    + "rh.rebuild() evicts it via host.replaceChildren() — see (a)'s comment; same root cause, different "
+    + 'trigger)', panelSurvivedVariant);
 
-  // Back to pristine: the editedBodies entry must clear, so the export is
-  // byte-identical to never having touched the stage row.
-  await page.click('.probe-stage-btn[data-variant="rolling-hills"]');
-  await sleep(800);
-  const pristineScene = await getCurrentFullScene(page);
-  check('(j) reselecting the pristine stage restores the original exactly', !pristineScene.includes(RIVER_TOKEN));
+  if (panelSurvivedVariant) {
+    const riverScene = await getCurrentFullScene(page);
+    const RIVER_TOKEN = 'vec2(3.7 * float(i + 1)'; // river-valley.glsl's staggered octave offset -- absent from the pristine body
+    check('(j) selecting River Valley splices its body into the exported scene', riverScene.includes(RIVER_TOKEN));
+    const riverActive = await page.$eval('.probe-stage-btn[data-variant="river-valley"]', (b) => b.classList.contains('probe-stage-active'));
+    check('(j) the applied stage becomes the active one', riverActive === true);
+    const paneShowsRiver = await page.$eval('.probe-source', (el) => el.textContent.includes('vec2(3.7 * float(i + 1)'));
+    check('(j) the read-only source pane re-renders to the variant body', paneShowsRiver === true);
+
+    // Back to pristine: the editedBodies entry must clear, so the export is
+    // byte-identical to never having touched the stage row.
+    await page.click('.probe-stage-btn[data-variant="rolling-hills"]');
+    await sleep(800);
+    const pristineScene = await getCurrentFullScene(page);
+    check('(j) reselecting the pristine stage restores the original exactly', !pristineScene.includes(RIVER_TOKEN));
+  } else {
+    check('(j) selecting River Valley splices its body into the exported scene (BLOCKED — see above)', false);
+    check('(j) the applied stage becomes the active one (BLOCKED — see above)', false);
+    check('(j) the read-only source pane re-renders to the variant body (BLOCKED — see above)', false);
+    check('(j) reselecting the pristine stage restores the original exactly (BLOCKED — see above)', false);
+  }
 
   const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
   check('(j) canvas is still rendering after two stage swaps (fps badge live)', (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
@@ -541,24 +693,41 @@ async function openCharacterEditor(page, errors) {
   check('(k) chips are empty before Measure is ever clicked (never automatic)', chipsBefore.every((t) => t === ''), JSON.stringify(chipsBefore));
 
   await page.click('.garden-tray-measure');
+  // PRODUCT BUG (same root cause as (a)/(j) \u2014 see openCharacterEditor's
+  // header comment): onMeasure ALSO carries the "same backend seam as
+  // editing and variants" rh.rebuild({ prefer: 'webgl2' }) call on a
+  // WebGPU-backed mount, and here it's an even harsher case \u2014 the tray
+  // itself (containing the Measure button being polled below) is a child of
+  // `stage`, so a mid-click rebuild can evict the very button/chips this
+  // section reads. Poll tolerantly (missing selector = not done yet, not a
+  // crash) instead of letting an unguarded $eval throw.
   // SwiftShader compiles the 6 stubbed scenes serially -- poll the button's
   // busy label instead of guessing a sleep.
   let done = false;
   for (let i = 0; i < 120 && !done; i++) {
     await sleep(500);
-    done = await page.$eval('.garden-tray-measure', (b) => b.textContent === 'Measure' && !b.disabled);
+    done = await page.$eval('.garden-tray-measure', (b) => b.textContent === 'Measure' && !b.disabled).catch(() => false);
   }
-  check('(k) the Measure pass completes and re-enables the button', done);
+  const trayGone = (await page.$('.garden-tray-measure')) === null;
+  check('(k) the Measure pass completes and re-enables the button'
+    + (trayGone ? ' (BLOCKED by product bug: rh.rebuild() evicted the tray itself mid-measurement \u2014 see (a)/(j) comments)' : ''),
+    done);
 
-  const chips = await page.$$eval('.garden-tray-item', (items) => items.map((it) => ({
-    name: it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim(),
-    chip: it.querySelector('.garden-tray-chip').textContent,
-  })));
-  check('(k) every component got a chip', chips.length === 11 && chips.every((c) => c.chip !== ''), JSON.stringify(chips));
-  const skyChip = chips.find((c) => c.name.toLowerCase().includes('sky'))?.chip;
-  const terrainChip = chips.find((c) => c.name === 'Rolling Hills (evolved)')?.chip;
-  check('(k) sky and terrain report an honest dash, not a fake number', skyChip === '\u2014' && terrainChip === '\u2014', 'sky=' + skyChip + ' terrain=' + terrainChip);
-  check('(k) at least one stubbable component reports a real ms figure', chips.some((c) => /^\d+(\.\d+)?ms$/.test(c.chip)), JSON.stringify(chips.map((c) => c.chip)));
+  if (!trayGone) {
+    const chips = await page.$$eval('.garden-tray-item', (items) => items.map((it) => ({
+      name: it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim(),
+      chip: it.querySelector('.garden-tray-chip').textContent,
+    })));
+    check('(k) every component got a chip', chips.length === 11 && chips.every((c) => c.chip !== ''), JSON.stringify(chips));
+    const skyChip = chips.find((c) => c.name.toLowerCase().includes('sky'))?.chip;
+    const terrainChip = chips.find((c) => c.name === 'Rolling Hills (evolved)')?.chip;
+    check('(k) sky and terrain report an honest dash, not a fake number', skyChip === '\u2014' && terrainChip === '\u2014', 'sky=' + skyChip + ' terrain=' + terrainChip);
+    check('(k) at least one stubbable component reports a real ms figure', chips.some((c) => /^\d+(\.\d+)?ms$/.test(c.chip)), JSON.stringify(chips.map((c) => c.chip)));
+  } else {
+    check('(k) every component got a chip (BLOCKED \u2014 see above)', false);
+    check('(k) sky and terrain report an honest dash, not a fake number (BLOCKED \u2014 see above)', false);
+    check('(k) at least one stubbable component reports a real ms figure (BLOCKED \u2014 see above)', false);
+  }
 
   const fpsText = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
   check('(k) the scene renders on after measurement (exact restore)', (fpsValue(fpsText) || 0) > 0, 'fps=' + fpsText);
@@ -661,46 +830,57 @@ async function openCharacterEditor(page, errors) {
   const errors = [];
   const page = await freshPage(errors);
   await forceTextareaFallback(page);
-  await openCharacterEditor(page, errors);
+  const { opened } = await openCharacterEditor(page, errors);
+  check('(o) can open the character editor (BLOCKED by product bug — see (b)/migration report; '
+    + "this section's remaining checks are unreachable as a direct consequence)", opened);
 
-  const meta = await characterComponent(page);
-  await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.6'));
-  await sleep(900);
+  if (opened) {
+    const meta = await characterComponent(page);
+    await replaceAllAndType(page, meta.source.replace('SG_LEG_LEN = 0.5', 'SG_LEG_LEN = 0.6'));
+    await sleep(900);
 
-  await page.click('.probe-panel .collapse-btn'); // animated close
-  await sleep(400);
-  check('(o) the panel actually closed', (await page.$('.probe-panel')) === null);
+    await page.click('.probe-panel .collapse-btn'); // animated close
+    await sleep(400);
+    check('(o) the panel actually closed', (await page.$('.probe-panel')) === null);
 
-  const editedVisible = await page.$$eval('.garden-tray-item', (items) => {
-    const item = items.find((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() === 'Bouncing Figure');
-    const chip = item?.querySelector('.garden-tray-edited-chip');
-    return chip ? !chip.hidden : null;
-  });
-  check('(o) the tray marks the edited component with a visible "edited" chip after the panel closes', editedVisible === true, 'got ' + editedVisible);
+    const editedVisible = await page.$$eval('.garden-tray-item', (items) => {
+      const item = items.find((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() === 'Bouncing Figure');
+      const chip = item?.querySelector('.garden-tray-edited-chip');
+      return chip ? !chip.hidden : null;
+    });
+    check('(o) the tray marks the edited component with a visible "edited" chip after the panel closes', editedVisible === true, 'got ' + editedVisible);
 
-  // Edit tracking is per-component, not global — nothing else should light up.
-  const otherEdited = await page.$$eval('.garden-tray-item', (items) => items
-    .filter((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() !== 'Bouncing Figure')
-    .some((it) => !it.querySelector('.garden-tray-edited-chip').hidden));
-  check('(o) no other component is marked edited', otherEdited === false);
+    // Edit tracking is per-component, not global — nothing else should light up.
+    const otherEdited = await page.$$eval('.garden-tray-item', (items) => items
+      .filter((it) => it.querySelector('.garden-tray-item-name').childNodes[0].textContent.trim() !== 'Bouncing Figure')
+      .some((it) => !it.querySelector('.garden-tray-edited-chip').hidden));
+    check('(o) no other component is marked edited', otherEdited === false);
 
-  check('(o) no console errors across the edit-then-close flow', errors.length === 0, errors.join(' | '));
+    check('(o) no console errors across the edit-then-close flow', errors.length === 0, errors.join(' | '));
+  } else {
+    check('(o) the tray marks the edited component with a visible "edited" chip (BLOCKED — see above)', false);
+    check('(o) no other component is marked edited (BLOCKED — see above)', false);
+  }
   await page.close();
 }
 
-// F1's backend-switch toast can't be exercised at runtime in this harness:
-// puppeteer's SwiftShader-backed Chrome never reports a WebGPU adapter
-// (browser.mjs's own header: "the WebGPU path does NOT execute headless"),
-// so rh.backend can never actually BE 'webgpu' here to trip the branch —
-// same limitation every other WebGPU-only row in the launch checklist has.
-// Static regression net instead: the toast call must live inside the exact
-// same conditional the rebuild call already does.
+// Real-GPU migration note: F1's backend-switch toast is now ACTUALLY
+// exercised at runtime by section (a) and the (b)-(o) editor sections above
+// (this harness's WebGPU path is real — browser.mjs no longer sets
+// --use-angle, and #/garden mounts with prefer:'auto' which genuinely
+// resolves to WebGPU here) — but every one of those runtime paths hits the
+// confirmed product bug (rh.rebuild()'s host.replaceChildren() evicting the
+// probe panel) before the toast's visible effect can be asserted. Kept as a
+// static regression net rather than upgraded to a DOM assertion: it proves
+// the toast call still lives inside the same conditional as the rebuild,
+// independent of whether that conditional's runtime effect is currently
+// visible.
 {
   const page = await browser.newPage();
   await gotoSafe(page, BASE + '/index.html', { waitUntil: 'networkidle2', timeout: 20000 });
   const src = await page.evaluate(() => fetch('js/organs/garden/index.js').then((r) => r.text()));
   const gated = /if \(rh\.backend === 'webgpu'\) \{\s*await rh\.rebuild\(\{ prefer: 'webgl2' \}\);\s*toast\('Switched to WebGL2 for live editing'\);/.test(src);
-  check('(o) the WebGL2-switch toast is gated on the same condition as the rebuild (WebGPU untestable headless)', gated);
+  check('(o) the WebGL2-switch toast is gated on the same condition as the rebuild', gated);
   await page.close();
 }
 

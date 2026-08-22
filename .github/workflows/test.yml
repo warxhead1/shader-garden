@@ -64,6 +64,12 @@ jobs:
       # mp-protocol.mjs runs server/test/*.test.mjs via an EXPANDED GLOB, never
       # `node --test server/test/` — the bare-directory form require()s the
       # directory on Node 26.x instead of discovering tests.
+      # mp-netclient covers the PURE exports net.js/timesync.js promise not to
+      # hide behind a socket (min-RTT estimator, slot allocator, relay
+      # discovery). It shipped with lane L2 but no step ever ran it.
+      - name: mp-netclient
+        working-directory: tools/test
+        run: node mp-netclient.mjs 2>&1 | tee out/logs/mp-netclient.log
       - name: mp-protocol
         working-directory: tools/test
         run: node mp-protocol.mjs 2>&1 | tee out/logs/mp-protocol.log

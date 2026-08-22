@@ -12,6 +12,7 @@
     "garden-wgsl-parity": "node garden-wgsl-parity.mjs",
     "garden-camera": "node garden-camera.mjs",
     "garden-locomotion-parity": "node garden-locomotion-parity.mjs",
+    "mp-netclient": "node mp-netclient.mjs",
     "mp-protocol": "node mp-protocol.mjs",
     "mp-relay": "node mp-relay.mjs",
     "mp-clock": "node mp-clock.mjs",

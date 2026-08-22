@@ -42,6 +42,32 @@ function check(name, cond, detail) {
 
 const page = await browser.newPage();
 page.on('pageerror', (e) => console.log('pageerror:', String(e)));
+// Playwright's page.workers()/'worker' event, verified empirically, never
+// sees the sacrificial worker at all: admission/index.js spawns it as
+// `new Worker(url, { type: 'module' })`, and a classic Worker() shows up
+// in page.workers() fine but a MODULE worker never does — reproduced with
+// a minimal repro page outside this file, not assumed. So "a real worker
+// target spawned/terminated" is instrumented directly instead, the same
+// self-instrumentation technique seed.mjs already uses for
+// HTMLCanvasElement.getContext/requestAnimationFrame: wrap the global
+// Worker constructor before any page script runs. This is still an
+// external, product-blind observer (not trusting admission/index.js's own
+// bookkeeping) — just one Playwright can actually see.
+await page.addInitScript(() => {
+  window.__workerLive = 0;
+  const NativeWorker = window.Worker;
+  window.Worker = class extends NativeWorker {
+    constructor(...args) {
+      super(...args);
+      window.__workerLive++;
+    }
+    terminate() {
+      window.__workerLive--;
+      return super.terminate();
+    }
+  };
+});
+async function workerCount(p = page) { return p.evaluate(() => window.__workerLive); }
 await gotoSafe(page, `${BASE}/index.html#/edit`, { waitUntil: 'networkidle0' });
 
 const CLEAN_WGSL = `fn mainImage(fragCoord: vec2f) -> vec4f {
@@ -50,7 +76,7 @@ const CLEAN_WGSL = `fn mainImage(fragCoord: vec2f) -> vec4f {
 
 /* ---------- (a) TLE: stubbed worker never heartbeats ---------- */
 {
-  const before = (await page.workers()).length;
+  const before = await workerCount();
   const resultPromise = page.evaluate(async (src) => {
     const { admit } = await import('./js/organs/admission/index.js');
     const t0 = performance.now();
@@ -59,7 +85,7 @@ const CLEAN_WGSL = `fn mainImage(fragCoord: vec2f) -> vec4f {
   }, CLEAN_WGSL);
 
   await sleep(300); // let the worker actually spawn before we sample devtools' worker list
-  const mid = (await page.workers()).length;
+  const mid = await workerCount();
   check('(a) sacrificial worker spawned (devtools worker target count grew)', mid > before, `before=${before} mid=${mid}`);
 
   const { report, ms } = await resultPromise;
@@ -72,8 +98,8 @@ const CLEAN_WGSL = `fn mainImage(fragCoord: vec2f) -> vec4f {
   // side, but Chrome DevTools Protocol's target-detach notification (what
   // page.workers() reflects) lands a beat later — poll briefly rather than
   // asserting on a single immediate sample.
-  let after = (await page.workers()).length;
-  for (let i = 0; i < 20 && after !== before; i++) { await sleep(100); after = (await page.workers()).length; }
+  let after = await workerCount();
+  for (let i = 0; i < 20 && after !== before; i++) { await sleep(100); after = await workerCount(); }
   check('(a) worker terminated — devtools worker target count back to baseline', after === before, `before=${before} after=${after}`);
 
   const interactive = await page.evaluate(() => document.readyState !== 'loading');
@@ -92,7 +118,7 @@ const CLEAN_WGSL = `fn mainImage(fragCoord: vec2f) -> vec4f {
   const BROKEN_GLSL = `void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   fragColor = 1.0;
 }`;
-  const before = (await page.workers()).length;
+  const before = await workerCount();
   const report = await page.evaluate(async (src) => {
     const { admit } = await import('./js/organs/admission/index.js');
     return admit(src, { language: 'glsl', surface: 'share-link' });
@@ -103,8 +129,8 @@ const CLEAN_WGSL = `fn mainImage(fragCoord: vec2f) -> vec4f {
     JSON.stringify(report.compile_log || '').slice(0, 100));
   check('(b) backend reported as webgl2 (real SwiftShader compile, via the sacrificial worker)', report.backend === 'webgl2', report.backend);
   // devtools' target-detach notification lands a beat after terminate() returns — poll (see (a)'s identical note).
-  let after = (await page.workers()).length;
-  for (let i = 0; i < 20 && after !== before; i++) { await sleep(100); after = (await page.workers()).length; }
+  let after = await workerCount();
+  for (let i = 0; i < 20 && after !== before; i++) { await sleep(100); after = await workerCount(); }
   check('(b) worker spawned and cleaned up (devtools worker count back to baseline)', after === before, `before=${before} after=${after}`);
 }
 
@@ -146,12 +172,12 @@ const CLEAN_WGSL = `fn mainImage(fragCoord: vec2f) -> vec4f {
 
 /* ---------- (e) editor-self never spawns a sacrificial worker (G5) ---------- */
 {
-  const before = (await page.workers()).length;
+  const before = await workerCount();
   await page.evaluate(async (src) => {
     const { admit } = await import('./js/organs/admission/index.js');
     await admit(src, { language: 'wgsl', surface: 'editor-self' });
   }, CLEAN_WGSL);
-  const after = (await page.workers()).length;
+  const after = await workerCount();
   check('(e) editor-self admit() spawns no sacrificial worker', after === before, `before=${before} after=${after}`);
 }
 
@@ -250,12 +276,18 @@ await browser.close();
   check('(h) page still interactive after the real hang', interactive);
 
   // Hard-kill fallback: a genuinely hung GPU-process render can outlive a
-  // graceful close() (confirmed empirically) — race close() against a
-  // short timeout, then SIGKILL the browser process regardless, so this
-  // test never leaves a spinning zombie behind it.
-  const pid = hangBrowser.process()?.pid;
+  // graceful close() (confirmed empirically under puppeteer) — this used
+  // to race close() against a short timeout, then SIGKILL the underlying
+  // process via puppeteer's browser.process().pid. Playwright's Browser
+  // (from chromium.launch()) has no equivalent — verified empirically,
+  // `'process' in browser` is false and there is no pid anywhere on its
+  // prototype — chromium.launchServer() exposes one but browser.mjs's
+  // launch() doesn't use it, and I'm not touching browser.mjs. Best effort
+  // without it: just bound close() and move on; if this leaves an orphaned
+  // GPU process on a genuinely wedged hang, that's a real gap — see my
+  // report for the browser.mjs change that would close it (an optional
+  // process handle on launch()'s return value).
   try { await Promise.race([hangBrowser.close(), sleep(3000)]); } catch { /* ignore */ }
-  if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
 }
 
 server.kill();

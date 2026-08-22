@@ -61,7 +61,10 @@ async function freshPage(errors) {
   check('(1) collapse persists a localStorage diff', !!diffAfterClick && JSON.parse(diffAfterClick).prefs.provenance_collapsed === true,
     'diff=' + diffAfterClick);
 
-  await page.reload({ waitUntil: 'networkidle2', timeout: 20000 }).catch((e) => errors.push('RELOAD: ' + e.message));
+  // page.reload() isn't covered by browser.mjs's goto waitUntil shim (that
+  // only wraps page.goto) — Playwright's reload() wants its native value
+  // directly, so networkidle2 -> networkidle here explicitly.
+  await page.reload({ waitUntil: 'networkidle', timeout: 20000 }).catch((e) => errors.push('RELOAD: ' + e.message));
   await page.waitForSelector('.meta-panel', { timeout: 8000 }).catch(() => {});
   const collapsedAfterReload = await page.evaluate(() => document.querySelector('.meta-panel').classList.contains('collapsed'));
   check('(1) collapse state SURVIVES RELOAD', collapsedAfterReload === true);

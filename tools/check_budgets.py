@@ -131,14 +131,28 @@ FILES = [
     # 470 -> 480: PERF-2 — constructor takes an optional {maxDpr} so a
     # per-mount cap (e.g. the garden's raymarch) can pin tighter than the
     # site-wide DEFAULT_DPR_CAP. Actual 472/480. Raised deliberately.
-    ("site/js/runtime/webgl2.js", 480, None),
+    # 480 -> 620: MP-4 (multiplayer-spec.md §6.1) — prepareShader() compiles
+    # into a side program (KHR_parallel_shader_compile polling on a rAF loop,
+    # synchronous-link fallback otherwise) so a remote commit can never blank
+    # this client's world (I4); setShader() is refactored on top of it as
+    # prepare+immediate-commit, split into _beginPrepare/_finishPrepare/
+    # _commitProgram so both entry points share one swap path. Actual
+    # 586/620. Raised deliberately, this commit.
+    ("site/js/runtime/webgl2.js", 620, None),
     # 480 -> 580: GARDEN-1 (garden-webgpu wave 2) — setUniforms()'s WGSL
     # equivalent (a custom-uniform bank + name registry) and readPixel()
     # (the offscreen probe-readback primitive: a second rgba8unorm pipeline
     # + copyTextureToBuffer/mapAsync path), both needed to run GARDEN-0's
     # scene on this backend at all. Actual 565/580. Raised deliberately,
     # this commit.
-    ("site/js/runtime/webgpu.js", 580, None),
+    # 580 -> 700: MP-4 (multiplayer-spec.md §6.1) — prepareShader() compiles a
+    # side pipeline pair without touching the live one, stamped with a
+    # `_prepareSeq` so a slow prepare can't commit stale state over a
+    # later-made one's commit; setShader()'s pipeline-building body is
+    # factored out into _compilePipeline/_commitPipeline so both entry
+    # points share one swap path. Actual 637/700. Raised deliberately, this
+    # commit.
+    ("site/js/runtime/webgpu.js", 700, None),
     # wrap.js also rolls up into the admission aggregate below (net -30 from
     # runtimes, per the admission budget); this row is the COMP-0 hard cap.
     # 70 -> 115: GARDEN-1 adds the `@sg-uniforms` directive parser

@@ -1,7 +1,8 @@
 # The Commons — multiplayer Shader Garden
 
-**Status:** implementation spec, frozen. Every lane works from THIS file, not
-from a summary of it.
+**Status:** implementation spec. **READ §0.5 FIRST — it corrects four claims in
+this document that an adversarial audit proved wrong against the real code.**
+Every lane works from THIS file, not from a summary of it.
 
 A shared garden. Several people load the same world; the world is one GLSL
 source file; one person at a time holds the right to change it; when they
@@ -30,6 +31,109 @@ Route: `#/garden/:room`. Solo `#/garden` is unchanged and MUST stay so.
    (`webgl2.js:73`). Half of "a broken shader must not blank everyone's world"
    is already true. What is missing is (a) the synchronous compile hitch, and
    (b) any validation before remote source reaches the runtime.
+
+---
+
+## 0.5 Corrections (audit, post-freeze) — these override anything below
+
+An adversarial read of this spec against the actual code found four claims that
+were wrong and would have poisoned a lane. Each was verified by hand before
+being accepted. **Where this section conflicts with a later section, this
+section wins.**
+
+### C1 — the flattened peer uniforms DO NOT fit on WebGPU. Multiplayer is WebGL2-pinned.
+
+§0.2 said the flattened scalar scheme works through both backends. It does not.
+`wrap.js` defines `WGSL_CUSTOM_UNIFORM_SLOTS = 32` — a fixed 8×`vec4f` bank,
+because WGSL has no name-addressed uniform binding model — and names past slot
+32 are silently truncated. `scene.wgsl`'s `@sg-uniforms` directive already
+spends **21** of those. 50 peer scalars plus the MP toggles need ~54 more.
+
+The resolution is already in the codebase: **live component editing is
+GLSL-only and already rebuilds a WebGPU mount onto WebGL2** (`index.js`'s
+`openProbe`/`onEditHere`, and `edit.js`'s own header). Multiplayer's core loop
+*is* live editing, so an MP mount pins to WebGL2 on entry, exactly like the
+existing editing seam. On WebGL2 uniforms are name-addressed with no bank at
+all, so the flattened scheme is fine on the only path MP ever runs on.
+
+Therefore:
+- `scene.wgsl` carries the three new components' **annotations** (so
+  `parse.js`, the tray, and probe stay paired) but their bodies are stubs that
+  return the miss sentinel unconditionally, with a comment saying why.
+- The `@sg-uniforms` directive **does not** gain any peer/lease/sponge name.
+  Adding one silently truncates another and breaks a live uniform.
+- `prepareShader()` on WebGPU (§6.1) stays worth having, but it is **not** on
+  the MP critical path. Do not block on it.
+
+### C2 — invariant I1 was impossible as written. Here is the real gate.
+
+I1 said every existing garden suite stays green *unmodified*. Three of them
+hard-code the component count: `garden.mjs:417` (`trayCount === 8`),
+`garden.mjs:553` (`chips.length === 8`), `garden-connections.mjs:53`
+(`components.length === 8`). `garden-wgsl-parity.mjs` asserts the
+`@sg-uniforms` list matches an allowlist "no more, no less" — and its own
+comment says "Grow this allowlist," so the codebase anticipated this.
+
+Appending components necessarily changes those numbers. The count was never the
+invariant worth protecting; **stable identity for ids 1..8 is**. So:
+- Those four files are **owned by L6** and their count assertions are updated
+  deliberately, in one commit, with the new count named in the test.
+- Every id-1..8 identity and probe assertion stays untouched. A shift in those
+  is the real regression and remains a hard failure.
+
+### C3 — three shader details that would ship broken
+
+- **New ids shade as rocks.** The shading branch handles terrain, character and
+  pond explicitly and falls through to `COMP_ROCKS` (`scene.glsl:667`). Peers,
+  lectern and sponge each need their own normal/material/colour branch, or they
+  probe as ids 9-11 while wearing rock material.
+- **Peer hue cannot survive the march.** `SGHit` carries only `{t, id}`
+  (`scene.glsl:465`). An `out float hue` local does not cross that boundary.
+  Either widen `SGHit` with a slot index, or recompute the nearest peer in the
+  shading branch. Widening `SGHit` is preferred — it is one struct field and it
+  keeps the shading branch cheap.
+- **The escape loop is far too short.** §7.3's 8 iterations × 0.06 advance
+  0.48 units total, against a sponge of half-extent 2.2. It must step by the
+  actual distance magnitude (`t += max(|d|, 0.02)`), not a fixed epsilon, and
+  it must evaluate the real candidate set — `sg_scene_min()` does not exist;
+  the candidates are inlined in `sg_march`.
+
+### C4 — `uCharGaitDist` is a DISTANCE accumulator, not a phase
+
+§4.2's `sg_figure_sdf(..., gaitPhase, ...)` mis-names it. `index.js:524`
+accumulates unwrapped world distance; the shader converts with
+`fract(dist / SG_STRIDE_LEN)` and uses the **raw** value in its exact idle
+fast path (`scene.glsl:169`). Passing a pre-fract'd phase changes locomotion
+and breaks `garden-locomotion-parity.mjs`. The parameter is `gaitDist`, raw,
+and each peer's is converted inside the figure function exactly as the local
+character's is.
+
+### C5 — smaller, but they bite
+
+- `ctx.params` is a `URLSearchParams`. Read the room as `ctx.params.get('room')`,
+  never `ctx.params.room`. (L5 already did this correctly.)
+- `sharedTime()` returns `null` until the first sample lands. Do not seek on
+  it: `seek(null)` becomes `Math.max(0, null) === 0` and rewinds the clock to
+  zero every frame after the deadband. (L2 already guards this correctly.)
+- CI test steps run from `tools/test`, but `server/` is top-level — the
+  protocol suite path is `../../server/test/*.test.mjs`, or run it from the
+  repo root.
+- Two `serveSite()` calls derive the **same** pid-based port and ownership is
+  checked only by `index.html` byte length, so the second can alias the first.
+  A suite needing a site *and* a relay gives the relay its own explicit port
+  rather than calling `serveSite()` twice.
+- §4.2's early-out is **coherent and low-overhead, not free** — it still costs
+  a call/compare/branch per march step across up to 88 steps. It must be
+  measured against the existing solo budget, not asserted.
+
+### C6 — §0.1's framing was too strong
+
+"The world is a pure function of `(source, iTime)`" is false as stated: the
+scene also reads `iResolution`, mouse-driven camera state, each client's own
+character position, and the tune values. Shared time synchronises **world
+animation** — which is what hide-and-seek needs, and why MP-1 is still the
+first slice. It does not make two clients' frames identical, and nothing in
+this design requires that.
 
 ---
 

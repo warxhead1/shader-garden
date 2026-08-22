@@ -7,7 +7,7 @@
 // count).
 // Usage: node tools/test/mp-solo-parity.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
-import { launch, serveSite, sleep, gotoSafe, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu, SITE_ROOT } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -39,17 +39,28 @@ function freshPage(errors) {
 
 // Same GL2Runtime.setUniforms spy garden-movement.mjs's armSpies uses — every
 // value object passed to any setUniforms() call across the whole session,
-// solo or MP, keyed only by which uniform names appeared.
+// solo or MP, keyed only by which uniform names appeared. Patches BOTH
+// runtime classes (mirrors mp-clock.mjs's armClockSpy): a fresh #/garden
+// mount lands on WebGPU by default post-§0.5-C1-supersession, and "Edit
+// here" below rebuilds it onto WebGL2 mid-run (GARDEN-IDE is GLSL-only), so
+// a solo session's setUniforms calls genuinely cross both classes in one
+// run. The underlying invariant (no uPeerCount/uSpongeOn on the solo route)
+// is backend-independent — applyMpUniforms()'s `if (!room) return;` guard
+// doesn't care which runtime called setUniforms — but only patching
+// GL2Runtime would leave the WebGPU-backed portion of the session
+// unobserved and understate what this check actually exercised.
 async function armUniformSpy(page) {
   await page.evaluateOnNewDocument(() => {
     window.__uniformCalls = [];
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const orig = mod.GL2Runtime.prototype.setUniforms;
-      mod.GL2Runtime.prototype.setUniforms = function (values) {
+    function patch(Ctor) {
+      const orig = Ctor.prototype.setUniforms;
+      Ctor.prototype.setUniforms = function (values) {
         window.__uniformCalls.push({ ...values });
         return orig.call(this, values);
       };
-    }).catch(() => {});
+    }
+    import('./js/runtime/webgl2.js').then((mod) => patch(mod.GL2Runtime)).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => patch(mod.GPURuntime)).catch(() => {});
   });
 }
 
@@ -68,6 +79,13 @@ async function clickTrayItem(page, name) {
   const errors = [];
   const page = await freshPage(errors);
   await armUniformSpy(page);
+  await gotoSafe(page, BASE + '/index.html', { waitUntil: 'domcontentloaded', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  // This suite asserts on rendering output (uniform calls, probe titles) —
+  // proves a real GPU adapter is behind it, not a silent SwiftShader/
+  // llvmpipe landing that would report green while proving nothing.
+  const gpuInfoA = await assertRealGpu(page);
+  check('(setup) real GPU adapter present', !!gpuInfoA, JSON.stringify(gpuInfoA));
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
@@ -106,6 +124,10 @@ async function clickTrayItem(page, name) {
 {
   const errors = [];
   const page = await freshPage(errors);
+  await gotoSafe(page, BASE + '/index.html', { waitUntil: 'domcontentloaded', timeout: 20000 })
+    .catch((e) => errors.push('NAV: ' + e.message));
+  const gpuInfoB = await assertRealGpu(page);
+  check('(setup) real GPU adapter present', !!gpuInfoB, JSON.stringify(gpuInfoB));
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));

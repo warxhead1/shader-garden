@@ -10,7 +10,7 @@
 // Usage: node tools/test/mp-two-browsers.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
 import { startRelay } from '../../server/relay.mjs';
-import { launch, serveSite, sleep, gotoSafe, derivePort, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -49,6 +49,14 @@ if (!skyComponent) { console.log('FAIL setup: scene.glsl has no "sky" @component
 
 /* ---------------- page helpers ---------------- */
 
+// Multiplayer spec §0.5 C1 is SUPERSEDED: WGSL's custom-uniform bank was
+// raised 32->128 slots (mp/integration 69e2f2f, ceb35ea) and scene.wgsl
+// restored a real sg_peers_sdf body, so 50 flattened peer scalars now fit
+// comfortably and multiplayer is no longer WebGL2-pinned. This suite used to
+// block canvas.getContext('webgpu') here to force the fallback path; that's
+// removed — both pages now run whatever backend runtime-host.js's
+// prefer:'auto' picks for a fresh room mount, WebGPU by default on this box,
+// same as every other suite post-migration.
 async function forceTextareaFallback(page) {
   await page.setRequestInterception(true);
   page.on('request', (req) => {
@@ -57,17 +65,27 @@ async function forceTextareaFallback(page) {
   });
 }
 
-// Same GL2Runtime.setUniforms spy garden-movement.mjs's armSpies uses.
+// Same GL2Runtime.setUniforms spy garden-movement.mjs's armSpies uses, now
+// patching BOTH runtime classes (setUniforms is shared surface on
+// GL2Runtime and GPURuntime — see mp-clock.mjs's armClockSpy for the same
+// pattern) since a fresh room mount can land on either backend post-§0.5-C1-
+// supersession. Also stashes the live instance on window.__runtime so
+// readCanvasPixel below can dispatch its readback without caring which
+// backend is live.
 async function armUniformSpy(page) {
   await page.evaluateOnNewDocument(() => {
     window.__uniformCalls = [];
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const orig = mod.GL2Runtime.prototype.setUniforms;
-      mod.GL2Runtime.prototype.setUniforms = function (values) {
+    window.__runtime = null;
+    function patch(Ctor) {
+      const orig = Ctor.prototype.setUniforms;
+      Ctor.prototype.setUniforms = function (values) {
+        window.__runtime = this;
         window.__uniformCalls.push({ ...values });
         return orig.call(this, values);
       };
-    }).catch(() => {});
+    }
+    import('./js/runtime/webgl2.js').then((mod) => patch(mod.GL2Runtime)).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => patch(mod.GPURuntime)).catch(() => {});
   });
 }
 
@@ -88,13 +106,16 @@ async function armUniformSpy(page) {
 async function armPrepareSpy(page) {
   await page.evaluateOnNewDocument(() => {
     window.__prepareCalls = 0;
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const orig = mod.GL2Runtime.prototype.prepareShader;
-      mod.GL2Runtime.prototype.prepareShader = function (...args) {
+    function patch(Ctor) {
+      const orig = Ctor.prototype.prepareShader;
+      Ctor.prototype.prepareShader = function (...args) {
+        window.__runtime = this;
         window.__prepareCalls++;
         return orig.apply(this, args);
       };
-    }).catch(() => {});
+    }
+    import('./js/runtime/webgl2.js').then((mod) => patch(mod.GL2Runtime)).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => patch(mod.GPURuntime)).catch(() => {});
   });
 }
 
@@ -149,11 +170,13 @@ function sendOnLiveSocket(page, msg) {
 async function waitForNextOnPage(page, type, afterIndex, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const found = await page.evaluate((t, i) => {
+    // Playwright's page.evaluate() takes exactly one arg (unlike puppeteer's
+    // variadic form) — bundle type/afterIndex into a single object.
+    const found = await page.evaluate(({ t, i }) => {
       const log = window.__wsReceived;
       for (let idx = i + 1; idx < log.length; idx++) if (log[idx].t === t) return { msg: log[idx], index: idx };
       return null;
-    }, type, afterIndex);
+    }, { t: type, i: afterIndex });
     if (found) return found;
     await sleep(50);
   }
@@ -161,7 +184,7 @@ async function waitForNextOnPage(page, type, afterIndex, timeoutMs = 8000) {
 }
 
 function freshPage(errors) {
-  return browser.newPage().then((page) => {
+  return browser.newPage().then(async (page) => {
     page.on('console', (m) => {
       if (m.type() === 'error' && !(m.location().url || '').includes('cm-editor.bundle.js')) errors.push(m.text());
     });
@@ -171,9 +194,13 @@ function freshPage(errors) {
 }
 
 async function waitLive(page, label) {
+  // Playwright's waitForFunction(pageFunction, arg, options) puts arg BEFORE
+  // options (opposite of puppeteer) — this predicate takes no data arg, so
+  // undefined must be passed explicitly or the options object silently binds
+  // as arg and the intended timeout never applies.
   const ok = await page.waitForFunction(
     () => document.querySelector('.garden-mp-status')?.textContent === 'live',
-    { timeout: 15000 },
+    undefined, { timeout: 15000 },
   ).then(() => true).catch(() => false);
   if (!ok) console.log(`  [${label}] never reached 'live' status`);
   return ok;
@@ -206,26 +233,45 @@ async function replaceAllAndType(page, text) {
   await page.keyboard.type(text, { delay: 2 });
 }
 
-// requestAnimationFrame read, not a bare evaluate() — the mounted canvas
-// has preserveDrawingBuffer:false, so a readback from an ordinary evaluate()
-// (a later tick, after the browser has already presented and implicitly
+// Backend-agnostic pixel read, dispatching off window.__runtime (stashed by
+// armUniformSpy/armPrepareSpy above) the same way production's probe.js
+// picks between GPURuntime and GL2Runtime: `typeof rt.readPixel ===
+// 'function'` means WebGPU, which has its own offscreen
+// copyTextureToBuffer readback that never touches the visible canvas or its
+// context type. The WebGL2 branch still needs the requestAnimationFrame
+// read, not a bare evaluate() — the mounted canvas has
+// preserveDrawingBuffer:false, so a readback from an ordinary evaluate() (a
+// later tick, after the browser has already presented and implicitly
 // cleared the backbuffer) reads all-zero even though the canvas visibly
 // shows content. Confirmed empirically developing mp-compile-swap.mjs; see
 // that file's readCanvasPixel header for the full story.
 async function readCanvasPixel(page, clientX, clientY) {
-  return page.evaluate((cx, cy) => new Promise(async (resolve) => {
+  // Playwright's page.evaluate() takes exactly one arg — bundle the coords.
+  return page.evaluate(({ cx, cy }) => new Promise(async (resolve) => {
+    const rt = window.__runtime;
+    if (!rt) { resolve(null); return; }
     const { canvasPixelCoords } = await import('./js/runtime/uniforms.js');
-    const canvas = document.querySelector('.garden-canvas');
+    const canvas = rt.canvas || document.querySelector('.garden-canvas');
     if (!canvas) { resolve(null); return; }
+    const [x, y] = canvasPixelCoords(canvas, cx, cy);
+    if (typeof rt.readPixel === 'function') {
+      // WebGPU: offscreen readback (probe.js's contract — drawing-buffer
+      // pixel coords, sim clock time, not wall time), never touches the
+      // visible canvas or its context type.
+      if (rt.isContextLost()) { resolve(null); return; }
+      const t = rt.getClock().time;
+      const px = await rt.readPixel(x, y, t).catch(() => null);
+      resolve(px ? Array.from(px) : null);
+      return;
+    }
     const gl = canvas.getContext('webgl2');
     if (!gl || gl.isContextLost()) { resolve(null); return; }
-    const [x, y] = canvasPixelCoords(canvas, cx, cy);
     requestAnimationFrame(() => {
       const px = new Uint8Array(4);
       gl.readPixels(Math.round(x), Math.round(y), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       resolve(Array.from(px));
     });
-  }), clientX, clientY);
+  }), { cx: clientX, cy: clientY });
 }
 const colorDist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 
@@ -260,6 +306,15 @@ check('(setup) captured B\'s own welcome (selfId, epoch)', !!bWelcome, JSON.stri
 let bIdx = bWelcome ? bWelcome.index : -1;
 check('(setup) B\'s welcome already lists A as a member (join order)',
   !!bWelcome && (bWelcome.msg.members || []).some((m) => m.id === aSelfId), JSON.stringify(bWelcome));
+
+// Both pages assert on rendering output (peer-tracked uniforms, canvas
+// pixels) below, so this proves they got a real GPU adapter, not a silent
+// SwiftShader fallback that would report green while proving nothing about
+// the real multiplayer render path. No backend pin (see forceTextareaFallback's
+// header) — assertRealGpu() is backend-agnostic, unlike assertRealWebgl2().
+const gpuInfoA = await assertRealGpu(pageA);
+const gpuInfoB = await assertRealGpu(pageB);
+check('(setup) A and B both have a live real-GPU adapter (not SwiftShader/llvmpipe)', !!gpuInfoA && !!gpuInfoB, `A=${JSON.stringify(gpuInfoA)} B=${JSON.stringify(gpuInfoB)}`);
 
 // NOTE: no roster-DOM assertion here — .garden-roster does not exist post-
 // mount on EITHER page (armSocketSpy's header note: runtimeHost() wipes the
@@ -340,49 +395,81 @@ check('(setup) A\'s editor mounted EDITABLE (A is the holder)', aReadOnly === fa
 const skyPixelBaseline = await readCanvasPixel(pageB, 720, 60);
 check('(setup) got B\'s baseline sky pixel', Array.isArray(skyPixelBaseline), JSON.stringify(skyPixelBaseline));
 
-const GOOD_BODY = 'vec3 sg_sky_color(vec3 rd, float time) {\n  return vec3(1.0, 0.0, 1.0); // magenta — never produced by the real gradient\n}';
-await replaceAllAndType(pageA, GOOD_BODY);
-// edit.js debounces recompile at 300ms; net.js's sendDraft debounces the
-// wire send at another 150ms on top of that (DRAFT_DEBOUNCE_MS) — both only
-// fire after a PASSING local recompile (§6.2 step 1), so this also proves
-// the draft mirrors something that actually compiled, not raw keystrokes.
-const draftMirrored = await pageB.waitForFunction(
-  (expected) => document.querySelector('.component-editor .code-editor')?.value === expected,
-  { timeout: 6000 },
-  GOOD_BODY,
-).then(() => true).catch(() => false);
-check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', draftMirrored);
-const bStillReadOnly = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);
-check('(d) B\'s editor is still read-only after the draft landed (never becomes editable)', bStillReadOnly === true);
+// PRODUCT BUG (found here, not a test artifact — see final report): both
+// "Edit here" mounts above (A's and B's) fail on this box. Root cause,
+// confirmed independently of this suite with a single-page repro: index.js's
+// onEditHere calls `rh.rebuild({ prefer: 'webgl2' })` on a WebGPU-backed
+// mount (GARDEN-IDE is GLSL-only) BEFORE mounting the editor — but
+// runtime-host.js's build() does an unscoped `host.replaceChildren()` on
+// the shared `stage` element (core/runtime-host.js:89), and index.js
+// appends the probe panel itself (`panel.el`, the ancestor of the very
+// "Edit here" button just clicked) as a direct child of that same `stage`
+// (organs/garden/index.js:538). The rebuild wipes the probe panel—and the
+// editHost the click handler is about to append into—out of the live DOM
+// mid-handler. mountComponentEditor() still resolves cleanly (no console
+// error, no rejection: confirmed cm-editor.bundle.js loads fine and
+// createDocAdapter/setLanguage/etc all complete) and its result IS
+// appended — just into a detached subtree nobody will ever see. Every
+// #/garden mount now defaults to WebGPU (§0.5 C1 supersession), so this
+// fires on EVERY "Edit here" click, not just in a room. Not fixable here:
+// core/runtime-host.js and organs/garden/index.js are outside this lane's
+// seven files. The two checks above and everything below that depends on
+// an editor existing are therefore honest FAILs, not vacuous ones — this
+// is exactly what "the editor never mounted" should look like.
+const editorsAvailable = !!(await pageA.$('.component-editor .code-editor')) && !!(await pageB.$('.component-editor .code-editor'));
+if (editorsAvailable) {
+  const GOOD_BODY = 'vec3 sg_sky_color(vec3 rd, float time) {\n  return vec3(1.0, 0.0, 1.0); // magenta — never produced by the real gradient\n}';
+  await replaceAllAndType(pageA, GOOD_BODY);
+  // edit.js debounces recompile at 300ms; net.js's sendDraft debounces the
+  // wire send at another 150ms on top of that (DRAFT_DEBOUNCE_MS) — both only
+  // fire after a PASSING local recompile (§6.2 step 1), so this also proves
+  // the draft mirrors something that actually compiled, not raw keystrokes.
+  // Playwright's waitForFunction(pageFunction, arg, options) puts arg BEFORE
+  // options (opposite of puppeteer's (fn, options, ...args)).
+  const draftMirrored = await pageB.waitForFunction(
+    (expected) => document.querySelector('.component-editor .code-editor')?.value === expected,
+    GOOD_BODY, { timeout: 6000 },
+  ).then(() => true).catch(() => false);
+  check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', draftMirrored);
+  const bStillReadOnly = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);
+  check('(d) B\'s editor is still read-only after the draft landed (never becomes editable)', bStillReadOnly === true);
 
-// NOT a pixel diff — see armPrepareSpy's header note on why a fixed sky
-// pixel is the wrong oracle for "did a draft alone recompile B's scene"
-// (scene.glsl's clouds drift independently of any compile). This checks the
-// one function a commit (and ONLY a commit) drives instead.
-const prepareCallsAfterDraft = await pageB.evaluate(() => window.__prepareCalls);
-check('(setup) a draft (not yet committed) never triggers B\'s prepareShader (no recompile from a draft)',
-  prepareCallsAfterDraft === 0, 'calls=' + prepareCallsAfterDraft);
+  // NOT a pixel diff — see armPrepareSpy's header note on why a fixed sky
+  // pixel is the wrong oracle for "did a draft alone recompile B's scene"
+  // (scene.glsl's clouds drift independently of any compile). This checks the
+  // one function a commit (and ONLY a commit) drives instead.
+  const prepareCallsAfterDraft = await pageB.evaluate(() => window.__prepareCalls);
+  check('(setup) a draft (not yet committed) never triggers B\'s prepareShader (no recompile from a draft)',
+    prepareCallsAfterDraft === 0, 'calls=' + prepareCallsAfterDraft);
 
-/* ---------------- (b) A's commit changes B's RENDERED scene ---------------- */
+  /* ---------------- (b) A's commit changes B's RENDERED scene ---------------- */
 
-await pageA.click('.component-editor .btn-primary').catch(() => {}); // Commit
-const committed = await pageA.waitForFunction(
-  () => document.querySelector('.component-editor .pill')?.textContent === 'committed',
-  { timeout: 10000 },
-).then(() => true).catch(() => false);
-check('(setup) A\'s commit succeeded', committed);
+  await pageA.click('.component-editor .btn-primary').catch(() => {}); // Commit
+  const committed = await pageA.waitForFunction(
+    () => document.querySelector('.component-editor .pill')?.textContent === 'committed',
+    undefined, { timeout: 10000 },
+  ).then(() => true).catch(() => false);
+  check('(setup) A\'s commit succeeded', committed);
 
-const prepareCallsAfterCommit = await pageB.evaluate(() => window.__prepareCalls);
-check('(b) A\'s commit DID trigger B\'s prepareShader exactly once (the compile+swap actually ran)',
-  prepareCallsAfterCommit === 1, 'calls=' + prepareCallsAfterCommit);
+  const prepareCallsAfterCommit = await pageB.evaluate(() => window.__prepareCalls);
+  check('(b) A\'s commit DID trigger B\'s prepareShader exactly once (the compile+swap actually ran)',
+    prepareCallsAfterCommit === 1, 'calls=' + prepareCallsAfterCommit);
 
-const skyPixelAfterCommit = await readCanvasPixel(pageB, 720, 60);
-const dist = Array.isArray(skyPixelAfterCommit) ? colorDist(skyPixelBaseline, skyPixelAfterCommit) : -1;
-// Threshold and rationale match mp-compile-swap.mjs's own pixel check: the
-// committed color still passes through mainImage's tonemap/fog before it's
-// a pixel, so this is a distance-from-baseline check, not exact-magenta.
-check('(b) A\'s commit changed B\'s RENDERED canvas pixel (not just a JS variable)',
-  dist >= 25, 'baseline=' + JSON.stringify(skyPixelBaseline) + ' afterCommit=' + JSON.stringify(skyPixelAfterCommit) + ' dist=' + dist.toFixed(1));
+  const skyPixelAfterCommit = await readCanvasPixel(pageB, 720, 60);
+  const dist = Array.isArray(skyPixelAfterCommit) ? colorDist(skyPixelBaseline, skyPixelAfterCommit) : -1;
+  // Threshold and rationale match mp-compile-swap.mjs's own pixel check: the
+  // committed color still passes through mainImage's tonemap/fog before it's
+  // a pixel, so this is a distance-from-baseline check, not exact-magenta.
+  check('(b) A\'s commit changed B\'s RENDERED canvas pixel (not just a JS variable)',
+    dist >= 25, 'baseline=' + JSON.stringify(skyPixelBaseline) + ' afterCommit=' + JSON.stringify(skyPixelAfterCommit) + ' dist=' + dist.toFixed(1));
+} else {
+  check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', false, 'BLOCKED: editor never mounted, see product-bug note above');
+  check('(d) B\'s editor is still read-only after the draft landed (never becomes editable)', false, 'BLOCKED: editor never mounted');
+  check('(setup) a draft (not yet committed) never triggers B\'s prepareShader (no recompile from a draft)', false, 'BLOCKED: editor never mounted');
+  check('(setup) A\'s commit succeeded', false, 'BLOCKED: editor never mounted');
+  check('(b) A\'s commit DID trigger B\'s prepareShader exactly once (the compile+swap actually ran)', false, 'BLOCKED: editor never mounted');
+  check('(b) A\'s commit changed B\'s RENDERED canvas pixel (not just a JS variable)', false, 'BLOCKED: editor never mounted');
+}
 
 check('no console errors on A', errorsA.length === 0, errorsA.join(' | '));
 check('no console errors on B', errorsB.length === 0, errorsB.join(' | '));

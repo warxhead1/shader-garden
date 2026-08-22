@@ -13,7 +13,7 @@
 // Usage: node tools/test/mp-compile-swap.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
 import { startRelay } from '../../server/relay.mjs';
-import { launch, serveSite, sleep, gotoSafe, derivePort, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -107,43 +107,85 @@ async function forceTextareaFallback(page) {
   });
 }
 
+// Stashes the live runtime instance on window.__runtime the same way
+// mp-clock.mjs/mp-two-browsers.mjs's spies do, patching BOTH
+// GL2Runtime.prototype and GPURuntime.prototype — a fresh #/garden/:room
+// mount lands on WebGPU by default (§0.5 C1 supersession), so
+// readCanvasPixel/isContextLost below need to know which backend is live to
+// dispatch correctly. setUniforms is shared, harmless surface to hook (same
+// choice mp-two-browsers.mjs's armUniformSpy makes) — this suite doesn't
+// read window.__uniformCalls itself, only uses the spy for its window.__runtime
+// side effect.
+async function armRuntimeSpy(page) {
+  await page.evaluateOnNewDocument(() => {
+    window.__runtime = null;
+    function patch(Ctor) {
+      const orig = Ctor.prototype.setUniforms;
+      Ctor.prototype.setUniforms = function (values) {
+        window.__runtime = this;
+        return orig.call(this, values);
+      };
+    }
+    import('./js/runtime/webgl2.js').then((mod) => patch(mod.GL2Runtime)).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => patch(mod.GPURuntime)).catch(() => {});
+  });
+}
+
 // canvasPixelCoords is the runtime's own client-coords -> drawing-buffer
 // conversion (uniforms.js, shared by the mouse-probe path) — reused here
 // instead of hand-deriving DPR/renderScale math a second time.
 //
-// The read is done inside a requestAnimationFrame callback, not a bare
-// evaluate() — confirmed empirically: the mounted canvas has
-// preserveDrawingBuffer:false (webgl2.js's default), so a readPixels() from
-// an ordinary evaluate() (which runs on its own later tick, after the
-// browser has already presented and implicitly cleared the backbuffer)
-// reads back all-zero even though the canvas visibly shows real content.
-// Reading synchronously inside a rAF callback lands right after that
-// frame's own draw, before the next clear — the same reason every OTHER
-// pixel-oracle suite in this repo (comp0.mjs, garden-camera.mjs, perf.mjs)
-// calls renderOnce() immediately before its own readPixels(); this suite
-// can't call renderOnce() directly (no handle on the mounted runtime), so
+// Backend-agnostic dispatch off window.__runtime (armRuntimeSpy above),
+// mirroring production's probe.js: GPURuntime.readPixel() renders into its
+// own dedicated offscreen texture and never touches the visible canvas, so
+// it needs no rAF trick. The WebGL2 branch still reads inside a
+// requestAnimationFrame callback, not a bare evaluate() — confirmed
+// empirically: the mounted canvas has preserveDrawingBuffer:false
+// (webgl2.js's default), so a readPixels() from an ordinary evaluate()
+// (which runs on its own later tick, after the browser has already
+// presented and implicitly cleared the backbuffer) reads back all-zero even
+// though the canvas visibly shows real content. Reading synchronously
+// inside a rAF callback lands right after that frame's own draw, before the
+// next clear — the same reason every OTHER pixel-oracle suite in this repo
+// (comp0.mjs, garden-camera.mjs, perf.mjs) calls renderOnce() immediately
+// before its own readPixels(); this suite can't call renderOnce() directly
+// on the WebGL2 path (no handle on the mounted runtime without the spy), so
 // rAF is the equivalent hook for a canvas driving its own render loop.
 async function readCanvasPixel(page, clientX, clientY) {
-  return page.evaluate((cx, cy) => new Promise(async (resolve) => {
+  // Playwright's page.evaluate() takes exactly one arg — bundle the coords.
+  return page.evaluate(({ cx, cy }) => new Promise(async (resolve) => {
+    const rt = window.__runtime;
+    if (!rt) { resolve(null); return; }
     const { canvasPixelCoords } = await import('./js/runtime/uniforms.js');
-    const canvas = document.querySelector('.garden-canvas');
+    const canvas = rt.canvas || document.querySelector('.garden-canvas');
     if (!canvas) { resolve(null); return; }
+    const [x, y] = canvasPixelCoords(canvas, cx, cy);
+    if (typeof rt.readPixel === 'function') {
+      if (rt.isContextLost()) { resolve(null); return; }
+      const t = rt.getClock().time;
+      const px = await rt.readPixel(x, y, t).catch(() => null);
+      resolve(px ? Array.from(px) : null);
+      return;
+    }
     const gl = canvas.getContext('webgl2');
     if (!gl || gl.isContextLost()) { resolve(null); return; }
-    const [x, y] = canvasPixelCoords(canvas, cx, cy);
     requestAnimationFrame(() => {
       const px = new Uint8Array(4);
       gl.readPixels(Math.round(x), Math.round(y), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       resolve(Array.from(px));
     });
-  }), clientX, clientY);
+  }), { cx: clientX, cy: clientY });
 }
 
+// Backend-agnostic: both GL2Runtime and GPURuntime expose their own
+// isContextLost() (webgpu.js listens for device.lost the same way the
+// canvas-level WEBGL_lose_context extension signals GL2Runtime) — dispatch
+// through window.__runtime instead of assuming a WebGL2 context exists at
+// all, which would return null unconditionally on a WebGPU-backed mount.
 async function isContextLost(page) {
   return page.evaluate(() => {
-    const canvas = document.querySelector('.garden-canvas');
-    const gl = canvas && canvas.getContext('webgl2');
-    return gl ? gl.isContextLost() : null;
+    const rt = window.__runtime;
+    return rt ? rt.isContextLost() : null;
   });
 }
 
@@ -158,12 +200,22 @@ page.on('console', (m) => {
 });
 page.on('pageerror', (e) => errors.push(String(e)));
 await forceTextareaFallback(page);
+await armRuntimeSpy(page);
 
 await gotoSafe(page, roomUrl(ROOM), { waitUntil: 'networkidle2', timeout: 20000 }).catch((e) => errors.push('NAV: ' + e.message));
 await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+// This suite asserts on rendering output (canvas pixels, context-loss
+// state) as its core I4 evidence — proves a real GPU adapter is behind it,
+// not a silent SwiftShader/llvmpipe landing that would report green while
+// proving nothing about the real broken-commit-survival path.
+const gpuInfo = await assertRealGpu(page);
+check('(setup) receiver has a live real-GPU adapter (not SwiftShader/llvmpipe)', !!gpuInfo, JSON.stringify(gpuInfo));
+// Playwright's waitForFunction(pageFunction, arg, options) puts arg BEFORE
+// options (opposite of puppeteer's (fn, options, ...args)) — this predicate
+// takes no data arg, so undefined must be passed explicitly.
 const receiverLive = await page.waitForFunction(
   () => document.querySelector('.garden-mp-status')?.textContent === 'live',
-  { timeout: 15000 },
+  undefined, { timeout: 15000 },
 ).then(() => true).catch(() => false);
 check('(setup) receiver reached live status', receiverLive);
 
@@ -171,18 +223,40 @@ check('(setup) receiver reached live status', receiverLive);
 // non-holder read-only mirror path (§5.2), so its buffer is a second,
 // independent witness for "the broken commit never landed": a successful
 // commit calls the mirror's setBody(); a rejected one never touches it.
+//
+// PRODUCT BUG (see mp-two-browsers.mjs's report for the full trace, found
+// independently there and reproduced with a single non-MP page): every
+// "Edit here" click on a WebGPU-backed mount silently fails to show an
+// editor — index.js's onEditHere rebuilds onto WebGL2 first
+// (rh.rebuild({prefer:'webgl2'})), but runtime-host.js's build() does an
+// unscoped host.replaceChildren() on the shared `stage` element, which is
+// also the probe panel's own parent — the rebuild detaches the panel (and
+// the editHost inside it) mid-handler. mountComponentEditor() still
+// resolves and appends its result, just into an orphaned subtree. Every
+// #/garden/:room mount now defaults to WebGPU, so this fires here every
+// time. Not fixable in this lane (core/runtime-host.js and
+// organs/garden/index.js are outside the seven owned files) — the
+// editor-dependent checks below are gated on editorAvailable and degrade to
+// honest FAILs rather than crashing; the core I4 pixel/context-loss
+// evidence below does NOT depend on the editor and runs regardless.
 const opened = await clickTrayItem(page, skyComponent.name);
 check('(setup) opened the sky probe panel', opened);
 await sleep(200);
 await page.click('.probe-panel .btn:not(.probe-edit-link)').catch(() => {}); // "Edit here"
-await page.waitForSelector('.component-editor .code-editor', { timeout: 8000 }).catch(() => errors.push('no component editor'));
+await page.waitForSelector('.component-editor .code-editor', { timeout: 8000 }).catch(() => {});
 await sleep(300);
+const editorAvailable = !!(await page.$('.component-editor .code-editor'));
+if (!editorAvailable) console.log('  [note] editor never mounted (product bug — see comment above); gating editor-dependent checks');
 
-const readOnlyBefore = await page.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);
-check('(setup) the receiver\'s editor mounted read-only (not the holder)', readOnlyBefore === true, 'got ' + readOnlyBefore);
+const readOnlyBefore = editorAvailable
+  ? await page.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null)
+  : null;
+check('(setup) the receiver\'s editor mounted read-only (not the holder)', editorAvailable && readOnlyBefore === true, editorAvailable ? 'got ' + readOnlyBefore : 'BLOCKED: editor never mounted');
 
-const editorBodyBefore = await page.$eval('.component-editor .code-editor', (el) => el.value).catch(() => null);
-check('(setup) the editor shows the pristine sky body before any commit', editorBodyBefore === skyComponent.source);
+const editorBodyBefore = editorAvailable
+  ? await page.$eval('.component-editor .code-editor', (el) => el.value).catch(() => null)
+  : null;
+check('(setup) the editor shows the pristine sky body before any commit', editorAvailable && editorBodyBefore === skyComponent.source, editorAvailable ? '' : 'BLOCKED: editor never mounted');
 
 const skyPixelBefore = await readCanvasPixel(page, 720, 60);
 const charPixelBefore = await readCanvasPixel(page, 720, 380);
@@ -223,7 +297,7 @@ const epochAfterBroken = brokenCommitEcho ? brokenCommitEcho.msg.epoch : epoch +
 
 const rejectedStatus = await page.waitForFunction(
   () => /didn.t compile here/.test(document.querySelector('.garden-mp-status')?.textContent || ''),
-  { timeout: 15000 },
+  undefined, { timeout: 15000 },
 ).then(() => true).catch(() => false);
 check('(a) receiver shows a visible rejection notice for the broken commit', rejectedStatus);
 
@@ -231,14 +305,23 @@ check('(a) canvas not context-lost after the broken commit', (await isContextLos
 
 const skyPixelAfterBroken = await readCanvasPixel(page, 720, 60);
 const charPixelAfterBroken = await readCanvasPixel(page, 720, 380);
+// RGB channels only, NOT the full RGBA array: both canvas contexts here are
+// created with {alpha:false} (webgl2.js's default / GPURuntime's opaque
+// format), so alpha always reads back 255 regardless of what the RGB
+// channels actually show — `pixel.some(v => v > 0)` on the full array is
+// trivially true even for a fully black (context-lost-looking) frame,
+// satisfied by alpha alone. Scoping to slice(0,3) makes this a real
+// non-blank check on color, not a vacuous alpha check.
 check('(a) canvas still renders non-blank at the sky oracle after the broken commit',
-  Array.isArray(skyPixelAfterBroken) && skyPixelAfterBroken.some((v) => v > 0), JSON.stringify(skyPixelAfterBroken));
+  Array.isArray(skyPixelAfterBroken) && skyPixelAfterBroken.slice(0, 3).some((v) => v > 0), JSON.stringify(skyPixelAfterBroken));
 check('(a) canvas still renders non-blank at the character oracle after the broken commit',
-  Array.isArray(charPixelAfterBroken) && charPixelAfterBroken.some((v) => v > 0), JSON.stringify(charPixelAfterBroken));
+  Array.isArray(charPixelAfterBroken) && charPixelAfterBroken.slice(0, 3).some((v) => v > 0), JSON.stringify(charPixelAfterBroken));
 
-const editorBodyAfterBroken = await page.$eval('.component-editor .code-editor', (el) => el.value).catch(() => null);
+const editorBodyAfterBroken = editorAvailable
+  ? await page.$eval('.component-editor .code-editor', (el) => el.value).catch(() => null)
+  : null;
 check('(a) the read-only mirror STILL shows the pristine body — the broken commit never advanced local state (I4 epoch guard)',
-  editorBodyAfterBroken === skyComponent.source, 'got ' + JSON.stringify(editorBodyAfterBroken));
+  editorAvailable && editorBodyAfterBroken === skyComponent.source, editorAvailable ? 'got ' + JSON.stringify(editorBodyAfterBroken) : 'BLOCKED: editor never mounted');
 
 /* ---------------- then: a GOOD commit still applies ---------------- */
 
@@ -250,12 +333,13 @@ sendRaw(attacker, { t: 'commit', componentId: 'sky', body: GOOD_BODY, baseEpoch:
 const goodCommitEcho = await waitForNext(attacker, 'commit', idx);
 check('(b) the relay broadcast the good commit', !!goodCommitEcho, JSON.stringify(goodCommitEcho));
 
-const editorBodyAfterGood = await page.waitForFunction(
+// Playwright's waitForFunction(pageFunction, arg, options) puts arg BEFORE
+// options (opposite of puppeteer's (fn, options, ...args)).
+const editorBodyAfterGood = editorAvailable && await page.waitForFunction(
   (expected) => document.querySelector('.component-editor .code-editor')?.value === expected,
-  { timeout: 15000 },
-  GOOD_BODY,
+  GOOD_BODY, { timeout: 15000 },
 ).then(() => true).catch(() => false);
-check('(b) the read-only mirror picks up the good commit\'s body', editorBodyAfterGood);
+check('(b) the read-only mirror picks up the good commit\'s body', editorAvailable && editorBodyAfterGood, editorAvailable ? '' : 'BLOCKED: editor never mounted');
 
 const skyPixelAfterGood = await readCanvasPixel(page, 720, 60);
 // Not an exact-magenta check: sg_sky_color()'s vec3(1,0,1) output still

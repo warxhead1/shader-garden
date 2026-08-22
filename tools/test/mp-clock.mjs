@@ -6,7 +6,7 @@
 // not just the steady-state convergence.
 // Usage: node tools/test/mp-clock.mjs   (first: npm ci in tools/test)
 import { startRelay } from '../../server/relay.mjs';
-import { launch, serveSite, sleep, gotoSafe, derivePort } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu } from './browser.mjs';
 
 let failed = false;
 function check(name, cond, detail) {
@@ -54,47 +54,67 @@ const relayUrlFor = (room) => `ws://127.0.0.1:${RELAY_PORT}/${room}`;
 const roomUrl = (room) => `${BASE}/index.html?relay=${encodeURIComponent(relayUrlFor(room))}#/garden/${room}`;
 
 function freshPage(errors) {
-  return browser.newPage().then((page) => {
+  return browser.newPage().then(async (page) => {
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     page.on('pageerror', (e) => errors.push(String(e)));
     return page;
   });
 }
 
-// Spies GL2Runtime.getClock() (same prototype-patch technique
-// garden-movement.mjs's armSpies uses for setUniforms) so window.__clock
-// always holds the CURRENT live clock instance. A rebuild constructs a
-// fresh GL2Runtime with a fresh clock — object identity changes — so
-// __clockGen (bumped only when the returned instance differs from the last
-// one seen) is this page's own proof a rebuild actually produced a new
-// runtime, without reaching into runtime-host's private state.
+// Multiplayer used to be WebGL2-pinned (spec §0.5 C1) because the flattened
+// peer-uniform scheme didn't fit WGSL's uniform bank — that section is now
+// SUPERSEDED (the bank was raised 32 -> 128 slots, mp/integration commit
+// 69e2f2f) and multiplayer runs on whichever backend the mount actually
+// picks, WebGPU on this box. So this suite has to work on either backend —
+// GL2Runtime and GPURuntime share the same getClock()/setUniforms()/
+// isContextLost()/renderOnce() surface (GARDEN-1's whole point), so one spy
+// patches both prototypes and window.__runtime always holds whichever
+// instance is actually live, same prototype-patch technique
+// garden-movement.mjs's armSpies uses for setUniforms. window.__clock/
+// __clockGen work exactly as before: a rebuild constructs a fresh runtime
+// with a fresh clock — object identity changes — so __clockGen (bumped only
+// when the returned instance differs from the last one seen) is this page's
+// own proof a rebuild actually produced a new runtime, without reaching
+// into runtime-host's private state.
 async function armClockSpy(page) {
   await page.evaluateOnNewDocument(() => {
     window.__clock = null;
     window.__clockGen = 0;
+    window.__runtime = null;
     let last = null;
-    import('./js/runtime/webgl2.js').then((mod) => {
-      const orig = mod.GL2Runtime.prototype.getClock;
-      mod.GL2Runtime.prototype.getClock = function () {
+    function patch(Ctor) {
+      const orig = Ctor.prototype.getClock;
+      Ctor.prototype.getClock = function () {
         const c = orig.call(this);
+        window.__runtime = this;
         if (c !== last) { last = c; window.__clock = c; window.__clockGen++; }
         return c;
       };
-    }).catch(() => {});
+    }
+    import('./js/runtime/webgl2.js').then((mod) => patch(mod.GL2Runtime)).catch(() => {});
+    import('./js/runtime/webgpu.js').then((mod) => patch(mod.GPURuntime)).catch(() => {});
   });
 }
 
+// Playwright's waitForFunction(pageFunction, arg, options) puts `arg` BEFORE
+// `options` — the opposite of puppeteer's (pageFunction, options, ...args).
+// A call with no data arg still has to pass `undefined` explicitly, or the
+// options object silently binds as `arg` instead and the real timeout is
+// never applied (confirmed empirically: this exact mistake made a genuine
+// rebuild-detection predicate compare against an options object instead of
+// the intended number, so it could never resolve true and always hit
+// Playwright's own default timeout instead of the one written here).
 async function waitLive(page, label) {
   const ok = await page.waitForFunction(
     () => document.querySelector('.garden-mp-status')?.textContent === 'live',
-    { timeout: 15000 },
+    undefined, { timeout: 15000 },
   ).then(() => true).catch(() => false);
   if (!ok) console.log(`  [${label}] never reached 'live' status`);
   return ok;
 }
 
 async function waitForClock(page, label) {
-  const ok = await page.waitForFunction(() => window.__clock != null, { timeout: 10000 })
+  const ok = await page.waitForFunction(() => window.__clock != null, undefined, { timeout: 10000 })
     .then(() => true).catch(() => false);
   if (!ok) console.log(`  [${label}] __clock never appeared`);
   return ok;
@@ -132,6 +152,12 @@ check('(setup) B reached live status', await waitLive(pageB, 'B'));
 check('(setup) A has a clock', await waitForClock(pageA, 'A'));
 check('(setup) B has a clock', await waitForClock(pageB, 'B'));
 
+// Proves both pages actually got a real GPU adapter, not a silent
+// SwiftShader fallback that would report green while proving nothing about
+// the real clock-sync path.
+await assertRealGpu(pageA);
+await assertRealGpu(pageB);
+
 // Let the min-RTT estimator take its first (fast-cadence) sample and the
 // per-frame deadband loop actually seek — timeSync.start() sends the first
 // ping immediately on `welcome`, so this settle window is generous, not
@@ -160,22 +186,32 @@ check('(a) both pages sampled a clock on every attempt', samples.every((s) => s.
 check(`(a) converged clocks stay within ${Math.round(CLOCK_TOLERANCE_S * 1000)}ms of each other`,
   worst <= CLOCK_TOLERANCE_S, 'worst diff=' + (worst * 1000).toFixed(1) + 'ms ' + JSON.stringify(samples));
 
-// ---- forced rebuild on B: WEBGL_lose_context -> onLost:'rebuild' -> a
-// fresh runtime whose clock starts at 0 and has never heard of the room's
-// shared time until onBuild() re-arms it (§3.2). ----
+// ---- forced rebuild on B: force the LIVE runtime's context/device lost ->
+// onLost:'rebuild' -> a fresh runtime whose clock starts at 0 and has never
+// heard of the room's shared time until onBuild() re-arms it (§3.2).
+// Backend-dependent: WebGL2's WEBGL_lose_context extension has no WebGPU
+// equivalent — GPURuntime treats its own GPUDevice's destroy() as the loss
+// trigger (webgpu.js: `device.lost.then(...)`; destroy() is the
+// spec-documented way to force that promise to settle) — so this branches
+// on which runtime window.__runtime (armClockSpy) actually captured, rather
+// than assuming WebGL2.
 const genBefore = await pageB.evaluate(() => window.__clockGen);
 await pageB.evaluate(() => {
-  const canvas = document.querySelector('.garden-canvas');
-  const gl = canvas && canvas.getContext('webgl2');
+  const rt = window.__runtime;
+  if (!rt) return;
+  if (typeof rt.readPixel === 'function') { rt._device.destroy(); return; } // WebGPU
+  const gl = rt.canvas && rt.canvas.getContext('webgl2');
   const ext = gl && gl.getExtension('WEBGL_lose_context');
   if (ext) ext.loseContext();
 });
+// Real-GPU runs are slower than headless-shell was, and this box runs many
+// suites concurrently — give the rebuild real margin (20s, up from the
+// original 10s) before calling it a genuine miss rather than contention.
 const rebuilt = await pageB.waitForFunction(
   (gen) => window.__clockGen > gen,
-  { timeout: 10000 },
-  genBefore,
+  genBefore, { timeout: 20000 },
 ).then(() => true).catch(() => false);
-check('(b) forcing WEBGL_lose_context on B produced a fresh clock instance (rebuild happened)', rebuilt);
+check('(b) forcing B\'s live runtime context/device lost produced a fresh clock instance (rebuild happened)', rebuilt);
 
 // Re-convergence needs its own settle window: the fresh clock starts at
 // time=0, arbitrarily far from the room's shared time, so the deadband loop

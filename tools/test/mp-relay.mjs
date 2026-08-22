@@ -109,9 +109,32 @@ async function connectClient(port, room, name) {
   return client;
 }
 
-const PORT = derivePort(31337); // distinct offset — never the static-server default port
-const relay = startRelay({ port: PORT, host: '127.0.0.1' });
-await waitForEvent(relay.server, 'listening', 5000, 'relay server listening');
+let PORT = derivePort(31337); // reassigned by the bind retry below; distinct offset — never the static-server default port; see the bind retry below
+// Retries on EADDRINUSE. derivePort() can land on any listener on the box:
+// mp-clock died in 0s against an unrelated service on 9101 and took a whole
+// 15-minute gate run with it. This suite deliberately does NOT import
+// browser.mjs (it is pure node — no browser, no playwright), so the retry is
+// inlined here the same way derivePort() above already is.
+let relay = null;
+for (let attempt = 0; attempt < 3 && !relay; attempt++) {
+  // PORT itself is reassigned, not a local: every client below dials PORT, so
+  // binding a fallback without updating it would connect them all to nothing.
+  PORT = derivePort(31337 + attempt * 7);
+  const candidate = startRelay({ port: PORT, host: '127.0.0.1' });
+  const err = await new Promise((resolve) => {
+    const onErr = (e) => resolve(e || new Error('relay listen failed'));
+    candidate.server.once('error', onErr);
+    candidate.server.once('listening', () => { candidate.server.off('error', onErr); resolve(null); });
+  });
+  if (!err) { relay = candidate; break; }
+  try { candidate.close(); } catch { /* never listened */ }
+  if (err.code !== 'EADDRINUSE') throw err; // a real failure — retrying hides it
+}
+if (!relay) throw new Error('could not bind a relay port after 3 attempts');
+// No waitForEvent(relay.server, 'listening') here any more: the bind loop
+// above already awaited that event to decide whether the port was free, and
+// 'listening' fires exactly once — a second wait registers a listener for
+// something that has already happened and times out after 5s.
 
 try {
   /* ---------- 1) join: two clients, one room ---------- */

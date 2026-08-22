@@ -12,8 +12,7 @@
 // second, ordinary puppeteer page playing the receiver.
 // Usage: node tools/test/mp-compile-swap.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
-import { startRelay } from '../../server/relay.mjs';
-import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT, startRelayOnFreePort } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -26,12 +25,15 @@ function check(name, cond, detail) {
 
 // §C5: own explicit relay port, distinct from serveSite()'s default and the
 // other MP suites' own offsets.
-const RELAY_PORT = derivePort(630);
-const relay = startRelay({ port: RELAY_PORT, host: '127.0.0.1' });
-await new Promise((resolve, reject) => {
-  relay.server.once('listening', resolve);
-  relay.server.once('error', reject);
-});
+
+// Retries on EADDRINUSE — derivePort() can land on any listener on the
+// box; see startRelayOnFreePort() in browser.mjs.
+const { relay, port: RELAY_PORT } = await startRelayOnFreePort({ offset: 630 });
+// No second wait for 'listening' here: startRelayOnFreePort() already awaited
+// that event to decide the port was free, and it fires exactly ONCE. Waiting
+// again registers a listener for something that has already happened, which
+// hangs the suite forever with no output at all rather than failing.
+
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();

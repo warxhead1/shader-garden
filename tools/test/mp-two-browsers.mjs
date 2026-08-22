@@ -9,8 +9,7 @@
 //   (d) B's editor is read-only and mirrors A's (uncommitted) draft.
 // Usage: node tools/test/mp-two-browsers.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
-import { startRelay } from '../../server/relay.mjs';
-import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT, startRelayOnFreePort } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -23,12 +22,15 @@ function check(name, cond, detail) {
 
 // §C5: own explicit relay port, distinct from serveSite()'s default and the
 // other MP suites' own offsets.
-const RELAY_PORT = derivePort(620);
-const relay = startRelay({ port: RELAY_PORT, host: '127.0.0.1' });
-await new Promise((resolve, reject) => {
-  relay.server.once('listening', resolve);
-  relay.server.once('error', reject);
-});
+
+// Retries on EADDRINUSE — derivePort() can land on any listener on the
+// box; see startRelayOnFreePort() in browser.mjs.
+const { relay, port: RELAY_PORT } = await startRelayOnFreePort({ offset: 620 });
+// No second wait for 'listening' here: startRelayOnFreePort() already awaited
+// that event to decide the port was free, and it fires exactly ONCE. Waiting
+// again registers a listener for something that has already happened, which
+// hangs the suite forever with no output at all rather than failing.
+
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -106,12 +108,24 @@ async function armUniformSpy(page) {
 async function armPrepareSpy(page) {
   await page.evaluateOnNewDocument(() => {
     window.__prepareCalls = 0;
+    // prepareShader() being CALLED and the new program being live are two
+    // different instants: handleRemoteCommit compiles a side program, then
+    // calls commit() on it to swap. Counting only calls says "B started",
+    // which is not a safe moment to sample a pixel. __commitsApplied is the
+    // swap itself, so a reader can wait for the world to have actually
+    // changed rather than for the attempt to have begun.
+    window.__commitsApplied = 0;
     function patch(Ctor) {
       const orig = Ctor.prototype.prepareShader;
       Ctor.prototype.prepareShader = function (...args) {
         window.__runtime = this;
         window.__prepareCalls++;
-        return orig.apply(this, args);
+        return Promise.resolve(orig.apply(this, args)).then((prepared) => {
+          if (!prepared || typeof prepared.commit !== 'function') return prepared;
+          const origCommit = prepared.commit.bind(prepared);
+          prepared.commit = (...cargs) => { window.__commitsApplied++; return origCommit(...cargs); };
+          return prepared;
+        });
       };
     }
     import('./js/runtime/webgl2.js').then((mod) => patch(mod.GL2Runtime)).catch(() => {});
@@ -259,9 +273,54 @@ async function replaceAllAndType(page, text) {
 // cleared the backbuffer) reads all-zero even though the canvas visibly
 // shows content. Confirmed empirically developing mp-compile-swap.mjs; see
 // that file's readCanvasPixel header for the full story.
-async function readCanvasPixel(page, clientX, clientY) {
+// The sky is sampled at SEVERAL points, not one. scene.glsl's clouds
+// component drifts an fbm field with a hard smoothstep edge across the sky
+// (see armPrepareSpy's header), so a single fixed point sits on a moving
+// boundary: the same magenta commit measured 73.8, 41.0, 40.6, 33.1 and 31.1
+// on one point across runs, and once 12.9 — low enough to fail a threshold
+// the commit genuinely cleared, because drift happened to cancel part of the
+// change at that one spot. Averaging the per-point distance over a spread of
+// sky points leaves the commit's contribution intact (it shifts the WHOLE sky)
+// while the drift, which moves each point differently, largely cancels.
+// Lowering the threshold instead would have hidden a real regression class:
+// a commit that recolours only part of the sky.
+// Nine points, not five: the committed magenta is already fully saturated
+// (GOOD_BODY below) and still lands ~35 mean after mainImage's tonemap and
+// fog, so the signal cannot honestly be made larger — only the noise smaller.
+// Widening the spread is pure variance reduction; it changes nothing about
+// what is asserted.
+const SKY_POINTS = [
+  [480, 45], [560, 50], [640, 60], [720, 60], [800, 55],
+  [880, 70], [960, 50], [600, 90], [840, 90],
+];
+
+// Both samples are taken at the SAME frozen sim time. That is what actually
+// removes the cloud noise: rt.readPixel(x, y, t) is a deterministic offscreen
+// render at time t, so with t pinned the cloud field is in an IDENTICAL
+// position before and after, and the whole measured difference is the
+// committed sky colour. Averaging alone did not work — the fbm drift is one
+// global field, so the sample points move together rather than cancelling
+// (nine points still produced 25.9 against a threshold of 25).
+const SKY_SAMPLE_T = 2.0;
+
+async function readSkyPixels(page) {
+  const out = [];
+  for (const [x, y] of SKY_POINTS) out.push(await readCanvasPixel(page, x, y, SKY_SAMPLE_T));
+  return out;
+}
+
+// Mean distance over the points that read back on BOTH samples. Returns -1
+// when nothing readable overlaps, so a dead canvas still fails rather than
+// scoring 0 and looking like "no change".
+function meanSkyDist(before, after) {
+  const pairs = before.map((b, i) => [b, after[i]]).filter(([b, a]) => Array.isArray(b) && Array.isArray(a));
+  if (!pairs.length) return -1;
+  return pairs.reduce((sum, [b, a]) => sum + colorDist(b, a), 0) / pairs.length;
+}
+
+async function readCanvasPixel(page, clientX, clientY, fixedT) {
   // Playwright's page.evaluate() takes exactly one arg — bundle the coords.
-  return page.evaluate(({ cx, cy }) => new Promise(async (resolve) => {
+  return page.evaluate(({ cx, cy, ft }) => new Promise(async (resolve) => {
     const rt = window.__runtime;
     if (!rt) { resolve(null); return; }
     const { canvasPixelCoords } = await import('./js/runtime/uniforms.js');
@@ -273,7 +332,10 @@ async function readCanvasPixel(page, clientX, clientY) {
       // pixel coords, sim clock time, not wall time), never touches the
       // visible canvas or its context type.
       if (rt.isContextLost()) { resolve(null); return; }
-      const t = rt.getClock().time;
+      // ft pins the sim clock so two samples are comparable frame-for-frame;
+      // without it a caller gets "now", which includes wherever the clouds
+      // have drifted to.
+      const t = ft ?? rt.getClock().time;
       const px = await rt.readPixel(x, y, t).catch(() => null);
       resolve(px ? Array.from(px) : null);
       return;
@@ -285,7 +347,7 @@ async function readCanvasPixel(page, clientX, clientY) {
       gl.readPixels(Math.round(x), Math.round(y), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       resolve(Array.from(px));
     });
-  }), { cx: clientX, cy: clientY });
+  }), { cx: clientX, cy: clientY, ft: fixedT });
 }
 const colorDist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 
@@ -407,8 +469,8 @@ check('(setup) A\'s "Edit here" mounted', await openEditHere(pageA));
 const aReadOnly = await pageA.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);
 check('(setup) A\'s editor mounted EDITABLE (A is the holder)', aReadOnly === false, 'got ' + aReadOnly);
 
-const skyPixelBaseline = await readCanvasPixel(pageB, 720, 60);
-check('(setup) got B\'s baseline sky pixel', Array.isArray(skyPixelBaseline), JSON.stringify(skyPixelBaseline));
+const skyPixelBaseline = await readSkyPixels(pageB);
+check('(setup) got B\'s baseline sky pixels', skyPixelBaseline.some(Array.isArray), JSON.stringify(skyPixelBaseline));
 
 // PRODUCT BUG (found here, not a test artifact — see final report): both
 // "Edit here" mounts above (A's and B's) fail on this box. Root cause,
@@ -507,7 +569,7 @@ if (editorsAvailable) {
   const bWaitT0 = Date.now();
   for (let i = 0; i < 80; i++) {
     const done = await pageB.evaluate(() =>
-      window.__prepareCalls > 0 || /didn.t compile here/.test(document.body.innerText));
+      window.__commitsApplied > 0 || /didn.t compile here/.test(document.body.innerText));
     if (done) break;
     await sleep(100);
   }
@@ -521,8 +583,8 @@ if (editorsAvailable) {
   check('(b) A\'s commit DID trigger B\'s prepareShader exactly once (the compile+swap actually ran)',
     prepareCallsAfterCommit === 1, 'calls=' + prepareCallsAfterCommit + ' after ' + bWaitMs + 'ms bStatus=' + JSON.stringify(bStatus));
 
-  const skyPixelAfterCommit = await readCanvasPixel(pageB, 720, 60);
-  const dist = Array.isArray(skyPixelAfterCommit) ? colorDist(skyPixelBaseline, skyPixelAfterCommit) : -1;
+  const skyPixelAfterCommit = await readSkyPixels(pageB);
+  const dist = meanSkyDist(skyPixelBaseline, skyPixelAfterCommit);
   // Threshold and rationale match mp-compile-swap.mjs's own pixel check: the
   // committed color still passes through mainImage's tonemap/fog before it's
   // a pixel, so this is a distance-from-baseline check, not exact-magenta.

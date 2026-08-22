@@ -5,8 +5,7 @@
 // single most likely bug in the whole slice", so it's exercised directly,
 // not just the steady-state convergence.
 // Usage: node tools/test/mp-clock.mjs   (first: npm ci in tools/test)
-import { startRelay } from '../../server/relay.mjs';
-import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, startRelayOnFreePort } from './browser.mjs';
 
 let failed = false;
 function check(name, cond, detail) {
@@ -21,12 +20,15 @@ function check(name, cond, detail) {
 // the SAME pid-based port and the second just aliases the first). Offset
 // 610 is this suite's own slice of the pid-derived port space, distinct
 // from serveSite()'s default (offset 0) and the other three MP suites'.
-const RELAY_PORT = derivePort(610);
-const relay = startRelay({ port: RELAY_PORT, host: '127.0.0.1' });
-await new Promise((resolve, reject) => {
-  relay.server.once('listening', resolve);
-  relay.server.once('error', reject);
-});
+
+// Retries on EADDRINUSE — derivePort() can land on any listener on the
+// box; see startRelayOnFreePort() in browser.mjs.
+const { relay, port: RELAY_PORT } = await startRelayOnFreePort({ offset: 610 });
+// No second wait for 'listening' here: startRelayOnFreePort() already awaited
+// that event to decide the port was free, and it fires exactly ONCE. Waiting
+// again registers a listener for something that has already happened, which
+// hangs the suite forever with no output at all rather than failing.
+
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();

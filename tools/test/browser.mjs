@@ -40,6 +40,7 @@
 //   SG_ALLOW_SOFTWARE=1     tolerate a swiftshader adapter (GPU-less CI)
 //   SG_USE_REAL_DISPLAY=1   skip the Xvfb wrap and use $DISPLAY as-is
 import { createRequire } from 'node:module';
+import { startRelay } from '../../server/relay.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
@@ -113,6 +114,34 @@ export function chromePath() {
 // default (same pid, same formula) — servesite.mjs uses this to pre-squat it.
 export function derivePort(offset = 0) {
   return 8100 + ((process.pid + offset) % 1800);
+}
+
+// derivePort() is pid-derived, so a suite's port is effectively arbitrary
+// within 8100-9899 and can collide with anything else listening on this box.
+// serveSite() has always retried (SERVE_ATTEMPTS/RETRY_PORT_STEP below); the
+// MP relay did not, and an unhandled 'error' on its server is a hard crash
+// before the first check runs. Observed for real: mp-clock died in 0s with
+// EADDRINUSE on 127.0.0.1:9101 against an unrelated 29-hour-old service,
+// failing a whole 15-minute gate run for a reason that had nothing to do with
+// the code under test. Same retry discipline as serveSite, one helper, so the
+// four relay suites cannot drift apart on it.
+export async function startRelayOnFreePort(opts = {}) {
+  const { offset = 0, host = '127.0.0.1', ...rest } = opts;
+  let lastErr = null;
+  for (let attempt = 0; attempt < SERVE_ATTEMPTS; attempt++) {
+    const port = derivePort(offset + attempt * RETRY_PORT_STEP);
+    const relay = startRelay({ port, host, ...rest });
+    const err = await new Promise((resolve) => {
+      const onErr = (e) => resolve(e || new Error('relay listen failed'));
+      relay.server.once('error', onErr);
+      relay.server.once('listening', () => { relay.server.off('error', onErr); resolve(null); });
+    });
+    if (!err) return { relay, port };
+    lastErr = err;
+    try { relay.close(); } catch { /* never listened */ }
+    if (err.code !== 'EADDRINUSE') break; // a real failure — retrying just hides it
+  }
+  throw new Error(`could not bind a relay port after ${SERVE_ATTEMPTS} attempts: ${lastErr?.code || lastErr?.message}`);
 }
 
 const PROBE_TIMEOUT_MS = 3000, PROBE_INTERVAL_MS = 100, PROBE_FETCH_TIMEOUT_MS = 500;

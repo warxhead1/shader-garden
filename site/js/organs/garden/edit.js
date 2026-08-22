@@ -22,27 +22,48 @@ const DEBOUNCE_MS = 300;
  *   component: import('./parse.js').Component,
  *   initialBody: string,   // current body — edited if a prior session edited it
  *   originalBody: string,  // component.source, for Revert
- *   recompile: (body: string) => { ok: boolean, log: string, messages: object[] },
+ *   recompile?: (body: string) => { ok: boolean, log: string, messages: object[] },
  *     // messages are in FULL-SCENE user-source coordinates (webgl2.js's own
  *     // remap) — this module subtracts component.startLine to land on
- *     // editor-local line numbers.
+ *     // editor-local line numbers. Omit when readOnly is true — a mirror
+ *     // never compiles anything itself (docs/multiplayer-spec.md §5.2).
+ *   readOnly?: boolean,     // MP §5.2: non-holders get the SAME editor, live-
+ *     // mirroring the holder's draft via the returned handle's setBody().
+ *   onCommit?: (body: string) => Promise<{ok: boolean, reason?: string}>,
+ *     // MP §6.2: present only for the lease holder in a room — renders a
+ *     // "Commit" button that validates locally (via `recompile`) before
+ *     // ever sending.
  * }}
- * @returns {Promise<{ el: HTMLElement, destroy: () => void }>}
+ * @returns {Promise<{ el: HTMLElement, destroy: () => void, setBody?: (body: string) => void }>}
  */
-export async function mountComponentEditor({ component, initialBody, originalBody, recompile }) {
-  const wrap = el('div', 'component-editor');
+export async function mountComponentEditor({ component, initialBody, originalBody, recompile, readOnly = false, onCommit }) {
+  const wrap = el('div', 'component-editor' + (readOnly ? ' component-editor-readonly' : ''));
   const statusRow = el('div', 'component-editor-status');
-  const statusPill = el('span', 'pill', 'unchanged');
+  const statusPill = el('span', 'pill', readOnly ? 'mirroring' : 'unchanged');
   const revertBtn = el('button', 'btn btn-small btn-ghost', 'Revert');
   revertBtn.type = 'button';
+  const commitBtn = el('button', 'btn btn-small btn-primary', 'Commit');
+  commitBtn.type = 'button';
   // GARDEN-1: live recompile always goes through webgl2.js's synchronous
   // setShader (see index.js's onEditHere, which rebuilds a WebGPU-backed
   // mount onto WebGL2 before this module ever mounts) — true regardless of
   // which backend was rendering a moment ago, so this is unconditional.
-  const backendNote = el('span', 'muted component-editor-note', 'editing runs on WebGL2');
-  statusRow.append(statusPill, backendNote, revertBtn);
+  const backendNote = el('span', 'muted component-editor-note',
+    readOnly ? 'read-only — live view of the holder’s draft' : 'editing runs on WebGL2');
+  statusRow.append(statusPill, backendNote);
+  if (readOnly) {
+    // §5.2: a mirror has nothing of its own to revert or commit — watching
+    // is the whole feature, not a stripped-down editor.
+  } else {
+    statusRow.append(revertBtn);
+    if (onCommit) statusRow.append(commitBtn);
+  }
 
-  const { adapter, kind } = await createDocAdapter(initialBody, (body) => scheduleRecompile(body));
+  const { adapter, kind } = await createDocAdapter(
+    initialBody,
+    readOnly ? () => {} : (body) => scheduleRecompile(body),
+    { readOnly },
+  );
   await adapter.setLanguage(glslMode); // no-op on the textarea fallback
   const diagList = createDiagnosticsList(adapter);
 
@@ -50,6 +71,7 @@ export async function mountComponentEditor({ component, initialBody, originalBod
 
   let debounce = null;
   let destroyed = false;
+  let lastGoodBody = initialBody; // §6.2: only ever send/commit a body that PASSED recompile() locally
 
   function setStatus(kindCls, label) {
     statusPill.className = 'pill ' + kindCls;
@@ -85,6 +107,7 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     adapter.setDiagnostics(msgs);
     if (kind === 'textarea') diagList.render(msgs);
     setStatus(res.ok ? 'ok' : 'err', res.ok ? 'ok' : 'error');
+    if (res.ok) lastGoodBody = body; // §6.2: Commit only ever sends a body that passed the SAME local check
   }
 
   function scheduleRecompile(body) {
@@ -92,14 +115,41 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     debounce = setTimeout(() => runRecompile(body), DEBOUNCE_MS);
   }
 
-  revertBtn.addEventListener('click', () => {
-    clearTimeout(debounce);
-    adapter.setValue(originalBody);
-    runRecompile(originalBody); // immediate — Revert shouldn't wait out the debounce
-  });
+  if (!readOnly) {
+    revertBtn.addEventListener('click', () => {
+      clearTimeout(debounce);
+      adapter.setValue(originalBody);
+      runRecompile(originalBody); // immediate — Revert shouldn't wait out the debounce
+    });
+  }
+
+  // §6.2 step 1: the holder validates locally (recompile(), which already
+  // ran on every debounced keystroke above) before EVER sending. A body
+  // that never got a passing recompile can't be committed — commitBtn only
+  // exists when onCommit was passed (index.js only does that for the
+  // in-room holder), and lastGoodBody only advances on res.ok above, so a
+  // currently-broken buffer has nothing eligible to send.
+  if (onCommit) {
+    commitBtn.addEventListener('click', async () => {
+      if (destroyed) return;
+      commitBtn.disabled = true;
+      setStatus('ok', 'committing…');
+      const { ok, reason } = await onCommit(lastGoodBody).catch(() => ({ ok: false, reason: 'network' }));
+      if (destroyed) return;
+      commitBtn.disabled = false;
+      setStatus(ok ? 'ok' : 'err', ok ? 'committed' : ('rejected' + (reason ? ': ' + reason : '')));
+    });
+  }
 
   return {
     el: wrap,
+    // §5.2: the ONLY way a read-only mirror's buffer changes — net.js's
+    // onDraft callback (via index.js) calls this as the holder types.
+    // Never wired to onChange/recompile: a mirror does not typecheck.
+    setBody(body) {
+      if (!readOnly || destroyed) return;
+      adapter.setValue(body);
+    },
     destroy() {
       destroyed = true;
       clearTimeout(debounce);

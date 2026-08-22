@@ -12,8 +12,16 @@ import { loadEditorBundle } from './bundle-loader.js';
 import { createCodeMirror } from './doc-adapter-codemirror.js';
 import { createTextarea } from './doc-adapter-textarea.js';
 
-export async function createDocAdapter(doc, onChange) {
+// `opts.readOnly` (multiplayer §5.2): the CM adapter blocks user typing by
+// making the content DOM non-editable (see doc-adapter-codemirror.js — the
+// vendor chunk's createEditor() facade has no readOnly param, so this is
+// enforced at the adapter layer rather than via CM's own EditorState.readOnly
+// facet, which would need a facade/bundle change); the textarea fallback
+// uses the native `readonly` attribute. Both still accept programmatic
+// setValue() calls — that's how a read-only mirror updates.
+export async function createDocAdapter(doc, onChange, opts = {}) {
+  const { readOnly = false } = opts;
   const bundle = await loadEditorBundle();
-  if (bundle) return { adapter: createCodeMirror(bundle, { doc, onChange }), kind: 'cm' };
-  return { adapter: createTextarea(doc, onChange), kind: 'textarea' };
+  if (bundle) return { adapter: createCodeMirror(bundle, { doc, onChange, readOnly }), kind: 'cm' };
+  return { adapter: createTextarea(doc, onChange, { readOnly }), kind: 'textarea' };
 }

@@ -34,7 +34,7 @@
       "id": "garden",
       "title": "The garden",
       "entry": "js/organs/garden/index.js",
-      "routes": ["/garden"],
+      "routes": ["/garden", "/garden/:room"],
       "emits": ["backend.selected.v1", "runtime.lost.v1", "garden.probe.opened.v1"],
       "consumes": [],
       "caps": ["gpu"],

@@ -1173,6 +1173,76 @@ a:hover { text-decoration: underline; }
 .dgc-dispatch-note { margin: 0 0 0.5rem; font-size: 0.8rem; color: var(--muted); }
 .dgc-dispatch-list { margin: 0; padding-left: 1.2rem; font: 0.85rem var(--mono); }
 
+/* ================= garden multiplayer (docs/multiplayer-spec.md) ================= */
+/* Built ONLY when #/garden/:room is live (index.js's `room` gate, I3) — a
+   solo #/garden visit never creates any element these rules could match. */
+
+.garden-mp-status { color: var(--muted); }
+.garden-mp-status-live      { color: var(--ok);   border-color: rgba(52, 211, 153, 0.5); }
+.garden-mp-status-connecting,
+.garden-mp-status-retrying  { color: #fbbf24;     border-color: rgba(251, 191, 36, 0.5); }
+.garden-mp-status-failed,
+.garden-mp-status-no-relay  { color: var(--err);  border-color: rgba(251, 113, 133, 0.5); }
+.garden-mp-room { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Docked panel, same footprint convention as .garden-uniform-inspector —
+   roster + lease + game state all live together so a glance covers "who's
+   here, who's building, what phase are we in" without opening anything. */
+.garden-mp-panel {
+  position: absolute;
+  top: 4.2rem;
+  right: 1rem;
+  width: min(18rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 6rem);
+  overflow: auto;
+  padding: 0.8rem 0.9rem;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.garden-mp-head {
+  font: 700 0.72rem var(--font);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0.6rem 0 0.15rem;
+}
+.garden-mp-head:first-child { margin-top: 0; }
+
+.garden-roster { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.garden-roster-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+}
+.garden-hue-swatch {
+  flex: none;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+.garden-roster-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.garden-lease-badge { flex: none; font-size: 0.65rem; color: var(--cyan); border-color: rgba(34, 211, 238, 0.4); }
+
+.garden-lease-line { font-size: 0.82rem; margin-bottom: 0.35rem; }
+.garden-lease-btn { align-self: flex-start; margin-bottom: 0.2rem; }
+
+.garden-game-pill { align-self: flex-start; margin-bottom: 0.3rem; }
+.garden-game-hiding  { color: #c4b5fd; border-color: rgba(196, 181, 253, 0.5); }
+.garden-game-seeking { color: var(--cyan); border-color: rgba(34, 211, 238, 0.5); }
+.garden-game-over    { color: var(--muted); }
+.garden-game-line { font-size: 0.8rem; margin-bottom: 0.4rem; }
+.garden-game-start { align-self: flex-start; }
+.garden-ghost-note { font-size: 0.72rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
+
+/* §5.2: the read-only draft mirror — same box, dimmed to read as "watching"
+   rather than "editing". */
+.component-editor-readonly { opacity: 0.92; }
+.code-editor-readonly { cursor: default; background: var(--bg-raise); }
+
 /* ================= misc ================= */
 
 @media (prefers-reduced-motion: reduce) {

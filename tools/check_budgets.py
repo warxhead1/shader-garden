@@ -159,7 +159,13 @@ FILES = [
     # (wgCustomUniformNames) + accessor-function generator (genCustomAccessors)
     # that wrapWgsl() now injects — webgpu.js's WGSL side of setUniforms().
     # Actual 108/115. Raised deliberately, this commit.
-    ("site/js/runtime/wrap.js", 115, None),
+    # 115 -> 150: the multiplayer bank raise (32 -> 128 slots). The added
+    # lines are the derived vec4f count, the loud-overflow throw that
+    # replaced a silent .slice(), and the comment explaining why 32 was
+    # never a real constraint -- the reasoning is the point, since treating
+    # that number as fixed is what produced a wrong spec ruling.
+    # Actual 137/150. Raised deliberately, this commit.
+    ("site/js/runtime/wrap.js", 150, None),
     # COMP-1 (v2 §7.3 item 24): DAG validation shared by the composition
     # player and admission's SG-S08 rule — kept OUT of the admission
     # aggregate below (its byte budget was already near its COMP-0 cap) since
@@ -239,7 +245,11 @@ AGGREGATES = [
     # 51200 -> 53248 bytes: GARDEN-1's wrap.js growth (see its own row above)
     # rolls up into this aggregate; LOC stays under the existing cap.
     # Actual 1137 LOC / 51763 bytes. Raised deliberately, this commit.
-    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1150, 53248),
+    # 1150 -> 1210 LOC / 53248 -> 55296 bytes: carries wrap.js's own raise above
+    # (the 32 -> 128 uniform-bank change). The admission files in this
+    # aggregate are untouched by that work; only wrap.js moved.
+    # Actual 1166 LOC / 53693 bytes. Raised deliberately, this commit.
+    ("site/js/organs/admission/*.js|site/js/runtime/wrap.js", 1210, 55296),
     # GARDEN-0 (v2 §8.29): the whole organ, one cap — parse/probe/panel/index.
     # 700 -> 1150: GARDEN-IDE "depth" wave — component tray + keyboard nav
     # (tray.js), the static connections analyzer (connections.js, has its own

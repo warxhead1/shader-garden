@@ -19,6 +19,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # GitHub's runners have no GPU. Every suite that calls assertRealGpu()/
+      # assertRealWebgl2() would refuse the SwiftShader adapter it finds here,
+      # so CI accepts software deliberately and the suites run for their DOM,
+      # protocol and logic assertions — which are the ones a GPU-less runner
+      # can actually verify.
+      #
+      # This is exactly why scripts/gpu-gate.sh exists as a local, BLOCKING
+      # pre-push hook: the "these pixels came off real hardware" claim is
+      # unprovable here by construction, so it is enforced there instead.
+      # Nothing in CI should ever be read as evidence of real-GPU behaviour.
+      SG_ALLOW_SOFTWARE: '1'
     defaults:
       run:
         # Explicit `shell: bash` runs steps with `-o pipefail` (the implicit
@@ -39,17 +51,20 @@ jobs:
         working-directory: tools/test
         run: npm ci --no-fund --no-audit
 
-      - name: Install headless browsers
-        # tools/test/browser.mjs's chromePath() and webgpu-live.mjs's
-        # fullChromiumPath() both resolve a puppeteer-cached binary under
-        # ~/.cache/puppeteer by globbing for it — installing to that exact
-        # path is what makes both scripts find these without extra env vars.
-        # chrome-headless-shell covers every suite except webgpu-live.mjs,
-        # which needs the full "chrome" build because chrome-headless-shell
-        # has no navigator.gpu at all (see webgpu-live.mjs's header comment).
+      - name: Install browser and virtual display
+        # The harness is Playwright-backed now: browser.mjs's chromePath()
+        # returns chromium.executablePath(), so the browser has to come from
+        # playwright-core's own installer, not @puppeteer/browsers.
+        #
+        # xvfb is required for EVERY suite, not just webgpu-live: launch()
+        # always runs HEADED (headless chromium reports a SwiftShader adapter
+        # and cannot prove anything about real rendering), and resolveDisplay()
+        # falls back to Xvfb when there is no Wayland socket to borrow — which
+        # is the case on a runner.
         run: |
-          npx --yes @puppeteer/browsers install chrome-headless-shell --path ~/.cache/puppeteer
-          npx --yes @puppeteer/browsers install chrome --path ~/.cache/puppeteer
+          npx --no-install playwright-core install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb
 
       - name: Prepare output/log directory
         run: mkdir -p tools/test/out/logs
@@ -172,9 +187,6 @@ jobs:
       - name: mp-solo-parity
         working-directory: tools/test
         run: node mp-solo-parity.mjs 2>&1 | tee out/logs/mp-solo-parity.log
-
-      - name: Install Xvfb (for webgpu-live.mjs's self-wrap)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
 
       - name: webgpu-live (real WebGPU execution — non-blocking, see comment)
         id: webgpu_live

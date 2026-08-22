@@ -495,6 +495,23 @@ if (editorsAvailable) {
   check('(setup) A\'s commit succeeded', committed,
     'pill=' + JSON.stringify(commitState) + ' aPrepareCalls=' + aPrepareCalls);
 
+  // Wait for B to reach a TERMINAL state before sampling it. B's apply is no
+  // longer always fast: index.js's handleRemoteCommit retries an admission
+  // TLE with backoff (up to ~1.5s) rather than stranding this client a
+  // component behind forever, so "recompiled", "gave up and toasted" and
+  // "still deciding" are three distinct states where there used to be two.
+  // Sampling the instant A's pill flips read the third one and called it the
+  // second. The predicate below is unchanged (=== 1) and this stays
+  // non-vacuous: if B never recompiles AND never rejects, the poll simply
+  // runs out and calls is still 0, which fails exactly as before.
+  const bWaitT0 = Date.now();
+  for (let i = 0; i < 80; i++) {
+    const done = await pageB.evaluate(() =>
+      window.__prepareCalls > 0 || /didn.t compile here/.test(document.body.innerText));
+    if (done) break;
+    await sleep(100);
+  }
+  const bWaitMs = Date.now() - bWaitT0;
   const prepareCallsAfterCommit = await pageB.evaluate(() => window.__prepareCalls);
   const bStatus = await pageB.evaluate(() => ({
     sawCommit: (window.__wsReceived || []).filter((m) => m.t === 'commit').length,
@@ -502,7 +519,7 @@ if (editorsAvailable) {
     notice: document.body.innerText.match(/didn.t compile here[^\n]*/)?.[0] ?? null,
   })).catch(() => null);
   check('(b) A\'s commit DID trigger B\'s prepareShader exactly once (the compile+swap actually ran)',
-    prepareCallsAfterCommit === 1, 'calls=' + prepareCallsAfterCommit + ' bStatus=' + JSON.stringify(bStatus));
+    prepareCallsAfterCommit === 1, 'calls=' + prepareCallsAfterCommit + ' after ' + bWaitMs + 'ms bStatus=' + JSON.stringify(bStatus));
 
   const skyPixelAfterCommit = await readCanvasPixel(pageB, 720, 60);
   const dist = Array.isArray(skyPixelAfterCommit) ? colorDist(skyPixelBaseline, skyPixelAfterCommit) : -1;

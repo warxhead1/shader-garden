@@ -23,11 +23,6 @@ import { loadVariantManifest, loadVariantBody } from './variants.js';
 import { attributionFor } from './attribution.js';
 import { mountJoystick } from './joystick.js';
 import { createUniformInspector } from './uniform-inspector.js';
-// §6.2 step 2 (receiving a commit): the SAME cheap static reject the
-// share-link surface already uses — gateShareLink() builds a whole
-// admitted/report/scrim result but we only ever read `.admitted` here and
-// never append `.scrim` (that's the share-link organ's own UI, not ours).
-import { gateShareLink } from '../../editor/admission-gate.js';
 
 // A pointerup within this many CSS pixels of the matching pointerdown counts
 // as a probe click; anything farther is an orbit drag (both read the same
@@ -860,6 +855,14 @@ export async function mount(ctx) {
     const trialBodies = new Map(editedBodies);
     if (body == null) trialBodies.delete(componentId); else trialBodies.set(componentId, body);
     const trialSrc = buildSceneSource(trialBodies);
+    // §6.2 step 2, cheap reject first: the SAME admission-gate.js static
+    // check the share-link surface uses. Dynamic-imported — same lazy
+    // discipline edit.js's own import('./edit.js') and the doc-adapter
+    // bundle already use, so an idle #/garden (solo OR MP-but-no-commit-yet)
+    // never fetches js/editor/* (garden.mjs (a) asserts zero editor bytes
+    // on an idle solo load). Only .admitted is read; .scrim (a DOM report)
+    // is the share-link organ's own UI and is never appended here.
+    const { gateShareLink } = await import('../../editor/admission-gate.js');
     const { admitted } = await gateShareLink(trialSrc, 'glsl').catch(() => ({ admitted: false }));
     if (!admitted) { rejectRemoteCommit(by); return false; }
     if (typeof rh.runtime.prepareShader !== 'function') { rejectRemoteCommit(by); return false; }

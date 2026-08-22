@@ -276,10 +276,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   await page.waitForSelector('.hero-canvas', { timeout: 8000 }).catch(() => {});
 
   await sleep(500);
-  const beforeHide = await page.evaluate(() => { const n = window.__raf; window.__raf = 0; return n; });
-  await page.evaluate(() => {
+  // Zero the counter and hide the tab in ONE evaluate. Split across two CDP
+  // round-trips there is a live window of a few ms between "counter = 0" and
+  // "tab is hidden" in which the still-running hero legitimately schedules a
+  // frame, so the count picked up a straggler that was requested while the
+  // tab was still VISIBLE (deterministic raf=1 here). Measuring atomically
+  // counts only frames requested after the hide, which is what this asserts.
+  const beforeHide = await page.evaluate(() => {
+    const n = window.__raf;
+    window.__raf = 0;
     Object.defineProperty(document, 'hidden', { value: true, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
+    return n;
   });
   await sleep(500);
   const whileHidden = await page.evaluate(() => window.__raf);

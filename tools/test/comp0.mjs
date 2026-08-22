@@ -55,9 +55,11 @@ check('wrapGlsl(src, 0) === wrapGlsl(src) — explicit zero is still zero',
   wrapGlsl(USER_GLSL, 0) === wrapGlsl(USER_GLSL));
 
 const USER_WGSL = 'fn mainImage(fragCoord: vec2f) -> vec4f { return vec4f(1.0); }';
-// Re-frozen for wave-4 §A+B: the custom-uniform bank doubled 16 -> 32 named
-// f32 slots (locomotion + camera-mode uniforms — see wrap.js's own comment
-// on WGSL_CUSTOM_UNIFORM_SLOTS). A deliberate C11 golden update, not drift.
+// Re-frozen for multiplayer: the custom-uniform bank went 32 -> 128 named f32
+// slots (7 peers x 7 scalars + the lease/sponge/lectern uniforms — see wrap.js's
+// own comment on WGSL_CUSTOM_UNIFORM_SLOTS for why 32 was never a hardware
+// limit). 128 slots is 32 vec4s. A deliberate C11 golden update, not drift;
+// the previous entry here recorded the same kind of update for 16 -> 32.
 const GOLDEN_WGSL = `struct SGUniforms {
   res: vec4f,
   mouse: vec4f,
@@ -65,7 +67,7 @@ const GOLDEN_WGSL = `struct SGUniforms {
   dt: f32,
   frame: f32,
   _pad: f32,
-  custom: array<vec4f, 8>,
+  custom: array<vec4f, 32>,
 }
 @group(0) @binding(0) var<uniform> U: SGUniforms;
 

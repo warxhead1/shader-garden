@@ -37,7 +37,10 @@ FILES = [
     # WebGPU attempt was actually made. Found via real-GPU verification (this
     # repo's headless suite has no navigator.gpu to have caught it either
     # way). Actual 186/195. Raised deliberately.
-    ("site/js/core/runtime-host.js", 195, None),
+    # 195 -> 205: scoping the rebuild wipe to the host's OWN canvas needs
+    # ownCanvas state threaded through build()/fallback-swap/dispose plus the
+    # comment explaining why a shared host element cannot be blanket-wiped.
+    ("site/js/core/runtime-host.js", 205, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.

@@ -366,13 +366,20 @@ export async function mount(ctx) {
   function onCamChange(e) { setCamMode(Number(e.target.value)); }
   camSelect.addEventListener('change', onCamChange);
 
+  let noGpuNotice = null; // see onBuild — retracted once a backend comes back
   function onBuild() {
     if (!rh) return; // fires once synchronously during the initial build, before rh is assigned
     backendBadge.textContent = rh.backend === 'webgpu' ? 'WebGPU' : rh.backend === 'webgl2' ? 'WebGL2' : 'no GPU';
+    // One notice, not one per failed build. runtime-host's rebuild no longer
+    // wipes the whole stage (it removes only its own canvas), so this handler
+    // has to retract its own overlay: without this a retry loop stacks a fresh
+    // notice every attempt, and a rebuild that finally SUCCEEDS would leave a
+    // stale "no GPU" sign sitting over a working canvas.
     if (!rh.backend) {
-      stage.append(centerNotice('No GPU backend is available in this browser.'));
+      if (!noGpuNotice) { noGpuNotice = centerNotice('No GPU backend is available in this browser.'); stage.append(noGpuNotice); }
       return;
     }
+    if (noGpuNotice) { noGpuNotice.remove(); noGpuNotice = null; }
     // A context-loss rebuild recompiles from the pristine glslSrc closed
     // over at runtimeHost() mount time — reassemble any session edits back
     // in before re-applying slider values, same reason as the line below.

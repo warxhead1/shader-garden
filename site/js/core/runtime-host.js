@@ -57,6 +57,13 @@ export async function runtimeHost(host, opts) {
   let disposed = false, gen = 0;
   let scale = 1, autoScale = true, lowSince = 0, highSince = 0; // ladder state
   let emaMs = null; // PERF-2: smoothed ms/frame for the honest HUD readout
+  // The one canvas THIS host created. The host is SHARED with the caller
+  // (garden hangs the probe panel, MP panel, tray and uniform inspector off
+  // it), so a rebuild removes its own canvas and nothing else. Wiping all of
+  // the host's children instead detached whatever the caller had mounted —
+  // garden's "Edit here" WebGL2 pin evicted the very panel the editor was
+  // mid-flight to mount into, silently rendering it into an orphaned subtree.
+  let ownCanvas = null;
   let lossCount = 0, lossWindowStart = 0; // PERF-3: onLost:'rebuild' circuit breaker — NOT reset by build() itself (see below), only by the window elapsing
 
   function emit(type, data) {
@@ -86,10 +93,13 @@ export async function runtimeHost(host, opts) {
     if (h.runtime) { try { h.runtime.dispose(); } catch { /* gone */ } }
     h.runtime = null;
     scale = 1; autoScale = true; lowSince = 0; highSince = 0; emaMs = null; // fresh mount/rebuild starts the ladder clean
-    host.replaceChildren(); // fresh canvas each (re)build — one context type per canvas
+    ownCanvas?.remove(); // fresh canvas each (re)build — one context type per canvas
     let canvas = document.createElement('canvas');
     if (opts.canvasClass) canvas.className = opts.canvasClass;
-    host.append(canvas);
+    // prepend, not append: the caller's overlays now survive a rebuild, and
+    // canvas-is-first-child is the invariant the old full-wipe guaranteed.
+    host.prepend(canvas);
+    ownCanvas = canvas;
 
     let picked = null;
     const attemptedWebgpu = opts.prefer !== 'webgl2' && !!opts.wgslSrc;
@@ -112,12 +122,13 @@ export async function runtimeHost(host, opts) {
         if (opts.canvasClass) fresh.className = opts.canvasClass;
         canvas.replaceWith(fresh);
         canvas = fresh;
+        ownCanvas = fresh;
       }
       picked = tryWebgl2(canvas, opts.glslSrc, opts.maxDpr);
     }
     if (disposed || my !== gen) { picked?.runtime?.dispose(); return; }
 
-    if (!picked) { canvas.remove(); h.backend = null; h.ok = false; h.log = ''; opts.onChange?.(); return; }
+    if (!picked) { canvas.remove(); ownCanvas = null; h.backend = null; h.ok = false; h.log = ''; opts.onChange?.(); return; }
     const { runtime, backend, reason, res } = picked;
     h.runtime = runtime;
     h.backend = backend;
@@ -183,7 +194,7 @@ export async function runtimeHost(host, opts) {
     dispose() {
       disposed = true;
       if (h.runtime) { try { h.runtime.dispose(); } catch { /* gone */ } h.runtime = null; }
-      host.replaceChildren();
+      ownCanvas?.remove(); ownCanvas = null; // ours only; the caller disposes its own overlays
     },
   };
 }

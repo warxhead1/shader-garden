@@ -18,7 +18,7 @@
 //    GPUDevice. WebGPU never executes headless (see browser.mjs) — real-GPU
 //    execution stays a manual launch-checklist row, stated plainly here as
 //    NOT verified by this script.
-import { launch, serveSite, gotoSafe } from './browser.mjs';
+import { launch, serveSite, gotoSafe, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 import {
   wrapGlsl,
   wrapWgsl,
@@ -104,12 +104,23 @@ check('wgChanLines(0) === 0, wgChanLines(2) === 3 (sampler + 2 textures) — the
 /* ---------- 2) GL2 two-pass demo, headless (evolved noise -> consumer) ---------- */
 
 const { server, base: BASE } = await serveSite();
+// This section is ABOUT WebGL2 semantics (raw gl.readPixels against
+// framebuffer objects created via GL2Runtime) — decision rule bullet 1 of
+// the migration brief. GL2Runtime always forces its own webgl2 context
+// regardless of the site's WebGPU-preferring default, so the assertions
+// stay meaningful; the ONLY thing the real-GPU flip changes is which driver
+// path renders them.
 const browser = await launch();
 const page = await browser.newPage();
 const consoleErrors = [];
 page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
 page.on('pageerror', (e) => consoleErrors.push(String(e)));
 await gotoSafe(page, `${BASE}/index.html#/`, { waitUntil: 'networkidle2', timeout: 20000 });
+// assertRealGpu proves the WebGPU adapter is real; it says nothing about
+// WebGL2 (a separate ANGLE/driver path — see browser.mjs), which is what
+// this section's pixel readback actually depends on, so also pin it down.
+await assertRealGpu(page);
+await assertRealWebgl2(page);
 
 const gl2 = await page.evaluate(async () => {
   const { GL2Runtime } = await import('./js/runtime/webgl2.js');

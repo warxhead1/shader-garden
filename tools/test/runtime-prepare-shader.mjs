@@ -3,7 +3,10 @@
 // commit be validated locally without ever touching the live program (I4).
 // Usage: node tools/test/runtime-prepare-shader.mjs (npm ci in tools/test first)
 //
-// 1) GL2, headless (real WebGL2 via SwiftShader — see browser.mjs):
+// 1) GL2, driven by browser.mjs's launch() against a real GPU (WebGL2
+//    resolves to the integrated AMD Raphael on this box — see browser.mjs's
+//    own GPU_ARGS header for why, and assertRealWebgl2()'s doc comment for
+//    how a suite pinning to WebGL2 proves that isn't SwiftShader):
 //    - prepareShader() compiles a SIDE program; the canvas keeps rendering
 //      the OLD program until commit() is called (I4's "never blanks/swaps
 //      early" half).
@@ -18,9 +21,12 @@
 //    - setShader() (the synchronous entry point) still reports the same
 //      {ok, log, messages} shape and still keeps the previous program on
 //      failure — the refactor didn't change its contract.
-// 2) WebGPU, code-verified against a mocked GPUDevice (WebGPU never executes
-//    headless — see browser.mjs): prepareShader() doesn't touch the live
-//    pipeline until commit(), and a prepare stamped EARLIER whose commit()
+// 2) WebGPU, code-verified against a mocked GPUDevice in plain Node — no
+//    browser needed for this half at all (unlike part 1, this never touches
+//    a real adapter; the race-safety logic it's proving lives entirely in
+//    GPURuntime's own bookkeeping, not in anything a real device can
+//    disagree with): prepareShader() doesn't touch the live pipeline until
+//    commit(), and a prepare stamped EARLIER whose commit()
 //    is called AFTER a LATER prepare's commit() already ran is rejected —
 //    the race-safety §6.1 calls out for this backend specifically.
 import { launch, serveSite, gotoSafe } from './browser.mjs';

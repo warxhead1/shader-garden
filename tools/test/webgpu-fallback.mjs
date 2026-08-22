@@ -16,19 +16,12 @@
 // This suite used to do its own Xvfb self-wrap and its own full-chromium
 // binary resolution; both are now browser.mjs's job.
 //
-// One flag needs overriding, though: browser.mjs's GPU_ARGS hardcodes
-// `--use-angle=vulkan` to get WebGPU its real nvidia/ampere adapter, but on
-// THIS box that same flag makes canvas.getContext('webgl2') return null
-// UNCONDITIONALLY — measured with a bare fresh canvas, no runtime-host.js
-// involved at all: `--use-angle=vulkan` -> webgl2:false; drop it (or pass
-// any other `--use-angle=`) -> webgl2:true, landing on the AMD iGPU via
-// Mesa's radeonsi (real hardware, not SwiftShader/llvmpipe) while WebGPU
-// still resolves to the real nvidia/ampere adapter untouched (Dawn doesn't
-// route through ANGLE). Chrome takes the LAST `--use-angle=` switch when a
-// flag repeats, and launch()'s `args` option is appended after GPU_ARGS, so
-// passing `--use-angle=default` here overrides it without touching
-// browser.mjs. This suite's whole point is the WebGL2 fallback actually
-// working, so it needs this override to exercise anything real.
+// browser.mjs's GPU_ARGS deliberately doesn't set --use-angle (see its own
+// header): WebGL2 resolves to the integrated AMD Raphael rather than the
+// discrete 3070 Ti WebGPU gets, but both are real hardware, never
+// SwiftShader — assertRealWebgl2() below is what actually checks that,
+// since assertRealGpu() only ever inspects the WebGPU adapter and gives a
+// WebGL2-pinned suite zero protection against silently landing on software.
 //
 // The precondition check matters: a WebGL2 badge only proves the FALLBACK
 // worked if WebGPU was genuinely available and attempted. Without it, a
@@ -36,7 +29,7 @@
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { launch, serveSite, sleep, gotoSafe, assertRealGpu, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu, assertRealWebgl2, SITE_ROOT } from './browser.mjs';
 
 const SCRATCH = process.env.SG_WEBGPU_OUT
   || (() => { const p = new URL('./out', import.meta.url).pathname; mkdirSync(p, { recursive: true }); return p; })();
@@ -66,7 +59,7 @@ console.log(`broken copy at ${brokenRoot} (${broken.split('target').length - 1} 
 const { server, base: BASE } = await serveSite(brokenRoot);
 let browser;
 try {
-  browser = await launch({ viewport: { width: 1280, height: 800 }, args: ['--use-angle=default'] });
+  browser = await launch({ viewport: { width: 1280, height: 800 } });
 
   const page = await browser.newPage();
 
@@ -92,6 +85,11 @@ try {
 
   const badge = await page.$eval('.badge-backend', (el) => el.textContent.trim()).catch(() => null);
   check('backend badge reads WebGL2 (fallback, not a dead mount)', badge === 'WebGL2', 'badge=' + badge);
+  // The badge alone only proves SOMETHING calling itself WebGL2 rendered —
+  // assertRealWebgl2() proves it's real hardware, not a silent SwiftShader
+  // landing that would report green while proving nothing.
+  const webgl2Renderer = await assertRealWebgl2(page);
+  check('fallback WebGL2 context is real hardware, not SwiftShader/llvmpipe', !!webgl2Renderer, 'renderer=' + webgl2Renderer);
   await page.screenshot({ path: `${SCRATCH}/wgpu-fallback-badge.png`, fullPage: true });
   console.log('  screenshot: wgpu-fallback-badge.png, badge text = ' + JSON.stringify(badge));
 

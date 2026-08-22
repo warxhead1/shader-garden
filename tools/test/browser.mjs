@@ -18,11 +18,11 @@
 // 3. Under chromium's own `--headless=new`, requestAdapter() DOES resolve —
 //    but only ever to `google/swiftshader`, and a device put into active use
 //    dies within ~1s ("A valid external Instance reference no longer
-//    exists"). Under a virtual X display (Xvfb) with HEADED chromium and
-//    `--use-angle=vulkan`, the same code gets `nvidia/ampere` and survives
-//    240 sustained frames with device.lost never firing. So: no
-//    `--headless` switch anywhere, and this module re-execs itself under
-//    xvfb-run (see ensureDisplay() below).
+//    exists"). HEADED on a real display, the same code gets `nvidia/ampere`
+//    and survives 240 sustained frames with device.lost never firing. So: no
+//    `--headless` switch anywhere. (An earlier version of this comment
+//    credited `--use-angle=vulkan` for that; it does not — see GPU_ARGS
+//    below for what that flag actually did, which was break WebGL2.)
 //
 // 4. Pixel readback from a WebGPU canvas via drawImage -> getImageData
 //    returns SOLID BLACK — measured side by side against the same frame,
@@ -201,17 +201,36 @@ with ReusableTCPServer(('127.0.0.1', port), H) as httpd:
   return { server, base: `http://127.0.0.1:${port}` };
 }
 
-// Flags that get the REAL adapter. Measured, not guessed: without
-// --use-angle=vulkan chromium picks SwiftShader even on a box with a working
-// NVIDIA Vulkan ICD, and --disable-vulkan-fallback-to-gl-for-testing is what
-// turns a silent software downgrade into a visible failure.
+// Flags that get the REAL adapter on both APIs.
+//
+// This list deliberately does NOT set --use-angle. An earlier version set
+// --use-angle=vulkan on the belief that chromium otherwise picks SwiftShader
+// even with a working NVIDIA Vulkan ICD. That belief was WRONG, and wrong in
+// an instructive way: it was extrapolated from HEADLESS probes, where it is
+// true, and never retested headed -- a correct mechanism wrapped in an
+// over-wide "always". Headed, measured side by side on this box:
+//
+//   --use-angle=vulkan  ->  WebGPU nvidia/ampere,  WebGL2 getContext() NULL
+//   (no --use-angle)    ->  WebGPU nvidia/ampere,  WebGL2 works and reads back
+//
+// WebGPU adapter selection goes through Dawn and is independent of ANGLE, so
+// the flag bought nothing on the WebGPU path while completely breaking
+// WebGL2 context creation -- which would have silently disabled every
+// WebGL2-pinned suite, the composition player (hard-wired WebGL2, no prefer
+// knob at all), and all of multiplayer (pinned to WebGL2 by spec §0.5 C1).
+// Found by lane M2 during the migration and confirmed here before removal.
+//
+// Known and accepted: WebGL2 resolves to the integrated AMD Raphael rather
+// than the discrete 3070 Ti (the spare compositor this harness borrows runs
+// on the iGPU), while WebGPU gets the discrete card. Both are real hardware
+// -- neither is SwiftShader -- and that is what the assertions below check.
+// Routing WebGL2 to the discrete GPU would mean reconfiguring the
+// compositor, which is the developer's environment, not this harness's.
 export const GPU_ARGS = [
   '--no-sandbox',
   '--disable-dev-shm-usage',
   '--enable-unsafe-webgpu',
   '--enable-features=Vulkan',
-  '--use-angle=vulkan',
-  '--disable-vulkan-fallback-to-gl-for-testing',
 ];
 
 // The software path, for a GPU-less runner. Named and separate so that
@@ -343,6 +362,27 @@ export async function assertRealGpu(page) {
       + 'Set SG_ALLOW_SOFTWARE=1 to accept this deliberately (GPU-less CI); otherwise the GPU flags are not taking effect.');
   }
   return info;
+}
+
+// The WebGL2 counterpart of assertRealGpu(). A WebGL2-pinned suite gets no
+// protection from assertRealGpu(), which only inspects the WebGPU adapter --
+// so without this a suite could pin to WebGL2, land on SwiftShader, and
+// report green while proving nothing. Returns the unmasked renderer string.
+export async function assertRealWebgl2(page) {
+  const renderer = await page.evaluate(() => {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2');
+    if (!gl) return null;
+    const d = gl.getExtension('WEBGL_debug_renderer_info');
+    return d ? String(gl.getParameter(d.UNMASKED_RENDERER_WEBGL)) : 'unknown';
+  });
+  if (renderer === null) throw new Error('assertRealWebgl2: getContext("webgl2") returned null');
+  if (process.env.SG_ALLOW_SOFTWARE) return renderer;
+  if (/swiftshader|llvmpipe|software|mesa offscreen/i.test(renderer)) {
+    throw new Error(`assertRealWebgl2: got a SOFTWARE renderer (${renderer}). `
+      + 'Set SG_ALLOW_SOFTWARE=1 to accept this deliberately (GPU-less CI).');
+  }
+  return renderer;
 }
 
 // Headed chromium on the Xvfb display, real Vulkan adapter. `headless` is

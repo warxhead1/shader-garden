@@ -1,7 +1,7 @@
 // Shader Garden — mp-relay.mjs
 // Spec §10, `mp-relay.mjs` row: a REAL relay process, end to end, with two
 // clients using Node's built-in global `WebSocket` — no new dependency, the
-// harness's only dep stays puppeteer-core (see tools/test/package.json).
+// harness's only dep stays playwright-core (see tools/test/package.json).
 //
 // The relay is started IN-PROCESS via server/relay.mjs's startRelay(), which
 // server.listen()s and returns { server, close() } — far more robust than
@@ -18,7 +18,7 @@ import { PROTOCOL, HEARTBEAT_MS } from '../../server/room.mjs';
 import { MAX_MESSAGE_BYTES } from '../../server/ws.mjs';
 
 // Same formula as browser.mjs's derivePort(), inlined rather than imported:
-// browser.mjs's TOP-LEVEL `require('puppeteer-core')` makes importing it a
+// browser.mjs's TOP-LEVEL playwright-core import makes importing it a
 // hard failure whenever the harness's npm deps aren't installed (this suite
 // has none of its own), which would make a relay-only suite depend on a
 // browser dependency it never uses. A distinct offset keeps this port out

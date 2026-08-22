@@ -183,8 +183,22 @@ async function waitForNextOnPage(page, type, afterIndex, timeoutMs = 8000) {
   return null;
 }
 
+// This suite is the only one that runs TWO live gardens at once, and they
+// share one GPU. That is not a load any real user's machine sees, and it
+// starves the admission gate's sacrificial worker: its render phase misses
+// the 800ms frame heartbeat (WATCHDOG.frameMs) and every commit comes back
+// TLE -> 'local-compile-failed', with the compiler never reached. MEASURED:
+// the same trial source gates OK in ~1150ms on one page and TLEs at ~1800ms
+// with both pages live. So pin both tabs to the product's own 'low' quality
+// preset (renderScale 0.5, SG_QUALITY 0) to bring two tabs back inside a
+// one-tab GPU budget. This changes only how much the two gardens cost to
+// draw — no assertion here depends on render scale or march-step count, and
+// probe coordinates are CSS-space, unaffected by renderScale.
 function freshPage(errors) {
   return browser.newPage().then(async (page) => {
+    await page.evaluateOnNewDocument(() => {
+      try { localStorage.setItem('sg.garden.quality', 'low'); } catch { /* storage blocked */ }
+    });
     page.on('console', (m) => {
       if (m.type() === 'error' && !(m.location().url || '').includes('cm-editor.bundle.js')) errors.push(m.text());
     });
@@ -284,6 +298,7 @@ await forceTextareaFallback(pageA);
 await forceTextareaFallback(pageB);
 await armUniformSpy(pageB);
 await armPrepareSpy(pageB);
+await armPrepareSpy(pageA); // see the commit diagnostic below — separates a gate reject from a compile reject
 await armSocketSpy(pageA); // A becomes the lease holder over its own real socket — see armSocketSpy's header note
 await armSocketSpy(pageB);
 
@@ -444,24 +459,64 @@ if (editorsAvailable) {
 
   /* ---------------- (b) A's commit changes B's RENDERED scene ---------------- */
 
-  await pageA.click('.component-editor .btn-primary').catch(() => {}); // Commit
-  const committed = await pageA.waitForFunction(
-    () => document.querySelector('.component-editor .pill')?.textContent === 'committed',
-    undefined, { timeout: 10000 },
-  ).then(() => true).catch(() => false);
-  check('(setup) A\'s commit succeeded', committed);
+  // The commit is validated locally by the admission gate's sacrificial
+  // worker before it is sent (§6.2 step 1). That worker renders probe frames
+  // under an 800ms-per-frame heartbeat (WATCHDOG.frameMs), and this is the
+  // one suite that keeps TWO live gardens on a single GPU — so the worker
+  // gets starved and the gate returns TLE ('total'/'frame' watchdog), which
+  // net.js surfaces as 'rejected: local-compile-failed'. MEASURED on this
+  // box: the identical trial source gates OK in ~390ms when the GPU happens
+  // to be free and TLEs at ~1900ms when it is not, run to run.
+  //
+  // TLE explicitly means "this did not finish in time here", NOT "this source
+  // is bad" — so retry, which is exactly what a user staring at that message
+  // would do. The assertion is unchanged: if a commit never lands, `committed`
+  // stays false and this still fails.
+  let committed = false;
+  for (let attempt = 0; attempt < 4 && !committed; attempt++) {
+    await pageA.click('.component-editor .btn-primary').catch(() => {}); // Commit
+    committed = await pageA.waitForFunction(
+      () => document.querySelector('.component-editor .pill')?.textContent === 'committed',
+      undefined, { timeout: 10000 },
+    ).then(() => true).catch(() => false);
+    if (!committed) await sleep(1200); // let the GPU drain before re-gating
+  }
+  const commitState = await pageA.evaluate(() => ({
+    pill: document.querySelector('.component-editor .pill')?.textContent ?? null,
+    btn: document.querySelector('.component-editor .btn-primary')?.textContent ?? null,
+    disabled: document.querySelector('.component-editor .btn-primary')?.disabled ?? null,
+  })).catch(() => null);
+  // handleRemoteCommit rejects on two very different grounds — the
+  // admission gate refusing the trial source, or prepareShader failing to
+  // compile it — and both surface as the same 'local-compile-failed'. A's own
+  // prepareShader count tells them apart: 0 means the gate never let it
+  // through.
+  const aPrepareCalls = await pageA.evaluate(() => window.__prepareCalls).catch(() => null);
+  check('(setup) A\'s commit succeeded', committed,
+    'pill=' + JSON.stringify(commitState) + ' aPrepareCalls=' + aPrepareCalls);
 
   const prepareCallsAfterCommit = await pageB.evaluate(() => window.__prepareCalls);
+  const bStatus = await pageB.evaluate(() => ({
+    sawCommit: (window.__wsReceived || []).filter((m) => m.t === 'commit').length,
+    types: [...new Set((window.__wsReceived || []).map((m) => m.t))],
+    notice: document.body.innerText.match(/didn.t compile here[^\n]*/)?.[0] ?? null,
+  })).catch(() => null);
   check('(b) A\'s commit DID trigger B\'s prepareShader exactly once (the compile+swap actually ran)',
-    prepareCallsAfterCommit === 1, 'calls=' + prepareCallsAfterCommit);
+    prepareCallsAfterCommit === 1, 'calls=' + prepareCallsAfterCommit + ' bStatus=' + JSON.stringify(bStatus));
 
   const skyPixelAfterCommit = await readCanvasPixel(pageB, 720, 60);
   const dist = Array.isArray(skyPixelAfterCommit) ? colorDist(skyPixelBaseline, skyPixelAfterCommit) : -1;
   // Threshold and rationale match mp-compile-swap.mjs's own pixel check: the
   // committed color still passes through mainImage's tonemap/fog before it's
   // a pixel, so this is a distance-from-baseline check, not exact-magenta.
+  // `committed` is part of the predicate on purpose. scene.glsl's clouds drift
+  // on their own, so a bare distance-from-baseline passes even when nothing
+  // was committed at all — observed doing exactly that (dist=134.9 with
+  // prepareCalls=0 and the commit rejected). The pixel move is only evidence
+  // of a swap if a swap actually happened, which is the same reasoning the
+  // draft check above already applies by counting prepareShader instead.
   check('(b) A\'s commit changed B\'s RENDERED canvas pixel (not just a JS variable)',
-    dist >= 25, 'baseline=' + JSON.stringify(skyPixelBaseline) + ' afterCommit=' + JSON.stringify(skyPixelAfterCommit) + ' dist=' + dist.toFixed(1));
+    committed && dist >= 25, 'committed=' + committed + ' baseline=' + JSON.stringify(skyPixelBaseline) + ' afterCommit=' + JSON.stringify(skyPixelAfterCommit) + ' dist=' + dist.toFixed(1));
 } else {
   check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', false, 'BLOCKED: editor never mounted, see product-bug note above');
   check('(d) B\'s editor is still read-only after the draft landed (never becomes editable)', false, 'BLOCKED: editor never mounted');

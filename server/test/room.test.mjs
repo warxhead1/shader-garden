@@ -1,0 +1,318 @@
+// Shader Garden — server/test/room.test.mjs
+// server/room.mjs is a pure reducer (invariant I8): every case here calls
+// createRoom/reduce/tick directly with a made-up `nowMs`, no sockets, no
+// waiting on real timers.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRoom, reduce, tick, removeMember, PROTOCOL, LEASE_TTL_MS, MAX_MEMBERS } from '../room.mjs';
+
+function hello(room, from, name, nowMs) {
+  return reduce(room, { from, msg: { t: 'hello', protocol: PROTOCOL, room: room.id, name }, nowMs });
+}
+
+function join(room, from, name, nowMs) {
+  const r = hello(room, from, name, nowMs);
+  return r;
+}
+
+test('hello joins a member and welcome carries full member list + edits', () => {
+  let room = createRoom('r1', 1000);
+  let r = join(room, 'a', 'Alice', 1000);
+  room = r.room;
+  const welcome = r.sends.find((s) => s.to === 'a').msg;
+  assert.equal(welcome.t, 'welcome');
+  assert.equal(welcome.selfId, 'a');
+  assert.equal(welcome.protocol, PROTOCOL);
+  assert.equal(welcome.members.length, 1);
+  assert.deepEqual(welcome.edits, {});
+
+  r = join(room, 'b', 'Bob', 1001);
+  room = r.room;
+  const peerJoin = r.sends.find((s) => s.to === '*-except-from');
+  assert.equal(peerJoin.msg.t, 'peer.join');
+  assert.equal(peerJoin.msg.id, 'b');
+  const welcome2 = r.sends.find((s) => s.to === 'b').msg;
+  assert.equal(welcome2.members.length, 2);
+});
+
+test('wrong protocol on hello closes 1002', () => {
+  const room = createRoom('r1', 0);
+  const r = reduce(room, { from: 'a', msg: { t: 'hello', protocol: 'bogus', name: 'x' }, nowMs: 0 });
+  assert.equal(r.close.code, 1002);
+});
+
+test('room full rejects with error then close 1013', () => {
+  let room = createRoom('r1', 0);
+  for (let i = 0; i < MAX_MEMBERS; i++) {
+    room = join(room, `m${i}`, `m${i}`, 0).room;
+  }
+  const r = join(room, 'overflow', 'x', 0);
+  assert.equal(r.sends[0].msg.code, 'room_full');
+  assert.equal(r.close.code, 1013);
+});
+
+test('non-hello message before hello closes 1002', () => {
+  const room = createRoom('r1', 0);
+  const r = reduce(room, { from: 'a', msg: { t: 'pose', x: 0, z: 0, yaw: 0, speed01: 0, gait: 0 }, nowMs: 0 });
+  assert.equal(r.close.code, 1002);
+});
+
+test('lease.request denied when not inRing, granted once inRing', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  let r = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 });
+  room = r.room;
+  assert.equal(room.lease.holder, null);
+  assert.equal(r.sends[0].to, 'a'); // denial goes only to requester
+
+  r = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 1 });
+  room = r.room;
+  r = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 2 });
+  room = r.room;
+  assert.equal(room.lease.holder, 'a');
+  assert.equal(room.lease.expiresAt, 2 + LEASE_TTL_MS);
+  assert.equal(r.sends[0].to, '*'); // grant is broadcast
+});
+
+test('lease expires via tick and is broadcast', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+  assert.equal(room.lease.holder, 'a');
+
+  let r = tick(room, LEASE_TTL_MS - 1);
+  room = r.room;
+  assert.equal(room.lease.holder, 'a'); // not yet expired
+
+  r = tick(room, LEASE_TTL_MS + 1);
+  room = r.room;
+  assert.equal(room.lease.holder, null);
+  const leaseMsg = r.sends.find((s) => s.msg.t === 'lease');
+  assert.ok(leaseMsg);
+});
+
+test('lease.keepalive re-arms expiry, only for the holder', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+
+  // Non-holder keepalive is a no-op.
+  room = reduce(room, { from: 'b', msg: { t: 'lease.keepalive' }, nowMs: 5000 }).room;
+  assert.equal(room.lease.expiresAt, LEASE_TTL_MS);
+
+  room = reduce(room, { from: 'a', msg: { t: 'lease.keepalive' }, nowMs: 5000 }).room;
+  assert.equal(room.lease.expiresAt, 5000 + LEASE_TTL_MS);
+});
+
+test('lease.release by holder only', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+
+  room = reduce(room, { from: 'b', msg: { t: 'lease.release' }, nowMs: 1 }).room;
+  assert.equal(room.lease.holder, 'a'); // not the holder: no-op
+
+  room = reduce(room, { from: 'a', msg: { t: 'lease.release' }, nowMs: 1 }).room;
+  assert.equal(room.lease.holder, null);
+});
+
+test('draft is relayed to everyone except sender and never stored', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+
+  // Non-holder draft is dropped.
+  let r = reduce(room, { from: 'b', msg: { t: 'draft', componentId: 1, body: 'x' }, nowMs: 0 });
+  assert.equal(r.sends.length, 0);
+
+  r = reduce(room, { from: 'a', msg: { t: 'draft', componentId: 1, body: 'float x = 1.0;' }, nowMs: 0 });
+  room = r.room;
+  assert.equal(r.sends[0].to, '*-except-from');
+  assert.equal(r.sends[0].msg.t, 'draft');
+  assert.equal(room.edits.size, 0); // never stored
+});
+
+test('commit: stale epoch rejected, accepted commit bumps epoch and broadcasts', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+
+  let r = reduce(room, { from: 'a', msg: { t: 'commit', componentId: 2, body: 'x', baseEpoch: 999 }, nowMs: 0 });
+  assert.equal(r.sends[0].msg.t, 'reject');
+  assert.equal(r.sends[0].msg.reason, 'stale_epoch');
+
+  r = reduce(room, { from: 'a', msg: { t: 'commit', componentId: 2, body: 'float y=2.0;', baseEpoch: 0 }, nowMs: 0 });
+  room = r.room;
+  assert.equal(room.epoch, 1);
+  assert.equal(room.edits.get(2), 'float y=2.0;');
+  assert.equal(r.sends[0].to, '*');
+  assert.equal(r.sends[0].msg.t, 'commit');
+
+  // Committing `null` (pristine marker) removes the override.
+  r = reduce(room, { from: 'a', msg: { t: 'commit', componentId: 2, body: null, baseEpoch: 1 }, nowMs: 0 });
+  room = r.room;
+  assert.equal(room.edits.has(2), false);
+});
+
+test('non-holder commit is a no-op', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  const r = reduce(room, { from: 'a', msg: { t: 'commit', componentId: 1, body: 'x', baseEpoch: 0 }, nowMs: 0 });
+  assert.equal(r.sends.length, 0);
+  assert.equal(r.room.epoch, 0);
+});
+
+test('pose token bucket: 40 budget, overflow silently dropped never disconnects', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  let sentCount = 0;
+  for (let i = 0; i < 45; i++) {
+    const r = reduce(room, { from: 'a', msg: { t: 'pose', x: 1, z: 1, yaw: 0, speed01: 0.5, gait: 0 }, nowMs: 0 });
+    room = r.room;
+    assert.equal(r.close, undefined);
+  }
+  assert.equal(room.members.get('a').poseBudget, 0);
+  assert.equal(room.pending.length, 40); // only 40 of the 45 accepted
+});
+
+test('pose budget refills at 30/s', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  for (let i = 0; i < 40; i++) {
+    room = reduce(room, { from: 'a', msg: { t: 'pose', x: 0, z: 0, yaw: 0, speed01: 0, gait: 0 }, nowMs: 0 } ).room;
+  }
+  assert.equal(room.members.get('a').poseBudget, 0);
+  room = reduce(room, { from: 'a', msg: { t: 'pose', x: 0, z: 0, yaw: 0, speed01: 0, gait: 0 }, nowMs: 1000 }).room;
+  // after 1s, +30 refilled, -1 consumed = 29
+  assert.equal(room.members.get('a').poseBudget, 29);
+});
+
+test('non-finite or out-of-range pose is ignored', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'pose', x: NaN, z: 0, yaw: 0, speed01: 0, gait: 0 }, nowMs: 0 }).room;
+  assert.equal(room.pending.length, 0);
+  room = reduce(room, { from: 'a', msg: { t: 'pose', x: 0, z: 0, yaw: 0, speed01: 1.5, gait: 0 }, nowMs: 0 }).room;
+  assert.equal(room.pending.length, 0);
+});
+
+test('tick flushes batched poses at POSE_HZ, self excluded', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'pose', x: 5, z: 6, yaw: 0, speed01: 0, gait: 0 }, nowMs: 0 }).room;
+
+  let r = tick(room, 10); // too soon (< 1000/15 ms)
+  room = r.room;
+  assert.equal(r.sends.filter((s) => s.msg.t === 'poses').length, 0);
+
+  r = tick(room, 100); // now >= 66.7ms since lastPoseFlushMs
+  room = r.room;
+  const toB = r.sends.find((s) => s.to === 'b' && s.msg.t === 'poses');
+  assert.ok(toB);
+  assert.deepEqual(toB.msg.poses, [{ id: 'a', x: 5, z: 6, yaw: 0, speed01: 0, gait: 0 }]);
+  const toA = r.sends.find((s) => s.to === 'a' && s.msg.t === 'poses');
+  assert.equal(toA, undefined); // self excluded, and 'a' has no peer poses to receive
+});
+
+test('start requires >=2 members and only fires from lobby', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  let r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
+  assert.equal(r.room.game.phase, 'lobby'); // only 1 member
+
+  room = join(r.room, 'b', 'B', 0).room;
+  r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
+  assert.equal(r.room.game.phase, 'hiding');
+  assert.ok(['a', 'b'].includes(r.room.game.seekerId));
+  assert.equal(r.room.game.endsAt, 30000);
+});
+
+test('game phase advances hiding -> seeking -> over -> lobby via tick, seeker round-robins skipping previous', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = join(room, 'c', 'C', 0).room;
+  let r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
+  room = r.room;
+  const firstSeeker = room.game.seekerId;
+  assert.equal(firstSeeker, 'a'); // first game: join-order[0]
+
+  r = tick(room, 30000);
+  room = r.room;
+  assert.equal(room.game.phase, 'seeking');
+  assert.equal(room.game.endsAt, 30000 + 120000);
+
+  r = tick(room, 30000 + 120000);
+  room = r.room;
+  assert.equal(room.game.phase, 'over');
+
+  r = tick(room, 30000 + 120000 + 10000);
+  room = r.room;
+  assert.equal(room.game.phase, 'lobby');
+  assert.equal(room.game.found.size, 0);
+
+  // Next game skips the previous seeker ('a' -> 'b').
+  r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 });
+  assert.equal(r.room.game.seekerId, 'b');
+});
+
+test('tag: seeker only, phase seeking only, distance < 0.9', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 }).room;
+  assert.equal(room.game.seekerId, 'a');
+  room = tick(room, 30000).room; // -> seeking
+
+  // Too far: no tag.
+  room = reduce(room, { from: 'a', msg: { t: 'pose', x: 0, z: 0, yaw: 0, speed01: 0, gait: 0 }, nowMs: 30000 }).room;
+  room = reduce(room, { from: 'b', msg: { t: 'pose', x: 5, z: 5, yaw: 0, speed01: 0, gait: 0 }, nowMs: 30000 }).room;
+  let r = reduce(room, { from: 'a', msg: { t: 'tag', targetId: 'b' }, nowMs: 30000 });
+  assert.equal(r.room.game.found.size, 0);
+
+  // Non-seeker cannot tag.
+  r = reduce(room, { from: 'b', msg: { t: 'tag', targetId: 'a' }, nowMs: 30000 });
+  assert.equal(r.room.game.found.size, 0);
+
+  // Close enough: tag lands.
+  room = reduce(room, { from: 'b', msg: { t: 'pose', x: 0.1, z: 0, yaw: 0, speed01: 0, gait: 0 }, nowMs: 30000 }).room;
+  r = reduce(room, { from: 'a', msg: { t: 'tag', targetId: 'b' }, nowMs: 30000 });
+  assert.ok(r.room.game.found.has('b'));
+  assert.equal(r.room.game.scores.a, 1);
+});
+
+test('removeMember releases the lease and broadcasts peer.leave', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+  assert.equal(room.lease.holder, 'a');
+
+  const r = removeMember(room, 'a', 1);
+  room = r.room;
+  assert.equal(room.members.has('a'), false);
+  assert.equal(room.lease.holder, null);
+  assert.ok(r.sends.some((s) => s.msg.t === 'peer.leave' && s.msg.id === 'a'));
+});
+
+test('removeMember ends the round early if the seeker disconnects', () => {
+  let room = createRoom('r1', 0);
+  room = join(room, 'a', 'A', 0).room;
+  room = join(room, 'b', 'B', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 }).room;
+  assert.equal(room.game.seekerId, 'a');
+
+  const r = removeMember(room, 'a', 5);
+  assert.equal(r.room.game.phase, 'over');
+});

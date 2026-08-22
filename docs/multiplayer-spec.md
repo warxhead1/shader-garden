@@ -437,6 +437,49 @@ signatures; L2 must publish those signatures FIRST (see §9 wave order).
 
 ---
 
+### 8.1 L2's published module surface (frozen — L5 codes against this)
+
+`site/js/organs/garden/net.js` exports exactly one factory. L5 must not reach
+past it into `timesync.js` or `roster.js`.
+
+```js
+// opts: {
+//   room, relayUrl, name,
+//   getPose:   () => ({x, z, yaw, speed01, gait}),   // read from index.js's integrator
+//   setPeerUniforms: (obj) => void,                   // -> rh.runtime.setUniforms
+//   onEdits:   (Map<componentId, body>) => void,      // late-join snapshot; apply ALL, compile ONCE
+//   onCommit:  ({componentId, body, by, epoch}) => Promise<boolean>,  // false = failed locally
+//   onDraft:   ({from, componentId, body}) => void,
+//   onLease:   ({holder, holderName, holderHue, isSelf, expiresAt}) => void,
+//   onRoster:  (members[]) => void,
+//   onGame:    ({phase, seekerId, endsAt, found, scores}) => void,
+//   onStatus:  ({state, message}) => void,            // 'connecting'|'live'|'retrying'|'failed'|'no-relay'
+// }
+export function connectRoom(opts) -> {
+  sharedTime(): number|null,   // null until the first time sample lands
+  armClock(runtime): void,     // call from onBuild() after EVERY (re)build — §3.2
+  setInRing(bool): void,
+  requestLease(): void, releaseLease(): void, keepLease(): void,
+  sendDraft(componentId, body): void,          // debounced 150ms internally
+  commit(componentId, body): Promise<{ok, reason?}>,  // resolves after server ack/reject
+  tag(targetId): void,
+  startGame(): void,
+  destroy(): void,
+}
+```
+
+Rules L2 owns and L5 must not reimplement: reconnect with backoff
+(1s/2s/4s/8s, cap 8s, forever), peer slot assignment (`id -> slot`, stable for
+a member's lifetime, freed on leave, **never re-packed**), the 150 ms draft
+debounce, the pose send rate (15 Hz, and only when the pose actually changed),
+`inRing` transition-only sends, and the min-RTT offset estimator.
+
+L5 owns and L2 must not reach into: the DOM, the runtime, `editedBodies`,
+`buildSceneSource()`, and every compile call. `net.js` never imports anything
+from `site/js/runtime/`.
+
+---
+
 ## 9. Wave order
 
 - **Wave A (parallel):** L1, L3, L4. All three are self-contained and have no

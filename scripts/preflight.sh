@@ -53,6 +53,39 @@ if python3 -c 'import yaml' 2>/dev/null; then
     python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$wf" 2>/dev/null \
       || note "$wf is not valid YAML"
   done
+  # Every step that shells out to a harness binary must say WHERE. npm/npx
+  # resolve from the node_modules of the current directory, and the only
+  # node_modules in this repo is tools/test/. A step that forgets
+  # working-directory runs at the repo root, where npx finds nothing and either
+  # cancels (--no-install) or silently fetches a different version from the
+  # network. This is invisible locally — tools/test/node_modules always exists
+  # on a dev box — so CI is the only place it can be caught, and it cost a full
+  # day of red builds on 2026-08-22 before anyone read past "npm error".
+  python3 - <<'PY' || note "a workflow step runs npm/npx without working-directory"
+import glob, sys, yaml
+bad = []
+for path in sorted(glob.glob(".github/workflows/*.yml")):
+    try:
+        doc = yaml.safe_load(open(path)) or {}
+    except Exception:
+        continue  # the parse check above already reported this
+    for job_name, job in (doc.get("jobs") or {}).items():
+        job_wd = ((job or {}).get("defaults") or {}).get("run", {}).get("working-directory")
+        for step in (job or {}).get("steps") or []:
+            run = (step or {}).get("run")
+            if not run or not isinstance(run, str):
+                continue
+            if not any(w in run.split() for w in ("npm", "npx")):
+                continue
+            if step.get("working-directory") or job_wd:
+                continue
+            bad.append(f"{path}: job {job_name}: step {step.get('name', '<unnamed>')!r}")
+if bad:
+    print("steps running npm/npx with no working-directory:", file=sys.stderr)
+    for b in bad:
+        print("  " + b, file=sys.stderr)
+    sys.exit(1)
+PY
 else
   echo "preflight: note — PyYAML unavailable, workflow YAML parse skipped." >&2
 fi

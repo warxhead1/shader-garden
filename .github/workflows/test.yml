@@ -68,6 +68,15 @@ jobs:
         # and cannot prove anything about real rendering), and resolveDisplay()
         # falls back to Xvfb when there is no Wayland socket to borrow — which
         # is the case on a runner.
+        #
+        # working-directory matters here and its absence is what broke CI for a
+        # day: `npx --no-install` resolves the binary from the node_modules of
+        # the CURRENT directory. Run from the repo root there is no such tree,
+        # so npx tried to FETCH playwright-core, and --no-install (correctly)
+        # cancelled instead — "missing packages and no YES option". The install
+        # step right above had already succeeded; only the cwd was wrong. This
+        # cannot reproduce locally, where tools/test/node_modules always exists.
+        working-directory: tools/test
         run: |
           npx --no-install playwright-core install --with-deps chromium
           sudo apt-get update

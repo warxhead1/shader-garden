@@ -260,6 +260,27 @@ const editorBodyBefore = editorAvailable
   : null;
 check('(setup) the editor shows the pristine sky body before any commit', editorAvailable && editorBodyBefore === skyComponent.source, editorAvailable ? '' : 'BLOCKED: editor never mounted');
 
+// FIVE sky oracles, not one. A single point at (720,60) is sometimes under a
+// Drifting Clouds puff, and a cloud composited over sg_sky_color() muffles
+// whatever that function returns: measured on the real-GPU gate, a baseline
+// of [144,147,144] (cloud) instead of the usual [175,193,215] (open sky)
+// turned the magenta commit into a distance of 14.9 against the 25 floor,
+// while runs that sampled open sky measured 124-257. Which pixel the cloud
+// happens to sit on is a property of the run, not of the code.
+//
+// Sampling a band and taking the LARGEST shift keeps the assertion at the
+// same strength rather than lowering the floor: a commit that does not apply
+// moves none of them. Nor does this open a drift loophole — the suite already
+// reads its oracles twice with nothing committed in between (the
+// broken-commit checks below), and that measured a distance of ~1.7 across a
+// longer interval than this one, so cloud motion alone cannot manufacture 25.
+const SKY_ORACLES = [[360, 60], [540, 60], [720, 60], [900, 60], [1080, 60]];
+async function readSkyBand(pg) {
+  const out = [];
+  for (const [x, y] of SKY_ORACLES) out.push(await readCanvasPixel(pg, x, y));
+  return out;
+}
+const skyBandBefore = await readSkyBand(page);
 const skyPixelBefore = await readCanvasPixel(page, 720, 60);
 const charPixelBefore = await readCanvasPixel(page, 720, 380);
 check('(setup) got a baseline sky pixel', Array.isArray(skyPixelBefore), JSON.stringify(skyPixelBefore));
@@ -359,7 +380,6 @@ const editorBodyAfterGood = editorAvailable && await page.waitForFunction(
 ).then(() => true).catch(() => false);
 check('(b) the read-only mirror picks up the good commit\'s body', editorAvailable && editorBodyAfterGood, editorAvailable ? '' : 'BLOCKED: editor never mounted');
 
-const skyPixelAfterGood = await readCanvasPixel(page, 720, 60);
 // Not an exact-magenta check: sg_sky_color()'s vec3(1,0,1) output still
 // passes through mainImage's own tonemap/exposure/fog before it becomes a
 // pixel, so the readback is a muted, not pure, magenta (measured on this
@@ -370,10 +390,16 @@ const skyPixelAfterGood = await readCanvasPixel(page, 720, 60);
 // between (the broken-commit checks above) measured ~0 distance, so any
 // real threshold well above that separates "applied" from "noise" cleanly.
 const colorDist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-const dist = Array.isArray(skyPixelAfterGood) ? colorDist(skyPixelBefore, skyPixelAfterGood) : -1;
+const skyBandAfterGood = await readSkyBand(page);
+const bandDists = skyBandBefore.map((b, i) => {
+  const a = skyBandAfterGood[i];
+  return Array.isArray(b) && Array.isArray(a) ? colorDist(b, a) : -1;
+});
+const dist = Math.max(...bandDists);
 check('(b) the sky pixel meaningfully changed once a VALID commit applied (color distance from baseline)',
   dist >= 25,
-  'before=' + JSON.stringify(skyPixelBefore) + ' after=' + JSON.stringify(skyPixelAfterGood) + ' dist=' + dist.toFixed(1));
+  'best=' + dist.toFixed(1) + ' of ' + JSON.stringify(bandDists.map((d) => Number(d.toFixed(1))))
+    + ' before=' + JSON.stringify(skyBandBefore) + ' after=' + JSON.stringify(skyBandAfterGood));
 
 check('no console errors on the receiver across the whole sequence', errors.length === 0, errors.join(' | '));
 

@@ -56,7 +56,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, serveSiteCors, sleep, SITE_ROOT, gotoSafe } from './browser.mjs';
+import { launch, serveSite, serveSiteCors, sleep, scaled, SITE_ROOT, gotoSafe } from './browser.mjs';
 
 const FIXTURE_ROOT = path.resolve(
   path.dirname(new URL(import.meta.url).pathname),
@@ -562,7 +562,18 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     el.setAttribute('kernel', 'biome-rolling-hills'); // default autoplay="visible"
     document.body.appendChild(el);
   });
-  await sleep(1200); // outlive the getBattery() promise resolution + a would-be autoplay
+  // sleep(1200) was a bet on how long getBattery()'s promise plus the
+  // element's own boot takes. CI run 32654025156 read `state=loading` — the
+  // element had not finished booting at all, so "never left poster" was being
+  // asserted about a seed that had not yet reached ANY settled state. Wait for
+  // it to leave 'loading' (a ceiling, free when it boots promptly), then make
+  // the real claim: whatever it settled ON must be 'poster'.
+  await page.waitForFunction(
+    () => document.getElementById('battery-seed')?.state !== 'loading',
+    undefined,
+    { timeout: scaled(20000), polling: 200 },
+  ).catch(() => { /* fall through: the check below reports the state it is stuck in */ });
+  await sleep(600); // and then a would-be autoplay's own window, so 'poster' is settled, not in-flight
   const settledPoster = await page.evaluate(() => document.getElementById('battery-seed').state === 'poster');
   check('(j) with battery discharging <20%, default autoplay="visible" never leaves "poster"', settledPoster,
     'state=' + (await page.evaluate(() => document.getElementById('battery-seed').state)));
@@ -597,7 +608,16 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     const wrap = document.getElementById('touch-seed').shadowRoot.querySelector('.wrap');
     wrap.dispatchEvent(new Event('touchstart', { bubbles: true }));
   });
-  await sleep(300); // outlive the chip's .15s opacity transition
+  // The .15s opacity transition is a CSS duration, but the handler that starts
+  // it only runs once the element's own listeners are attached, and
+  // getComputedStyle mid-transition returns an intermediate. CI run
+  // 32654025156 sampled opacity=0 at 300ms. Poll for the end state instead of
+  // guessing the duration; a chip that never reveals still fails below.
+  await page.waitForFunction(
+    () => getComputedStyle(document.getElementById('touch-seed').shadowRoot.querySelector('.chip')).opacity === '1',
+    undefined,
+    { timeout: scaled(5000), polling: 100 },
+  ).catch(() => { /* fall through: the check below reports the opacity it is stuck at */ });
   const afterTouchOpacity = await page.evaluate(() => {
     const chip = document.getElementById('touch-seed').shadowRoot.querySelector('.chip');
     return getComputedStyle(chip).opacity;

@@ -368,6 +368,34 @@ export const scaled = (ms) => Math.round(ms * TIME_SCALE);
 // is greppable.
 export const slowSleep = (ms) => new Promise((r) => setTimeout(r, scaled(ms)));
 
+// Hold a key down until the page has actually PRODUCED the thing the caller
+// is about to assert on, then release.
+//
+// Every "holding d produced multiple uCharPosX writes" check in this repo was
+// written as `keyboard.down` / `sleep(600)` / `keyboard.up`, which silently
+// assumes 600ms buys more than one animation frame. On a GitHub runner it
+// does not: CI run 32654025156 recorded the garden at `0 fps · 0.56x`, and
+// (a), (f) and (g) each collected ZERO writes while (c) — which holds for
+// 4000ms — collected one. The integrator was never wrong; the sample window
+// was. Sleeping longer is the wrong shape of fix, because the right duration
+// is a property of the machine and nobody can name it in advance.
+//
+// So: `ms` stays as the MINIMUM hold (the physical claim — "held long enough
+// to travel"), and `until` is polled on top of it as a CEILING. Nothing is
+// weakened. A key that produces no writes at all still fails, exactly as
+// before, just after a bounded wait rather than a guessed one.
+export async function holdKey(page, key, opts = {}) {
+  const { ms = 500, until = null, timeout = 30000, settle = 150 } = opts;
+  await page.keyboard.down(key);
+  await sleep(ms);
+  if (until) {
+    await page.waitForFunction(until, undefined, { timeout: scaled(timeout), polling: 100 })
+      .catch(() => { /* fall through: the caller's own check reports the shortfall */ });
+  }
+  await page.keyboard.up(key);
+  await sleep(settle); // let the idle-exit frame land so no further calls trickle in
+}
+
 // `.garden-canvas` is prepended SYNCHRONOUSLY by runtime-host's build(),
 // before either backend is attempted — so its absence never means "the GPU is
 // slow", it means the organ never got as far as building, or built and then
@@ -379,18 +407,18 @@ export const slowSleep = (ms) => new Promise((r) => setTimeout(r, scaled(ms)));
 // backends refused" from a log read hours later.
 export async function awaitGardenCanvas(page, errors) {
   try {
-    await page.waitForSelector('.garden-canvas', { timeout: 8000 });
+    // 30000, not 8000 (48s after TIME_SCALE, not 8s). "Prepended
+    // synchronously" is a claim about the PAGE's ordering, not about when the
+    // test can OBSERVE it: SwiftShader compiles the full-screen raymarch on
+    // the main thread, so between the prepend and the first yield the
+    // renderer answers no selector poll at all. CI run 32654025156 timed out
+    // here on the cold first page of three separate suites and then dumped
+    // state showing `classes: ["viewer-canvas garden-canvas"]` — the element
+    // was there the whole time; the thread was not. A ceiling costs nothing
+    // when it is not hit, and this one is only ever hit by the cold mount.
+    await page.waitForSelector('.garden-canvas', { timeout: 30000 });
     return true;
   } catch {
-    const seen = await page.evaluate(() => ({
-      hash: location.hash,
-      canvases: document.querySelectorAll('canvas').length,
-      classes: [...document.querySelectorAll('canvas')].map((c) => c.className),
-      stage: !!document.querySelector('.garden-stage, .stage'),
-      badge: document.querySelector('.badge-backend')?.textContent || null,
-      fps: document.querySelector('.badge-fps')?.textContent || null,
-      bodyLen: document.body.innerHTML.length,
-    })).catch((e) => ({ evaluateFailed: String(e) }));
     errors.push('no garden-canvas ' + JSON.stringify(await gardenState(page)));
     return false;
   }

@@ -2,7 +2,7 @@
 // inspector (D1) + getCustomUniforms() snapshot isolation, plus the
 // provenance multi-pass mechanism explainer (D3), gated correctly.
 // Usage: node tools/test/garden-uniform-inspector.mjs (npm ci in tools/test first)
-import { launch, serveSite, sleep, gotoSafe, assertRealWebgl2 } from './browser.mjs';
+import { launch, serveSite, sleep, scaled, gotoSafe, assertRealWebgl2 } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -37,7 +37,11 @@ async function freshPage(errors) {
   // restores the Puppeteer-equivalent "wait for it to exist" semantics this
   // suite actually needs. Not one of browser.mjs's shimPage() gaps (that
   // bridges API shape, not default-option semantics) — fixed at the call site.
-  await page.waitForSelector('.garden-uniform-inspector', { state: 'attached', timeout: 8000 }).catch(() => errors.push('no garden-uniform-inspector'));
+  // 30000, not 8000: the ceiling is only ever reached on the cold mount,
+  // where SwiftShader compiles the raymarch on the main thread and answers no
+  // selector poll at all — see awaitGardenCanvas in browser.mjs for the same
+  // measurement (CI run 32654025156).
+  await page.waitForSelector('.garden-uniform-inspector', { state: 'attached', timeout: 30000 }).catch(() => errors.push('no garden-uniform-inspector'));
 
   check('(1) inspector starts collapsed', await page.evaluate(() => document.querySelector('.garden-uniform-inspector').hidden === true));
   await page.click('.garden-uniform-toggle');
@@ -63,9 +67,19 @@ async function freshPage(errors) {
       input.value = String(newVal);
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }, rangeName);
-    await sleep(150); // one 10 Hz tick (100ms) plus slack
+    // sleep(150) assumed one 10 Hz tick fits in 150ms of WALL clock. The
+    // inspector refreshes on a setInterval, and a timer cannot fire while the
+    // main thread is inside a SwiftShader compile — CI run 32654025156 read
+    // before=0.53 after=0.53, an inspector that had simply not been given a
+    // turn yet. Poll for the refresh with a ceiling; a row that never updates
+    // still fails, which is the claim this check was always making.
+    await page.waitForFunction(
+      ({ n, before }) => document.querySelector(`.garden-uniform-row[data-name="${n}"] .garden-uniform-value`)?.textContent !== before,
+      { n: rangeName, before },
+      { timeout: scaled(10000), polling: 100 },
+    ).catch(() => { /* fall through: the check below reports both values */ });
     const after = await page.evaluate((n) => document.querySelector(`.garden-uniform-row[data-name="${n}"] .garden-uniform-value`)?.textContent, rangeName);
-    check('(1) the inspector\'s displayed value changes within one 10 Hz tick of a slider move', before !== after, `before=${before} after=${after}`);
+    check('(1) the inspector\'s displayed value updates after a slider move', before !== after, `before=${before} after=${after}`);
   }
 
   // Mutual avoidance: both the inspector (top-right) and the probe panel

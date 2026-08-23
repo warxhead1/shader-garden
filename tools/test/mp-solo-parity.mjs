@@ -7,7 +7,7 @@
 // count).
 // Usage: node tools/test/mp-solo-parity.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
-import { launch, serveSite, sleep, gotoSafe, assertRealGpu, SITE_ROOT } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu, SITE_ROOT, awaitGardenCanvas } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -88,7 +88,7 @@ async function clickTrayItem(page, name) {
   check('(setup) real GPU adapter present', !!gpuInfoA, JSON.stringify(gpuInfoA));
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors); // shared ceiling + state dump; see browser.mjs
 
   // Exercise every other surface that would ALSO push uniforms, so this
   // isn't just "solo never happened to render a frame": open + edit a
@@ -130,7 +130,7 @@ async function clickTrayItem(page, name) {
   check('(setup) real GPU adapter present', !!gpuInfoB, JSON.stringify(gpuInfoB));
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors); // shared ceiling + state dump; see browser.mjs
   await page.waitForSelector('.garden-tray-item', { timeout: 8000 }).catch(() => errors.push('no tray'));
 
   // The tray itself is built as components.map((c,i) => ...) — file order,

@@ -32,7 +32,7 @@
 // setUniforms into the same window.__uniformCalls array (decision rule:
 // "asserts on output generically" -> let it run WebGPU).
 // Prints "all-PASS" and exits 0 only if every check passed.
-import { launch, serveSite, sleep, gotoSafe, assertRealGpu, awaitGardenReady, gardenState } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu, awaitGardenReady, gardenState, holdKey } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -91,10 +91,10 @@ async function armSpies(page) {
     .catch((e) => errors.push('NAV: ' + e.message));
   await awaitGardenReady(page, errors);
 
-  await page.keyboard.down('d');
-  await sleep(600);
-  await page.keyboard.up('d');
-  await sleep(150); // let the idle-exit frame land so no further calls trickle in
+  await holdKey(page, 'd', {
+    ms: 600,
+    until: () => window.__uniformCalls.filter((c) => 'uCharPosX' in c).length >= 2,
+  });
 
   const posCalls = await page.evaluate(() => window.__uniformCalls.filter((c) => 'uCharPosX' in c).map((c) => c.uCharPosX));
   check('(a) holding d produced multiple uCharPosX writes', posCalls.length >= 2, 'got ' + posCalls.length);
@@ -155,10 +155,10 @@ async function armSpies(page) {
   // (blur back to body) and confirm the SAME key now does move the figure.
   await page.evaluate(() => document.activeElement.blur());
   await page.evaluate(() => { window.__uniformCalls.length = 0; });
-  await page.keyboard.down('d');
-  await sleep(500);
-  await page.keyboard.up('d');
-  await sleep(150);
+  await holdKey(page, 'd', {
+    ms: 500,
+    until: () => window.__uniformCalls.some((c) => 'uCharPosX' in c),
+  });
   const movedAfterBlur = await page.evaluate(() => window.__uniformCalls.some((c) => 'uCharPosX' in c));
   check('(b) the same key DOES move the figure once focus leaves the slider (guard is the cause, not a stuck listener)', movedAfterBlur);
 
@@ -267,10 +267,10 @@ async function armSpies(page) {
     .catch((e) => errors.push('NAV: ' + e.message));
   await awaitGardenReady(page, errors);
 
-  await page.keyboard.down('d');
-  await sleep(600);
-  await page.keyboard.up('d');
-  await sleep(150); // idle-exit window, same as (a)
+  await holdKey(page, 'd', {
+    ms: 600,
+    until: () => window.__uniformCalls.filter((c) => 'uCharGaitDist' in c).length >= 2,
+  });
 
   const gaitCalls = await page.evaluate(() => window.__uniformCalls.filter((c) => 'uCharGaitDist' in c).map((c) => c.uCharGaitDist));
   check('(f) holding a direction produced multiple uCharGaitDist writes', gaitCalls.length >= 2, 'got ' + gaitCalls.length);
@@ -326,14 +326,15 @@ async function armSpies(page) {
   // Face +X, then reverse straight to -X — a 180-degree heading flip across
   // one input transition. Both phases (and the transition between them) land
   // in the SAME __yawCalls array, checked as one continuous sequence below.
-  await page.keyboard.down('d');
-  await sleep(500);
-  await page.keyboard.up('d');
-  await sleep(200); // idle-exit gap — no calls land here, see the dt note below
-  await page.keyboard.down('a');
-  await sleep(500);
-  await page.keyboard.up('a');
-  await sleep(150);
+  await holdKey(page, 'd', {
+    ms: 500,
+    until: () => window.__yawCalls.length >= 2,
+    settle: 200, // idle-exit gap — no calls land here, see the dt note below
+  });
+  await holdKey(page, 'a', {
+    ms: 500,
+    until: () => window.__yawCalls.length >= 4,
+  });
 
   const yawCalls = await page.evaluate(() => window.__yawCalls);
   check('(g) the session produced multiple uCharYaw writes', yawCalls.length >= 4, 'got ' + yawCalls.length);

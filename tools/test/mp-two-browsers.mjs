@@ -9,7 +9,7 @@
 //   (d) B's editor is read-only and mirrors A's (uncommitted) draft.
 // Usage: node tools/test/mp-two-browsers.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
-import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT, startRelayOnFreePort } from './browser.mjs';
+import { launch, serveSite, sleep, scaled, gotoSafe, derivePort, assertRealGpu, SITE_ROOT, startRelayOnFreePort, awaitGardenCanvas } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -181,7 +181,14 @@ function sendOnLiveSocket(page, msg) {
 /** Waits for the next message of `type` in this page's own __wsReceived log
  *  after `afterIndex` — same technique mp-compile-swap.mjs's rawClient
  *  waitForNext uses, adapted to read a page's real production socket. */
-async function waitForNextOnPage(page, type, afterIndex, timeoutMs = 8000) {
+// timeoutMs is scaled(): this is a NODE-side deadline over a socket's own
+// received[] buffer, so shimPage's automatic TIME_SCALE scaling — which only
+// reaches Playwright's `timeout:` options — never touched it. On a GPU-less
+// runner the relay round trip is the same, but the node event loop is not:
+// CI run 32654025156 read `(b) the relay broadcast the good commit (null)`
+// while the very next check measured the sky pixel actually changing, i.e.
+// the commit arrived, just later than a budget nobody had scaled.
+async function waitForNextOnPage(page, type, afterIndex, timeoutMs = scaled(8000)) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     // Playwright's page.evaluate() takes exactly one arg (unlike puppeteer's
@@ -365,7 +372,7 @@ await armSocketSpy(pageA); // A becomes the lease holder over its own real socke
 await armSocketSpy(pageB);
 
 await gotoSafe(pageA, roomUrl(ROOM), { waitUntil: 'networkidle2', timeout: 20000 }).catch((e) => errorsA.push('NAV: ' + e.message));
-await pageA.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errorsA.push('no garden-canvas'));
+await awaitGardenCanvas(pageA, errorsA); // shared ceiling + state dump; see browser.mjs
 check('(setup) A reached live status', await waitLive(pageA, 'A'));
 const aWelcome = await waitForNextOnPage(pageA, 'welcome', -1);
 check('(setup) captured A\'s own welcome (selfId)', !!aWelcome, JSON.stringify(aWelcome));
@@ -376,7 +383,7 @@ const aSelfId = aWelcome && aWelcome.msg.selfId;
 // order (allocateSlot pops the lowest free slot), so A is deterministically
 // B's peer slot 0.
 await gotoSafe(pageB, roomUrl(ROOM), { waitUntil: 'networkidle2', timeout: 20000 }).catch((e) => errorsB.push('NAV: ' + e.message));
-await pageB.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errorsB.push('no garden-canvas'));
+await awaitGardenCanvas(pageB, errorsB); // shared ceiling + state dump; see browser.mjs
 check('(setup) B reached live status', await waitLive(pageB, 'B'));
 const bWelcome = await waitForNextOnPage(pageB, 'welcome', -1);
 check('(setup) captured B\'s own welcome (selfId, epoch)', !!bWelcome, JSON.stringify(bWelcome));
@@ -411,6 +418,22 @@ await pageA.click('.garden-canvas').catch(() => {}); // canvas isn't focusable b
 await pageA.keyboard.down('d');
 await pageA.keyboard.down('w');
 await sleep(1500);
+// sleep(1500) alone assumes 1.5s of wall clock buys A some animation frames.
+// Position integration is dt-based, so DISTANCE only depends on hold time —
+// but a frame still has to run for the integrator to advance at all, and CI
+// run 32654025156 recorded the garden at `0 fps · 0.56x`: A never moved, so
+// A never entered SG_LECTERN_XZ's ring, B received zero peer uniforms, and
+// every downstream lease/editor check inherited the failure. Hold until BOTH
+// ends have observed the move — A's own integrator ran, and B saw it over the
+// wire — with a ceiling. A move that never lands still fails below.
+await pageA.waitForFunction(
+  () => window.__uniformCalls.filter((c) => 'uCharPosX' in c).length >= 2,
+  undefined, { timeout: scaled(30000), polling: 200 },
+).catch(() => { /* fall through: (a)'s checks report what actually arrived */ });
+await pageB.waitForFunction(
+  () => window.__uniformCalls.filter((c) => 'uPeer0X' in c || 'uPeer0Z' in c).length >= 2,
+  undefined, { timeout: scaled(30000), polling: 200 },
+).catch(() => { /* fall through: (a)'s checks report what actually arrived */ });
 await pageA.keyboard.up('d');
 await pageA.keyboard.up('w');
 await sleep(300); // let the last pose (POSE_HZ=15) land and B's peer uniforms catch up
@@ -573,8 +596,15 @@ if (editorsAvailable) {
   // second. The predicate below is unchanged (=== 1) and this stays
   // non-vacuous: if B never recompiles AND never rejects, the poll simply
   // runs out and calls is still 0, which fails exactly as before.
+  // Bounded by the CLOCK, not by an iteration count. `80 x sleep(100)` reads
+  // like an 8-second budget and is one only while each probe is instant: on a
+  // GPU-less runner every `pageB.evaluate` waits for a blocked main thread, and
+  // CI run 32654025156 spent 724423ms — twelve minutes — inside this loop
+  // alone, which is most of why that run hit its job timeout and reported
+  // nothing at all. A deadline cannot drift with probe cost.
   const bWaitT0 = Date.now();
-  for (let i = 0; i < 80; i++) {
+  const bDeadline = bWaitT0 + scaled(20000);
+  while (Date.now() < bDeadline) {
     const done = await pageB.evaluate(() =>
       window.__commitsApplied > 0 || /didn.t compile here/.test(document.body.innerText));
     if (done) break;

@@ -12,7 +12,7 @@
 // second, ordinary puppeteer page playing the receiver.
 // Usage: node tools/test/mp-compile-swap.mjs   (first: npm ci in tools/test)
 import { readFileSync } from 'node:fs';
-import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, SITE_ROOT, startRelayOnFreePort } from './browser.mjs';
+import { launch, serveSite, sleep, scaled, gotoSafe, derivePort, assertRealGpu, SITE_ROOT, startRelayOnFreePort, awaitGardenCanvas } from './browser.mjs';
 import { parseScene } from '../../site/js/organs/garden/parse.js';
 
 let failed = false;
@@ -78,7 +78,14 @@ function sendRaw(client, msg) { client.ws.send(JSON.stringify(msg)); }
  *  client's own received log (each call passes back the index it found, so
  *  a caller can request several messages of the same type in sequence
  *  without re-matching an already-consumed one). */
-async function waitForNext(client, type, afterIndex, timeoutMs = 8000) {
+// timeoutMs is scaled(): this is a NODE-side deadline over a socket's own
+// received[] buffer, so shimPage's automatic TIME_SCALE scaling — which only
+// reaches Playwright's `timeout:` options — never touched it. On a GPU-less
+// runner the relay round trip is the same, but the node event loop is not:
+// CI run 32654025156 read `(b) the relay broadcast the good commit (null)`
+// while the very next check measured the sky pixel actually changing, i.e.
+// the commit arrived, just later than a budget nobody had scaled.
+async function waitForNext(client, type, afterIndex, timeoutMs = scaled(8000)) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     for (let i = afterIndex + 1; i < client.received.length; i++) {
@@ -205,7 +212,7 @@ await forceTextareaFallback(page);
 await armRuntimeSpy(page);
 
 await gotoSafe(page, roomUrl(ROOM), { waitUntil: 'networkidle2', timeout: 20000 }).catch((e) => errors.push('NAV: ' + e.message));
-await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+await awaitGardenCanvas(page, errors); // shared ceiling + state dump; see browser.mjs
 // This suite asserts on rendering output (canvas pixels, context-loss
 // state) as its core I4 evidence — proves a real GPU adapter is behind it,
 // not a silent SwiftShader/llvmpipe landing that would report green while

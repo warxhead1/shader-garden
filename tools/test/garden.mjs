@@ -78,9 +78,30 @@ function freshPage(errors) {
 // Same screen-point oracle smoke.mjs's garden section uses: the character
 // sits center-frame regardless of iTime (a 60%-weighted camera-target
 // blend, not a hard lock, but close enough to be stable).
+// The probe is an ASYNC GPU readback (webgpu.js has no synchronous
+// readPixels), so a fixed settle sleep is a race, not a wait. Observed here
+// as an intermittent "(a) probing the character opens its panel (got null)"
+// — one failing run in three on an otherwise unchanged tree. Wait for the
+// organ's own garden.probe.opened.v1 instead; the readback completing is
+// exactly what emits it.
+//
+// The counter installs once and is then polled as a plain sync property
+// read. Importing the bus inside the poll instead starves the page badly
+// enough that the panel never opens at all. `typeof` guards the install
+// because __probeN === 0 is a legitimate value that `!window.__probeN`
+// would re-install on every probe, resetting the count each time.
 async function probe(page, x, y) {
+  const before = await page.evaluate(async () => {
+    if (typeof window.__probeN !== 'number') {
+      const { on } = await import('./js/core/bus.js');
+      window.__probeN = 0;
+      on('garden.probe.opened.v1', () => { window.__probeN++; });
+    }
+    return window.__probeN;
+  }).catch(() => 0);
   await page.mouse.click(x, y);
-  await sleep(300);
+  await page.waitForFunction((n) => window.__probeN > n, before, { timeout: 10000 })
+    .catch(() => { /* fall through: the read below reports what is actually there */ });
   return page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
 }
 

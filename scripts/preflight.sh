@@ -98,6 +98,11 @@ python3 -c "import json; json.load(open('tools/test/package.json'))" 2>/dev/null
 # anything deliberately excluded is named here with its reason.
 #   browser  — the shared harness module, not a suite
 #   shots    — a screenshot generator; it asserts nothing
+# The glob below is deliberately NON-recursive: tools/test/manual/ holds
+# operator-driven tools (a playthrough driver, a frame profiler) that assert
+# nothing and are never gated. Putting them in a subdirectory exempts them
+# structurally, so this list does not have to grow a name per tool and then
+# rot when one is renamed.
 excluded='^(browser|shots)$'
 for f in tools/test/*.mjs; do
   n="$(basename "$f" .mjs)"

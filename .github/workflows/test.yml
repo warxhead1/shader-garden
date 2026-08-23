@@ -10,15 +10,37 @@ name: Test battery
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      tier:
+        description: 'fast = skip the SwiftShader-bound visual suites; full = everything'
+        type: choice
+        options: [fast, full]
+        default: full
+  # The full battery on a schedule, so the suites the PR tier skips still run
+  # every day against main rather than only when someone remembers to dispatch.
+  schedule:
+    - cron: '17 9 * * *'
   # Pushes to main don't trigger this directly — deploy.yml calls this
   # workflow as a job (workflow_call) and gates the Pages deploy on it via a
   # real `needs:` in that run's graph. Triggering push:main here too would
   # just run the same battery twice for the same commit.
   workflow_call:
+    inputs:
+      tier:
+        description: 'fast|full — deploy.yml passes full, since a Pages deploy should not skip suites'
+        type: string
+        default: full
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Without this the job inherits GitHub's 360-minute default, so a suite
+    # that genuinely hangs burns six hours of runner time before anything
+    # intervenes. Observed real cost on this runner: the whole battery is
+    # dominated by SwiftShader software-rasterizing a full-screen raymarch
+    # (`garden` alone measured >40 min), so this is set well above the honest
+    # worst case rather than tight — it is a runaway backstop, not a budget.
+    timeout-minutes: 150
     env:
       # GitHub's runners have no GPU. Every suite that calls assertRealGpu()/
       # assertRealWebgl2() would refuse the SwiftShader adapter it finds here,
@@ -30,6 +52,14 @@ jobs:
       # pre-push hook: the "these pixels came off real hardware" claim is
       # unprovable here by construction, so it is enforced there instead.
       # Nothing in CI should ever be read as evidence of real-GPU behaviour.
+      # A GitHub runner has no GPU, so every full-screen raymarch suite is
+      # software-rasterized by SwiftShader. Measured on this runner: `garden`
+      # alone exceeded 40 minutes against 283s on a real GPU. Those suites
+      # still matter, but paying for them on every PR push makes the gate
+      # unusable, so the PR tier skips them and the nightly `schedule` above
+      # runs the whole battery. deploy.yml calls this with tier=full — a
+      # Pages deploy never ships on a partial run.
+      TIER: ${{ inputs.tier || (github.event_name == 'pull_request' && 'fast' || 'full') }}
       SG_ALLOW_SOFTWARE: '1'
       # A GitHub runner is 2 cores with no GPU, and it is roughly an order of
       # magnitude slower than the workstation every timeout in this harness was
@@ -133,18 +163,22 @@ jobs:
         working-directory: tools/test
         run: node smoke.mjs 2>&1 | tee out/logs/smoke.log
       - name: garden
+        if: env.TIER == 'full'
         working-directory: tools/test
         run: node garden.mjs 2>&1 | tee out/logs/garden.log
       - name: garden-connections
+        if: env.TIER == 'full'
         working-directory: tools/test
         run: node garden-connections.mjs 2>&1 | tee out/logs/garden-connections.log
       - name: garden-movement
         working-directory: tools/test
         run: node garden-movement.mjs 2>&1 | tee out/logs/garden-movement.log
       - name: garden-perf
+        if: env.TIER == 'full'
         working-directory: tools/test
         run: node garden-perf.mjs 2>&1 | tee out/logs/garden-perf.log
       - name: garden-wgsl-parity
+        if: env.TIER == 'full'
         working-directory: tools/test
         run: node garden-wgsl-parity.mjs 2>&1 | tee out/logs/garden-wgsl-parity.log
       - name: garden-camera
@@ -175,6 +209,7 @@ jobs:
         working-directory: tools/test
         run: node comp2.mjs 2>&1 | tee out/logs/comp2.log
       - name: comp3
+        if: env.TIER == 'full'
         working-directory: tools/test
         run: node comp3.mjs 2>&1 | tee out/logs/comp3.log
       - name: anatomy
@@ -210,6 +245,7 @@ jobs:
         working-directory: tools/test
         run: node servesite.mjs 2>&1 | tee out/logs/servesite.log
       - name: perf
+        if: env.TIER == 'full'
         working-directory: tools/test
         run: node perf.mjs 2>&1 | tee out/logs/perf.log
 

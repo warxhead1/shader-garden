@@ -368,6 +368,86 @@ export const scaled = (ms) => Math.round(ms * TIME_SCALE);
 // is greppable.
 export const slowSleep = (ms) => new Promise((r) => setTimeout(r, scaled(ms)));
 
+// `.garden-canvas` is prepended SYNCHRONOUSLY by runtime-host's build(),
+// before either backend is attempted — so its absence never means "the GPU is
+// slow", it means the organ never got as far as building, or built and then
+// removed the canvas because BOTH backends failed (runtime-host.js: `if
+// (!picked) { canvas.remove(); ... }`). A bare `errors.push('no
+// garden-canvas')` cannot tell those apart, and it took four CI round trips
+// to find out which one it was. So the timeout path SAYS WHAT IT SAW: enough
+// state to distinguish "still booting", "route never mounted" and "both
+// backends refused" from a log read hours later.
+export async function awaitGardenCanvas(page, errors) {
+  try {
+    await page.waitForSelector('.garden-canvas', { timeout: 8000 });
+    return true;
+  } catch {
+    const seen = await page.evaluate(() => ({
+      hash: location.hash,
+      canvases: document.querySelectorAll('canvas').length,
+      classes: [...document.querySelectorAll('canvas')].map((c) => c.className),
+      stage: !!document.querySelector('.garden-stage, .stage'),
+      badge: document.querySelector('.badge-backend')?.textContent || null,
+      fps: document.querySelector('.badge-fps')?.textContent || null,
+      bodyLen: document.body.innerHTML.length,
+    })).catch((e) => ({ evaluateFailed: String(e) }));
+    errors.push('no garden-canvas ' + JSON.stringify(await gardenState(page)));
+    return false;
+  }
+}
+
+// One snapshot shape, used by every "the garden never came up" path in this
+// file. Kept deliberately fat: these failures are rare, contention-dependent
+// and have so far only ever been seen in a log someone reads hours later.
+export async function gardenState(page) {
+  return page.evaluate(() => ({
+    hash: location.hash,
+    canvases: document.querySelectorAll('canvas').length,
+    classes: [...document.querySelectorAll('canvas')].map((c) => c.className),
+    canvasSize: [...document.querySelectorAll('canvas')].map((c) => [c.width, c.height]),
+    trayItems: document.querySelectorAll('.garden-tray-item').length,
+    backend: document.querySelector('.badge-backend')?.textContent || null,
+    fps: document.querySelector('.badge-fps')?.textContent || null,
+    runtime: typeof window.__runtime,
+    contextLost: (() => { try { return window.__runtime?.isContextLost?.() ?? null; } catch (e) { return String(e); } })(),
+    bodyLen: document.body.innerHTML.length,
+  })).catch((e) => ({ evaluateFailed: String(e) }));
+}
+
+// The mount is not ready when `.garden-canvas` appears — that element is
+// prepended before either backend is even attempted. index.js attaches its
+// window keydown listener well AFTER the async runtimeHost() build, so a key
+// sent between those two moments lands on nothing and produces silently zero
+// movement. The fps badge is populated by the runtime's own render loop, so
+// it is the first observable downstream of the same build the listener waits
+// on.
+//
+// EVERY section here waits for it, not just the first. The old comment said
+// only the cold first page needed the margin and "every later page in this
+// run is on a warm cache" — measured false on 2026-08-23, on a box at load
+// average 43 with a sibling repo's CI runner and a rustc build going: the
+// garden came up at 11 fps and sections (c) and (f) each recorded ZERO
+// uniform writes while (a), which did wait, passed. A warm module cache does
+// not warm the GPU.
+export async function awaitGardenReady(page, errors) {
+  const haveCanvas = await awaitGardenCanvas(page, errors);
+  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
+  if (!haveCanvas) return false;
+  // A CEILING, so it costs nothing on a run that boots promptly, and scaled
+  // by TIME_SCALE rather than counted in SLEEP_SCALE'd steps — the original
+  // `20 x sleep(300)` in garden-movement silently fell from a 36s budget to
+  // 12s when sleeps moved onto the smaller multiplier, the wrong direction
+  // for a wait that exists precisely because the machine may be slow.
+  const live = await page.waitForFunction(
+    () => !!document.querySelector('.badge-fps')?.textContent,
+    undefined,
+    { timeout: scaled(30000), polling: 300 },
+  ).then(() => true).catch(() => false);
+  if (!live) errors.push('fps badge never populated ' + JSON.stringify(await gardenState(page)));
+  await sleep(500); // margin past the first frame for the rest of boot's synchronous setup to land
+  return live;
+}
+
 // NOT action-scoped, despite the name it previously carried: setDefaultTimeout
 // governs EVERY page wait that does not pass an explicit timeout — click,
 // waitForSelector, waitForFunction alike. Codex flagged the old name

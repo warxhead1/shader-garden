@@ -46,7 +46,7 @@
 // resolve to real hardware — WebGL2 to the integrated AMD Raphael, WebGPU
 // to the discrete RTX 3070 Ti. assertRealWebgl2(page) below guards against
 // silently landing on SwiftShader.
-import { launch, serveSite, sleep, gotoSafe, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
+import { launch, serveSite, sleep, gotoSafe, assertRealGpu, assertRealWebgl2, awaitGardenReady } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -105,7 +105,7 @@ async function probe(page, x, y) {
   await armBlendSpy(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenReady(page, errors); // canvas + a live render loop; see browser.mjs
   await assertRealGpu(page);
 
   check('(a) boots in Orbit', await page.$eval('.garden-cam-select', (el) => el.value) === '0');
@@ -116,7 +116,6 @@ async function probe(page, x, y) {
   // headless-shell baseline this margin was originally sized against).
   await sleep(500);
   await page.evaluate(() => { window.__blendCalls.length = 0; });
-  await page.bringToFront();
   await page.keyboard.press('2'); // Follow
   await sleep(600); // outlive the ~450ms blend
   check('(a) keyboard 2 switches the select to Follow', await page.$eval('.garden-cam-select', (el) => el.value) === '1');
@@ -205,7 +204,7 @@ async function probe(page, x, y) {
   const page = await freshPage(errors);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenReady(page, errors); // canvas + a live render loop; see browser.mjs
   await sleep(500);
 
   const oracles = [
@@ -230,7 +229,7 @@ async function probe(page, x, y) {
   const page = await freshPage(errors);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenReady(page, errors); // canvas + a live render loop; see browser.mjs
 
   await page.keyboard.press('2'); // Follow, before moving — proves it tracks from the start too
   await sleep(600);

@@ -316,3 +316,96 @@ test('removeMember ends the round early if the seeker disconnects', () => {
   const r = removeMember(room, 'a', 5);
   assert.equal(r.room.game.phase, 'over');
 });
+
+// --- "Sculptor's Tag" (docs/the-commons-design.md §0) -----------------------
+// The seeker edits the world to flush hiders out, so the commit lease is
+// assigned BY ROLE for the round rather than taken at the lectern.
+
+function startRound(nowMs = 0) {
+  let room = createRoom('sc', nowMs);
+  room = join(room, 'a', 'Ada', nowMs).room;
+  room = join(room, 'b', 'Baz', nowMs).room;
+  room = join(room, 'c', 'Cy', nowMs).room;
+  const r = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs });
+  return r.room;
+}
+
+test("Sculptor's Tag: entering `seeking` hands the commit lease to the seeker", () => {
+  let room = startRound(0);
+  assert.equal(room.game.phase, 'hiding');
+  assert.equal(room.lease.holder, null, 'hiding phase must not grant the lease yet');
+
+  const r = tick(room, 30001); // HIDE_MS elapsed
+  room = r.room;
+  assert.equal(room.game.phase, 'seeking');
+  assert.equal(room.lease.holder, room.game.seekerId, 'seeker holds the lease by role');
+
+  // The transition must BROADCAST the new holder in the same tick — a client
+  // told it is the seeker but not that it holds the lease cannot act.
+  const leaseMsg = r.sends.find((s) => s.msg.t === 'lease');
+  assert.ok(leaseMsg, 'phase change broadcasts the lease');
+  assert.equal(leaseMsg.to, '*');
+  assert.equal(leaseMsg.msg.holder, room.game.seekerId);
+});
+
+test("Sculptor's Tag: the lectern is inert for non-seekers during `seeking`", () => {
+  let room = tick(startRound(0), 30001).room;
+  const seeker = room.game.seekerId;
+  const other = [...room.members.keys()].find((id) => id !== seeker);
+
+  // Standing in the ring is what normally qualifies a claim.
+  room = reduce(room, { from: other, msg: { t: 'ring', inRing: true }, nowMs: 30002 }).room;
+  const r = reduce(room, { from: other, msg: { t: 'lease.request' }, nowMs: 30003 });
+  assert.equal(r.room.lease.holder, seeker, 'a hider cannot take the round lease');
+  assert.equal(r.sends.length, 1);
+  assert.equal(r.sends[0].to, other, 'denial goes only to the requester');
+});
+
+test("Sculptor's Tag: the role lease does not expire on the lectern TTL", () => {
+  let room = tick(startRound(0), 30001).room;
+  const seeker = room.game.seekerId;
+  // Well past LEASE_TTL_MS, but still inside the round.
+  const r = tick(room, 30001 + LEASE_TTL_MS + 5000);
+  assert.equal(r.room.game.phase, 'seeking');
+  assert.equal(r.room.lease.holder, seeker, 'the verb survives the whole round');
+});
+
+test("Sculptor's Tag: leaving `seeking` releases the role lease", () => {
+  let room = tick(startRound(0), 30001).room;
+  const r = tick(room, 30001 + 120001); // SEEK_MS elapsed
+  assert.equal(r.room.game.phase, 'over');
+  assert.equal(r.room.lease.holder, null, 'the round ending returns the lectern');
+});
+
+test('tagging the last hider ends the round immediately', () => {
+  let room = tick(startRound(0), 30001).room;
+  const seeker = room.game.seekerId;
+  const hiders = [...room.members.keys()].filter((id) => id !== seeker);
+  // Co-locate so the server's distance check passes.
+  for (const id of [seeker, ...hiders]) {
+    room = reduce(room, { from: id, msg: { t: 'pose', x: 0, y: 0, z: 0, yaw: 0 }, nowMs: 30002 }).room;
+  }
+
+  let r = reduce(room, { from: seeker, msg: { t: 'tag', targetId: hiders[0] }, nowMs: 30003 });
+  room = r.room;
+  assert.equal(room.game.phase, 'seeking', 'one hider left — the round continues');
+
+  r = reduce(room, { from: seeker, msg: { t: 'tag', targetId: hiders[1] }, nowMs: 30004 });
+  room = r.room;
+  assert.equal(room.game.phase, 'over', 'no hiders left — the round ends now');
+  assert.equal(room.lease.holder, null, 'ending early still returns the lectern');
+  assert.equal(room.game.scores[seeker], 2);
+});
+
+test('a hider who disconnects cannot leave the round unwinnable', () => {
+  let room = tick(startRound(0), 30001).room;
+  const seeker = room.game.seekerId;
+  const hiders = [...room.members.keys()].filter((id) => id !== seeker);
+  for (const id of [seeker, hiders[0]]) {
+    room = reduce(room, { from: id, msg: { t: 'pose', x: 0, y: 0, z: 0, yaw: 0 }, nowMs: 30002 }).room;
+  }
+  room = removeMember(room, hiders[1], 30003).room;
+
+  const r = reduce(room, { from: seeker, msg: { t: 'tag', targetId: hiders[0] }, nowMs: 30004 });
+  assert.equal(r.room.game.phase, 'over', 'the only remaining hider was found');
+});

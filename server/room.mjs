@@ -200,6 +200,12 @@ export function reduce(room, { from, msg, nowMs }) {
 
     case 'lease.request': {
       const member = room.members.get(from);
+      // During `seeking` the lease belongs to the seeker by role, so the
+      // lectern is inert: anyone else walking up to it gets the current truth
+      // back, exactly like any other denial.
+      if (room.game.phase === 'seeking' && from !== room.game.seekerId) {
+        return { room, sends: [{ to: from, msg: leaseFields(room, nowMs) }] };
+      }
       const expired = room.lease.holder == null || nowMs >= room.lease.expiresAt;
       if (expired && member.inRing) {
         room.lease.holder = from;
@@ -264,7 +270,21 @@ export function reduce(room, { from, msg, nowMs }) {
       if (Math.hypot(dx, dz) >= TAG_DISTANCE) return { room, sends: [] };
       room.game.found.add(msg.targetId);
       room.game.scores[from] = (room.game.scores[from] || 0) + 1;
-      return { room, sends: [{ to: '*', msg: gameFields(room) }] };
+      // Everyone found ends the round NOW. Without this the phase timer ran
+      // the full SEEK_MS regardless, so a seeker who tagged the last hider in
+      // twenty seconds still watched an empty world for a hundred more —
+      // dead time that reads as the game being broken rather than won.
+      // Counted against live members (minus the seeker) so a hider who
+      // disconnects mid-round cannot leave the round unwinnable.
+      const hidersLeft = [...room.members.keys()]
+        .filter((id) => id !== room.game.seekerId && !room.game.found.has(id));
+      const sends = [];
+      if (hidersLeft.length === 0) {
+        room.game.phase = 'over';
+        room.game.endsAt = nowMs + OVER_MS;
+        sends.push(...releaseRoleLease(room, nowMs));
+      }
+      return { room, sends: [{ to: '*', msg: gameFields(room) }, ...sends] };
     }
 
     // Not in spec §2.3's message table, which enumerates every OTHER client
@@ -335,15 +355,43 @@ function flushPoses(room, nowMs) {
   return sends;
 }
 
+// "Sculptor's Tag" (docs/the-commons-design.md §0): during `seeking` the
+// seeker does not walk around looking, they EDIT THE WORLD to flush people
+// out — so the commit lease is assigned BY ROLE for the duration of the round
+// instead of being taken at the lectern. The lectern stays the lobby-mode
+// baton; this is the only change the design doc asks for, because the
+// commit->recompile pipeline already does the rest.
+//
+// Returned as sends so the transition broadcasts the new holder in the same
+// tick as the phase change; a client that learns it is the seeker but not
+// that it holds the lease cannot act on the mechanic.
+function grantRoleLease(room, nowMs) {
+  room.lease.holder = room.game.seekerId;
+  // Held for the whole round: expiry is what the lectern's TTL is for, and a
+  // seeker whose lease lapsed mid-round would silently lose the verb.
+  room.lease.expiresAt = nowMs + SEEK_MS + OVER_MS;
+  return [{ to: '*', msg: leaseFields(room, nowMs) }];
+}
+
+function releaseRoleLease(room, nowMs) {
+  if (room.lease.holder !== room.game.seekerId) return [];
+  room.lease.holder = null;
+  room.lease.expiresAt = 0;
+  return [{ to: '*', msg: leaseFields(room, nowMs) }];
+}
+
 function advanceGame(room, nowMs) {
   const g = room.game;
   if (g.phase === 'lobby' || nowMs < g.endsAt) return [];
+  const extra = [];
   if (g.phase === 'hiding') {
     g.phase = 'seeking';
     g.endsAt = nowMs + SEEK_MS;
+    extra.push(...grantRoleLease(room, nowMs));
   } else if (g.phase === 'seeking') {
     g.phase = 'over';
     g.endsAt = nowMs + OVER_MS;
+    extra.push(...releaseRoleLease(room, nowMs));
   } else if (g.phase === 'over') {
     g.phase = 'lobby';
     g.endsAt = 0;
@@ -352,7 +400,7 @@ function advanceGame(room, nowMs) {
     // visible on the scoreboard until the next round actually starts, and
     // seekerId is what pickSeeker() reads to skip the just-finished seeker.
   }
-  return [{ to: '*', msg: gameFields(room) }];
+  return [{ to: '*', msg: gameFields(room) }, ...extra];
 }
 
 /**
@@ -363,7 +411,11 @@ function advanceGame(room, nowMs) {
  */
 export function tick(room, nowMs) {
   const sends = [];
-  if (room.lease.holder && nowMs >= room.lease.expiresAt) {
+  // A role lease is not on the lectern's TTL — it ends with the round, in
+  // advanceGame(). Expiring it here would take the seeker's verb away
+  // mid-round for no reason a player could see.
+  const roleHeld = room.game.phase === 'seeking' && room.lease.holder === room.game.seekerId;
+  if (room.lease.holder && !roleHeld && nowMs >= room.lease.expiresAt) {
     room.lease.holder = null;
     room.lease.expiresAt = 0;
     sends.push({ to: '*', msg: leaseFields(room, nowMs) });

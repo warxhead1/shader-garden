@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, sleep, gotoSafe, SITE_ROOT, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
+import { launch, serveSite, sleep, slowSleep, scaled, gotoSafe, SITE_ROOT, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 
 const routes = process.argv.slice(2);
 const DEFAULT_ROUTES = ['#/', '#/s/biome-rolling-hills', '#/edit', '#/edit?k=biome-rolling-hills', '#/garden'];
@@ -336,7 +336,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     .catch((e) => console.log('NAV', e.message));
   await page.waitForSelector('.hero-canvas', { timeout: 8000 }).catch(() => {});
 
-  await sleep(500);
+  // Same rate claim as the resume check below (`beforeHide > 5`), so the same
+  // machine-speed-proportional window.
+  await slowSleep(500);
   // Zero the counter and hide the tab in ONE evaluate. Split across two CDP
   // round-trips there is a live window of a few ms between "counter = 0" and
   // "tab is hidden" in which the still-running hero legitimately schedules a
@@ -362,9 +364,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   // claim, and it is strictly stronger than `=== 0` in one respect: a loop that
   // kept running slowly would satisfy a single lenient count but cannot hold
   // steady across two samples.
-  await sleep(500);
+  await slowSleep(500);
   const hiddenDrain = await page.evaluate(() => window.__raf);
-  await sleep(500);
+  await slowSleep(500);
   const hiddenSettled = await page.evaluate(() => window.__raf);
   check('(f) hero has a running rAF loop while visible', beforeHide > 5, 'raf=' + beforeHide);
   check('(f) hero stops requesting frames once the tab hides',
@@ -382,10 +384,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   // assertion wearing the costume of a widened budget, which is exactly the
   // substitution the wait-vs-assertion rule is supposed to forbid.
   //
-  // sleep() is scaled by SG_TIME_SCALE, so the rate survives the move to a slow
-  // machine instead of being deleted: at scale 6 this is ">5 frames in 3000ms",
-  // the same frames-per-unit-of-machine-time being asserted here.
-  await sleep(500);
+  // slowSleep() is scaled by SG_TIME_SCALE, so the rate survives the move to a
+  // slow machine instead of being deleted: at scale 6 this is ">5 frames in
+  // 3000ms", the same frames-per-unit-of-machine-time being asserted here.
+  // It is slowSleep and not sleep BECAUSE of that: once sleeps moved to the
+  // smaller SLEEP_SCALE, plain sleep(500) shrank this window from 3000ms to
+  // 1000ms on CI, which tightened a rate assertion nobody meant to tighten
+  // and failed SwiftShader on hardware speed rather than on a defect.
+  await slowSleep(500);
   const afterShow = await page.evaluate(() => window.__raf);
   check('(f) hero resumes once the tab is visible again', afterShow > 5, 'raf=' + afterShow);
   await page.close();
@@ -417,7 +423,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     await page.evaluate((yy) => window.scrollTo(0, yy), y);
     await sleep(350);
   }
-  await sleep(2000); // drain whatever the last stops queued
+  // Wait on the CONDITION, not on a guessed duration. Every card gets its
+  // <img> at render time with an empty src (gallery/index.js), and thumbs.js
+  // pumps one card per rAF frame — so "no empty src left" cannot be satisfied
+  // vacuously by cards that have not been created yet, and the assertion below
+  // is unchanged: if the pump never drains, the poll times out and the check
+  // still fails. A fixed sleep(2000) here was a guess about SwiftShader's
+  // frame rate, and it stopped being a big enough guess the moment sleeps
+  // moved to the smaller SLEEP_SCALE.
+  await page.waitForFunction(
+    () => {
+      const imgs = [...document.querySelectorAll('.card img')];
+      return imgs.length > 0 && imgs.every((i) => i.getAttribute('src'));
+    },
+    undefined,
+    { timeout: scaled(20000), polling: 250 },
+  ).catch(() => { /* fall through: the assertion below reports what is actually there */ });
   await page.evaluate(() => window.scrollTo(0, 0));
   await sleep(500);
   const first = await page.$$eval('.card img', (imgs) => imgs.map((i) => i.src));

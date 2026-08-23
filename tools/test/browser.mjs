@@ -357,6 +357,17 @@ export const SLEEP_SCALE = readScale('SG_SLEEP_SCALE', Math.min(TIME_SCALE, 2));
 // place a machine-speed assumption was acknowledged.
 export const scaled = (ms) => Math.round(ms * TIME_SCALE);
 
+// A sleep that scales with TIME_SCALE rather than SLEEP_SCALE. Use it — and
+// only it — where the elapsed window is itself the denominator of an
+// assertion: ">5 frames in 500ms" is a RATE, and shortening the window
+// silently RAISES the bar instead of lowering the cost. Splitting sleep from
+// timeout was right for settle-waits, but it broke exactly these call sites,
+// which had been relying on `sleep()` tracking SG_TIME_SCALE to stay
+// frames-per-unit-of-MACHINE-time on a 6x-slower runner. Plain settle-waits
+// keep using sleep(); this is the narrow exception, deliberately named so it
+// is greppable.
+export const slowSleep = (ms) => new Promise((r) => setTimeout(r, scaled(ms)));
+
 // NOT action-scoped, despite the name it previously carried: setDefaultTimeout
 // governs EVERY page wait that does not pass an explicit timeout — click,
 // waitForSelector, waitForFunction alike. Codex flagged the old name

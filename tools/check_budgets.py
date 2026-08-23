@@ -313,7 +313,11 @@ AGGREGATES = [
     # AND index.js now carries its own row below — this aggregate stays the
     # organ-wide ceiling, those rows are the per-module guards. Actual
     # 2819/2950. Raised deliberately, this merge.
-    ("site/js/organs/garden/*.js", 2950, None),
+    # 2950 -> 3010: carries the MP-6 client work below (name input + rename,
+    # role-aware HUD, panel clearing on the round edge, tray.collapse()). The
+    # aggregate moves WITH the per-file row so a single file cannot grow the
+    # organ silently. Actual 2955/3010 at the time of writing.
+    ("site/js/organs/garden/*.js", 3010, None),
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.
@@ -321,7 +325,12 @@ AGGREGATES = [
     # (previously pinned at 2) plus the onQualityStep callback the host's new
     # rung calls, which is what actually delivers the cheaper terrain fbm to a
     # machine that cannot hold framerate. Actual 1061/1065.
-    ("site/js/organs/garden/index.js", 1065, None),
+    # 1065 -> 1135: MP-6's client half. The name input and its rename wiring
+    # (a room where everyone is `wanderer` is not a game for friends), the
+    # role-aware game line — it read "seek!" to hiders and seekers alike, and
+    # is where Sculptor's Tag has to be taught — names on the scoreboard in
+    # place of raw ids, and clearing the reading panels on the round edge.
+    ("site/js/organs/garden/index.js", 1135, None),
     # net.js: connectRoom() + the frozen module surface in spec §8.1
     # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
     ("site/js/organs/garden/net.js", 480, None),
@@ -334,7 +343,12 @@ AGGREGATES = [
     # stays that way — growth here is the signal that I/O or timers leaked in.
     # Actuals at the MP merge: 305 / 376 / 246.
     ("server/relay.mjs", 350, None),
-    ("server/room.mjs", 420, None),
+    # 420 -> 450: MP-6. Sculptor's Tag (docs/the-commons-design.md §0) needs
+    # grantRoleLease/releaseRoleLease plus the seeking-phase guards in
+    # lease.request and tick(); ending the round on the last tag needs the
+    # live-hider count; and `rename` exists because a room where everyone is
+    # called `wanderer` is unplayable. Actual 440/450.
+    ("server/room.mjs", 450, None),
     ("server/ws.mjs", 290, None),
     # ED-4 (v2 blueprint work item 17, accept line "editor organ total <=
     # 1500 LOC"): the whole first-party editor organ — index/pipeline/

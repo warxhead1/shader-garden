@@ -409,3 +409,27 @@ test('a hider who disconnects cannot leave the round unwinnable', () => {
   const r = reduce(room, { from: seeker, msg: { t: 'tag', targetId: hiders[0] }, nowMs: 30004 });
   assert.equal(r.room.game.phase, 'over', 'the only remaining hider was found');
 });
+
+test('rename changes the member name and tells everyone', () => {
+  let room = createRoom('rn', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = join(room, 'b', 'Baz', 0).room;
+
+  const r = reduce(room, { from: 'b', msg: { t: 'rename', name: '  Bazza  ' }, nowMs: 1 });
+  room = r.room;
+  assert.equal(room.members.get('b').name, 'Bazza', 'trimmed, same sanitizer as join');
+  assert.equal(r.sends.length, 1);
+  assert.equal(r.sends[0].to, '*');
+  assert.deepEqual(r.sends[0].msg, { t: 'peer.rename', id: 'b', name: 'Bazza' });
+
+  // Empty falls back rather than producing a nameless member.
+  room = reduce(room, { from: 'b', msg: { t: 'rename', name: '   ' }, nowMs: 2 }).room;
+  assert.equal(room.members.get('b').name, 'wanderer');
+
+  // Over-long names are cut, not rejected.
+  room = reduce(room, { from: 'b', msg: { t: 'rename', name: 'x'.repeat(50) }, nowMs: 3 }).room;
+  assert.equal(room.members.get('b').name.length, 24);
+
+  // A no-op rename broadcasts nothing.
+  assert.equal(reduce(room, { from: 'b', msg: { t: 'rename', name: 'x'.repeat(24) }, nowMs: 4 }).sends.length, 0);
+});

@@ -125,9 +125,15 @@ export function createComponentTray({ components, connections, onHover, onSelect
     else if (e.key === 'Enter' && current >= 0) { e.preventDefault(); onSelect(components[current]); }
   });
 
+  // One place that knows how collapsed state is expressed, so the click
+  // handler and the programmatic path below cannot drift on the aria bit.
+  function setCollapsed(next) {
+    tray.classList.toggle('garden-tray-collapsed', next);
+    toggle.setAttribute('aria-expanded', String(!next));
+  }
+
   toggle.addEventListener('click', () => {
-    const collapsed = tray.classList.toggle('garden-tray-collapsed');
-    toggle.setAttribute('aria-expanded', String(!collapsed));
+    setCollapsed(!tray.classList.contains('garden-tray-collapsed'));
   });
 
   function setCost(id, ms) {
@@ -142,5 +148,7 @@ export function createComponentTray({ components, connections, onHover, onSelect
   }
 
   tray.append(head, list);
-  return { el: tray, setCost, setEdited, destroy() {} };
+  // collapse() is idempotent: a round starting while the rail is already
+  // collapsed must not toggle it back open.
+  return { el: tray, setCost, setEdited, collapse: () => setCollapsed(true), destroy() {} };
 }

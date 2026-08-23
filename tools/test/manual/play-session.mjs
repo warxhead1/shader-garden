@@ -19,6 +19,9 @@ const hud = (p) => p.evaluate(() => {
   return {
     phase: t('.garden-game-pill'), line: t('.garden-game-line'),
     roster: [...document.querySelectorAll('.garden-roster li, .garden-roster-row')].map(e => e.textContent.trim()),
+    leaseLine: t('.garden-lease-line'),
+    trayCollapsed: !!document.querySelector('.garden-tray-collapsed'),
+    probeOpen: !!document.querySelector('.probe-panel'),
     lease: t('.garden-lease-btn'),
     fps: t('.garden-fps') || null,
   };
@@ -30,6 +33,10 @@ async function join(name) {
   await p.waitForSelector('canvas', { timeout: 20000 });
   await assertRealGpu(p);
   await sleep(2500);
+  // MP-6: name yourself through the product's own control, not a URL param.
+  await p.fill('.garden-name-input', name);
+  await p.dispatchEvent('.garden-name-input', 'change');
+  await sleep(800);
   return p;
 }
 
@@ -62,7 +69,10 @@ console.log('SEEKING B:', JSON.stringify(seekB));
 await A.screenshot({ path: `${SHOT}/4-seeking.png` });
 
 // Who is the seeker? Whichever HUD says 'seek!' owns the tag verb.
-const seeker = seekA.line.includes('seek') ? A : B;
+// Identify the seeker by the LEASE, not by wording: Sculptor's Tag gives the
+// round's lease to the seeker, and the phrasing of the game line is exactly
+// the sort of thing that changes.
+const seeker = seekA.leaseLine.startsWith('you hold') ? A : B;
 await seeker.screenshot({ path: `${SHOT}/5-seeker-view.png` });
 console.log('SEEKER IS:', seeker === A ? 'Ada' : 'Baz');
 

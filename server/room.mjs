@@ -198,6 +198,18 @@ export function reduce(room, { from, msg, nowMs }) {
       return { room, sends: [] };
     }
 
+    // A game "for friends, not a cheat-proof system" is unplayable when
+    // everyone is called `wanderer`. The name arrives in `hello`, but nothing
+    // could change it afterwards, so a player who set one had to reconnect to
+    // apply it. Same sanitizer as join — 24 chars, trimmed, never empty.
+    case 'rename': {
+      const member = room.members.get(from);
+      const next = sanitizeName(msg.name);
+      if (member.name === next) return { room, sends: [] };
+      member.name = next;
+      return { room, sends: [{ to: '*', msg: { t: 'peer.rename', id: from, name: next } }] };
+    }
+
     case 'lease.request': {
       const member = room.members.get(from);
       // During `seeking` the lease belongs to the seeker by role, so the

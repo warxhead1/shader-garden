@@ -124,6 +124,12 @@ function loadMpName() {
   } catch { return ''; }
 }
 
+// Same swallow-and-continue shape as loadMpName: a browser with storage
+// disabled still gets to play, it just does not remember the name next time.
+function saveMpName(name) {
+  try { localStorage.setItem(MP_NAME_KEY, name); } catch { /* private mode */ }
+}
+
 export async function mount(ctx) {
   const { root, bus } = ctx;
   root.replaceChildren();
@@ -193,6 +199,15 @@ export async function mount(ctx) {
     const startBtn = el('button', 'btn btn-small btn-ghost garden-game-start', 'Start hide-and-seek');
     startBtn.type = 'button';
     startBtn.hidden = true;
+    // A room where everyone is 'wanderer' is not a game for friends. The name
+    // was only ever read from localStorage at connect time and nothing wrote
+    // it, so this is the missing half. `change` (not `input`) so a rename
+    // lands when the player is done typing, not once per keystroke.
+    const nameInput = el('input', 'garden-name-input');
+    nameInput.type = 'text';
+    nameInput.maxLength = 24;                 // matches the server's sanitizer
+    nameInput.placeholder = 'your name';
+    nameInput.value = loadMpName();
     const ghostNote = el('div', 'garden-ghost-note muted',
       'the garden is a ghost world — hiding is visual only, you pass through matter');
     const mpPanel = el('div', 'garden-mp-panel glass');
@@ -200,7 +215,7 @@ export async function mount(ctx) {
     const leaseHead = el('div', 'garden-mp-head', 'The lectern');
     const gameHead = el('div', 'garden-mp-head', 'Hide and seek');
     mpPanel.append(
-      rosterHead, roster,
+      rosterHead, nameInput, roster,
       leaseHead, leaseLine, leaseBtn,
       gameHead, gamePill, gameLine, startBtn,
       ghostNote,
@@ -208,6 +223,7 @@ export async function mount(ctx) {
     stage.append(mpPanel);
     mp = {
       statusPill, roomBadge, roster, leaseLine, leaseBtn, gamePill, gameLine, startBtn, mpPanel,
+      nameInput, members: [],
       selfId: null, holderId: null, phase: 'lobby',
     };
   }
@@ -315,6 +331,7 @@ export async function mount(ctx) {
   let net = null;
   let leaseHeld = 0, leaseHue = 0; // uLeaseHeld/uLeaseHue mirror, reapplied every (re)build below
   let ring = false;                // lectern-radius membership, for transition-only `ring` sends (§5.1)
+  let lastSeekerId = null;         // whose round it is, for probingAllowed() below
   let readOnlyMirrors = new Map(); // componentId -> live { setBody } handle for an open non-holder editor (§5.2)
 
   // §5.1/§8.1: uSpongeOn + the lease uniforms are MP-only — NEVER set on the
@@ -802,8 +819,10 @@ export async function mount(ctx) {
     }
   }
 
-  function renderRoster(members) {
+  function renderRoster(members, selfId) {
     if (!mp) return;
+    mp.members = members || [];
+    if (selfId !== undefined) mp.selfId = selfId;
     mp.roster.replaceChildren();
     for (const m of members || []) {
       const li = el('li', 'garden-roster-item');
@@ -833,23 +852,49 @@ export async function mount(ctx) {
 
   function renderGame(game) {
     if (!mp || !game) return;
-    mp.phase = game.phase;
     mp.gamePill.textContent = game.phase;
     mp.gamePill.className = 'pill garden-game-pill garden-game-' + game.phase;
+    // The line was role-blind: everyone read "seek!", including the hiders.
+    // It is also where Sculptor's Tag has to be TAUGHT — the seeker holding
+    // the lectern by role is the whole mechanic, and a player who is not told
+    // they can edit the world will just walk around looking.
+    lastSeekerId = game.seekerId ?? null;
+    const isSeeker = game.seekerId != null && game.seekerId === mp.selfId;
+    // The reading panels cover most of the viewport (the component rail on
+    // one side, the probe panel on the other). That is right for exploring
+    // the garden and wrong for playing in it — you cannot hide in a world you
+    // cannot see. Clear them once for the phase a player has to LOOK in.
+    //
+    // The seeker is exempt: those panels are their toolset, since Sculptor's
+    // Tag is played by editing components. Fires on the phase EDGE only, so a
+    // player who deliberately reopens a panel mid-round keeps it.
+    if (game.phase !== mp.phase && (game.phase === 'hiding' || game.phase === 'seeking') && !isSeeker) {
+      closePanel();
+      tray.collapse();
+    }
     if (game.phase === 'lobby') {
       mp.gameLine.textContent = 'waiting — press Start with 2+ people in the room';
       mp.startBtn.hidden = false;
     } else if (game.phase === 'over') {
-      const scores = Object.entries(game.scores || {}).map(([id, s]) => id + ': ' + s).join(', ');
+      const nameOf = (id) => (mp.members.find((m) => m.id === id) || {}).name || 'someone';
+      const scores = Object.entries(game.scores || {})
+        .sort((x, y) => y[1] - x[1])
+        .map(([id, n]) => nameOf(id) + ': ' + n)
+        .join(', ');
       mp.gameLine.textContent = 'round over' + (scores ? ' — ' + scores : '');
       mp.startBtn.hidden = false;
     } else if (game.phase === 'hiding') {
-      mp.gameLine.textContent = 'hide! the seeker is blind for now';
+      mp.gameLine.textContent = isSeeker
+        ? 'you are the seeker — the world is yours the moment seeking starts'
+        : 'hide! the seeker is blind for now';
       mp.startBtn.hidden = true;
     } else {
-      mp.gameLine.textContent = 'seek!';
+      mp.gameLine.textContent = isSeeker
+        ? 'you hold the lectern — edit the world to flush them out'
+        : 'stay hidden — the seeker can reshape the world around you';
       mp.startBtn.hidden = true;
     }
+    mp.phase = game.phase; // last: the edge test above compares against the previous phase
   }
 
   function renderStatus(status) {
@@ -962,6 +1007,14 @@ export async function mount(ctx) {
       else net.requestLease();
     });
     mp.startBtn.addEventListener('click', () => net?.startGame());
+    // Persist for the next visit AND apply to the live room, so a player who
+    // names themselves mid-session does not have to rejoin to be recognised.
+    mp.nameInput.addEventListener('change', () => {
+      const next = mp.nameInput.value.trim().slice(0, 24);
+      mp.nameInput.value = next;
+      saveMpName(next);
+      net?.rename(next);
+    });
     import('./net.js').then(({ connectRoom }) => {
       if (!ctx.alive()) return;
       net = connectRoom({
@@ -990,11 +1043,23 @@ export async function mount(ctx) {
   // async: WebGPU's probeAt() has no synchronous readback (see probe.js).
   // WebGL2's own probeAt() resolves in the same microtask either way, so
   // this costs GL2 nothing observable.
+  // Mid-round, a hider clicking the world would reopen the very panel the
+  // round-start clear just removed — and clicking is how you look around, so
+  // it happens constantly. Reading the garden is a lobby activity; during a
+  // round a non-seeker's click is just a click. The seeker keeps probing,
+  // because probing is how they pick what to edit.
+  function probingAllowed() {
+    if (!mp) return true;                                   // solo: always
+    if (mp.phase !== 'hiding' && mp.phase !== 'seeking') return true;
+    return mp.selfId != null && mp.selfId === lastSeekerId;
+  }
+
   async function onPointerUp(e) {
     if (!downAt || e.target.closest('.probe-panel, .garden-tray')) { downAt = null; return; }
     const [dx0, dy0] = downAt;
     downAt = null;
     if (Math.hypot(e.clientX - dx0, e.clientY - dy0) > CLICK_SLOP) return; // an orbit drag, not a click
+    if (!probingAllowed()) return;
     if (!rh.runtime) return;
     const runtime = rh.runtime;
     const canvas = runtime.canvas;

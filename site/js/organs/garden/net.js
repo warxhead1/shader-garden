@@ -148,7 +148,7 @@ export function connectRoom(opts) {
   function refreshRoster() {
     const list = Array.from(members.values());
     roster.update({ members: list, selfId, lease: lastLease, game: lastGame });
-    onRoster && onRoster(list);
+    onRoster && onRoster(list, selfId);
   }
 
   /** Rebuilds the full 49+1 scalar bank from slots+peerState and pushes it
@@ -256,6 +256,13 @@ export function connectRoom(opts) {
         peerState.set(msg.id, { x: 0, z: 0, yaw: 0, gait: 0, speed01: 0, hue: msg.hue });
         pushPeerUniforms();
         refreshRoster();
+        break;
+      }
+      case 'peer.rename': {
+        // Rename touches the roster only — hue and slot are identity, not
+        // presentation, so the peer keeps its color and uniform slot.
+        const m = members.get(msg.id);
+        if (m) { m.name = msg.name; refreshRoster(); }
         break;
       }
       case 'peer.leave': {
@@ -441,6 +448,7 @@ export function connectRoom(opts) {
     commit,
     tag: (targetId) => send({ t: 'tag', targetId }),
     startGame: () => send({ t: 'game.start' }),
+    rename: (n) => send({ t: 'rename', name: n }),
     destroy,
   };
 }

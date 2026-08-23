@@ -40,7 +40,21 @@ jobs:
     # dominated by SwiftShader software-rasterizing a full-screen raymarch
     # (`garden` alone measured >40 min), so this is set well above the honest
     # worst case rather than tight — it is a runaway backstop, not a budget.
-    timeout-minutes: 150
+    # 150 for the fast tier deploy.yml runs, 330 for the nightly full tier
+    # (which adds `garden` alone at >40 min under SwiftShader). This is now
+    # only a RUNAWAY BACKSTOP: the real budget is the per-step
+    # `timeout-minutes` on every suite below.
+    #
+    # It has to be, because a job-level cap is the one budget that cannot
+    # produce a report. CI run 32654025156 — the first run with the verdict
+    # step, so the first that did not stop at the first broken suite — spent
+    # 55 minutes inside mp-two-browsers alone (one waitForFunction sat for
+    # 724423ms) and hit 150 minutes during mp-solo-parity. The job was
+    # CANCELLED, so the verdict never ran, `failure()` was false, the artifact
+    # upload was skipped, and 2.5 hours of runner time produced nothing that
+    # could be read. Per-step caps turn that into "one suite reports FAIL"
+    # instead of "the run reports nothing".
+    timeout-minutes: ${{ (inputs.tier || (github.event_name == 'pull_request' && 'fast' || 'full')) == 'fast' && 150 || 330 }}
     env:
       # GitHub's runners have no GPU. Every suite that calls assertRealGpu()/
       # assertRealWebgl2() would refuse the SwiftShader adapter it finds here,
@@ -96,6 +110,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # garden-locomotion-parity.mjs pins a BASELINE_SHA (6be2dd2) and
+          # reads it with `git show <sha>:site/assets/garden/scene.glsl`. The
+          # default shallow fetch has exactly one commit, so in CI that suite
+          # did not fail — it CRASHED, `fatal: invalid object name '6be2dd2'`,
+          # in one second, and with continue-on-error that read as a green
+          # step. Full history is the only thing that makes a pinned-baseline
+          # comparison possible at all.
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -168,111 +191,137 @@ jobs:
       # skips their logs by name, so they still cannot fail the job.
       - name: mp-netclient
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node mp-netclient.mjs 2>&1 | tee out/logs/mp-netclient.log
       - name: mp-protocol
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node mp-protocol.mjs 2>&1 | tee out/logs/mp-protocol.log
       - name: mp-relay
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node mp-relay.mjs 2>&1 | tee out/logs/mp-relay.log
       - name: smoke
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node smoke.mjs 2>&1 | tee out/logs/smoke.log
       - name: garden
         if: env.TIER == 'full'
         continue-on-error: true
+        timeout-minutes: 45
         working-directory: tools/test
         run: node garden.mjs 2>&1 | tee out/logs/garden.log
       - name: garden-connections
         if: env.TIER == 'full'
         continue-on-error: true
+        timeout-minutes: 20
         working-directory: tools/test
         run: node garden-connections.mjs 2>&1 | tee out/logs/garden-connections.log
       - name: garden-movement
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node garden-movement.mjs 2>&1 | tee out/logs/garden-movement.log
       - name: garden-perf
         if: env.TIER == 'full'
         continue-on-error: true
+        timeout-minutes: 20
         working-directory: tools/test
         run: node garden-perf.mjs 2>&1 | tee out/logs/garden-perf.log
       - name: garden-wgsl-parity
         if: env.TIER == 'full'
         continue-on-error: true
+        timeout-minutes: 20
         working-directory: tools/test
         run: node garden-wgsl-parity.mjs 2>&1 | tee out/logs/garden-wgsl-parity.log
       - name: garden-camera
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node garden-camera.mjs 2>&1 | tee out/logs/garden-camera.log
       - name: garden-locomotion-parity
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node garden-locomotion-parity.mjs 2>&1 | tee out/logs/garden-locomotion-parity.log
       - name: garden-uniform-inspector
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node garden-uniform-inspector.mjs 2>&1 | tee out/logs/garden-uniform-inspector.log
       - name: dgc-graph
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node dgc-graph.mjs 2>&1 | tee out/logs/dgc-graph.log
       - name: garden-attribution
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node garden-attribution.mjs 2>&1 | tee out/logs/garden-attribution.log
       - name: attribution-page
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node attribution-page.mjs 2>&1 | tee out/logs/attribution-page.log
       - name: comp0
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node comp0.mjs 2>&1 | tee out/logs/comp0.log
       - name: comp1
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node comp1.mjs 2>&1 | tee out/logs/comp1.log
       - name: comp2
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node comp2.mjs 2>&1 | tee out/logs/comp2.log
       - name: comp3
         if: env.TIER == 'full'
         continue-on-error: true
+        timeout-minutes: 20
         working-directory: tools/test
         run: node comp3.mjs 2>&1 | tee out/logs/comp3.log
       - name: anatomy
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node anatomy.mjs 2>&1 | tee out/logs/anatomy.log
       - name: layout
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node layout.mjs 2>&1 | tee out/logs/layout.log
       - name: lineage
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node lineage.mjs 2>&1 | tee out/logs/lineage.log
       - name: loader
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node loader.mjs 2>&1 | tee out/logs/loader.log
       - name: seed
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node seed.mjs 2>&1 | tee out/logs/seed.log
       - name: admission-sac
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node admission-sac.mjs 2>&1 | tee out/logs/admission-sac.log
       - name: runtime-host-loss
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node runtime-host-loss.mjs 2>&1 | tee out/logs/runtime-host-loss.log
       # MP-4 (multiplayer-spec.md §6.1) acceptance for prepareShader()'s
@@ -282,15 +331,18 @@ jobs:
       # pass on a software adapter, so CI can block on it too.
       - name: runtime-prepare-shader
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node runtime-prepare-shader.mjs 2>&1 | tee out/logs/runtime-prepare-shader.log
       - name: servesite
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node servesite.mjs 2>&1 | tee out/logs/servesite.log
       - name: perf
         if: env.TIER == 'full'
         continue-on-error: true
+        timeout-minutes: 20
         working-directory: tools/test
         run: node perf.mjs 2>&1 | tee out/logs/perf.log
 
@@ -303,6 +355,7 @@ jobs:
       - name: mp-clock (timing quality — non-blocking, see comment)
         id: mp_clock
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         # Advisory HERE only, and blocking in scripts/gpu-gate.sh. Check (a)
         # asserts two converged clocks stay within 120ms of each other, which
@@ -316,22 +369,26 @@ jobs:
         run: node mp-clock.mjs 2>&1 | tee out/logs/mp-clock.log
       - name: mp-two-browsers
         continue-on-error: true
+        timeout-minutes: 22
         working-directory: tools/test
         run: node mp-two-browsers.mjs 2>&1 | tee out/logs/mp-two-browsers.log
       # I4: a receiver must keep rendering when a peer commits broken source.
       - name: mp-compile-swap
         continue-on-error: true
+        timeout-minutes: 18
         working-directory: tools/test
         run: node mp-compile-swap.mjs 2>&1 | tee out/logs/mp-compile-swap.log
       # I1/I3: the solo route must be byte-identical in behaviour to pre-MP.
       - name: mp-solo-parity
         continue-on-error: true
+        timeout-minutes: 10
         working-directory: tools/test
         run: node mp-solo-parity.mjs 2>&1 | tee out/logs/mp-solo-parity.log
 
       - name: webgpu-live (real WebGPU execution — non-blocking, see comment)
         id: webgpu_live
         continue-on-error: true
+        timeout-minutes: 10
         # NOT part of the required gate. webgpu-live.mjs proves real WebGPU
         # execution (the badge actually reading "WebGPU") by re-execing
         # itself under Xvfb and launching chromium HEADED against a virtual
@@ -353,6 +410,7 @@ jobs:
       - name: webgpu-fallback (broken-WGSL → WebGL2 regression — non-blocking, same GPU constraint)
         id: webgpu_fallback
         continue-on-error: true
+        timeout-minutes: 10
         # Same runner-class limitation as webgpu-live above: the canvas
         # context-type-lock regression only reproduces where navigator.gpu
         # exists and a real adapter answers, which GitHub's GPU-less runners
@@ -407,8 +465,13 @@ jobs:
           done
           exit 1
 
-      - name: Upload screenshot/log artifacts on failure
-        if: failure() || steps.webgpu_live.outcome == 'failure' || steps.webgpu_fallback.outcome == 'failure'
+      - name: Upload screenshot/log artifacts
+        # always(), not failure(): a job that hits its own timeout-minutes ends
+        # CANCELLED, and `failure()` is false for a cancelled job — so the one
+        # run that most needed its logs uploaded was the one run that skipped
+        # the upload (32654025156). Uploading on a green run costs a few
+        # hundred KB and makes "it passed, but how slowly?" answerable.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-battery-failure-artifacts

@@ -42,8 +42,17 @@ jobs:
       # that "this machine is slow" stops being reported as "this product is
       # broken". Deliberately set HERE and not as the library default, so a
       # developer box keeps the tight budgets that surface real regressions.
-      SG_EDITOR_TIMEOUT_MS: '60000'
-      SG_ACTION_TIMEOUT_MS: '90000'
+      # ONE knob, not one per symptom. It scales sleep(), setDefaultTimeout, and
+      # every explicit `timeout:` passed to goto/waitForSelector/waitForFunction
+      # — which is what reaches the 101 hard-coded budgets and 214 fixed sleeps
+      # spread across 20 suite files. Chasing those individually costs one CI
+      # round-trip per discovery; three were spent that way before this landed.
+      #
+      # 6, not the measured ~10: enough headroom for the numbers actually
+      # observed (18269ms and 19998ms editor mounts against 8000ms; 44s vs ~4s
+      # for #/garden) without multiplying every genuine hang by ten before the
+      # job times out.
+      SG_TIME_SCALE: '6'
     defaults:
       run:
         # Explicit `shell: bash` runs steps with `-o pipefail` (the implicit

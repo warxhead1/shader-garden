@@ -72,6 +72,28 @@ export function resolveDisplay() {
   // Excluding it by value (rather than hardcoding "wayland-0") is what makes
   // this correct on a box where the desktop happens to own a different one.
   const own = process.env.WAYLAND_DISPLAY;
+
+  // Simulating a GPU-less runner? Say so. Do NOT reach for `env -u
+  // WAYLAND_DISPLAY` — see the safety note below for why that is the one
+  // input that turns this function's protection inside out.
+  if (process.env.SG_FORCE_XVFB) return { kind: 'xvfb', display: null, runtimeDir };
+
+  // SAFETY, and it is not a nicety: this function identifies the human's
+  // compositor BY VALUE, as the socket named by WAYLAND_DISPLAY. That makes it
+  // correct on a box whose desktop owns wayland-1 instead of wayland-0 — but it
+  // means the protection lives entirely in that one variable. With it unset,
+  // `own` is undefined, the filter below removes nothing, and spare[0] is the
+  // desktop's own socket: the guard stops excluding the user's session and
+  // starts TARGETING it. Every launched browser then opens on the monitor
+  // someone is working at.
+  //
+  // 2026-08-22: that is exactly what happened, repeatedly, because `env -u
+  // WAYLAND_DISPLAY` looks like a faithful way to imitate a headless runner.
+  // It imitates the runner by disabling the only thing keeping windows off the
+  // user's screen. So: if we cannot identify whose socket is whose, we take
+  // none of them. Xvfb is always safe; guessing never is.
+  if (!own) return { kind: 'xvfb', display: null, runtimeDir };
+
   let socks = [];
   try {
     socks = readdirSync(runtimeDir).filter((f) => /^wayland-\d+$/.test(f)).sort();
@@ -99,7 +121,11 @@ function ensureDisplay() {
 ensureDisplay();
 
 export const SITE_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../site');
-export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Scaled by SG_TIME_SCALE (see TIME_SCALE below). 214 call sites across 26
+// suites import this one definition, so scaling here is what makes a
+// slow-machine run faithful without editing 214 literals. A settle-wait that
+// is long enough here is not long enough on a box running 6x slower.
+export const sleep = (ms) => new Promise((r) => setTimeout(r, Math.round(ms * TIME_SCALE)));
 
 // Resolve the browser binary. SG_CHROME overrides; otherwise playwright-core
 // resolves its own pinned build from ~/.cache/ms-playwright. Kept as a named
@@ -277,23 +303,46 @@ const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 // almost unchanged; these are the gaps that actually bit. Kept as a thin
 // shim rather than rewritten call sites so the migration stays reviewable —
 // a suite that needs Playwright-native behaviour can always reach past it.
-// Playwright's default action timeout is 30s, and an action waits for the
-// element to be visible, enabled and STABLE (bounding box unchanged across two
-// frames) — a stability check that is a function of frame rate, not of the
-// product. On a GPU-less 2-core runner rendering an animated scene, a click on
-// a live panel can burn the whole 30s waiting to settle; measured on CI, a
-// .probe-edit-link click timed out at exactly 30000ms on a page whose href the
-// previous assertion had just read successfully.
+// ONE knob for "this machine is N times slower than the box these numbers were
+// tuned on", rather than N env vars — there are 101 hard-coded sub-10s timeouts
+// and 214 fixed sleep() calls across 20 suite files, and chasing them
+// individually costs one CI round-trip per discovery.
 //
-// Raising this retires nothing: actionability is still required, the element
-// must still become visible, enabled and stable. It only stops the slowest
-// legitimate machine from being reported as a broken product. Default is
-// unchanged from Playwright's own, so local behaviour does not move; CI sets
-// the env var because CI is the environment that needed it.
-const ACTION_TIMEOUT_MS = Number(process.env.SG_ACTION_TIMEOUT_MS || 30000);
+// Measured on a GitHub runner (2 cores, SwiftShader, no GPU) against this
+// workstation: editor mount 18269ms/19998ms vs an 8000ms budget, the #/garden
+// route 44s vs ~4s, 2 rAF callbacks in a window that yields ~30 here. That is
+// the ~10x this scales for; CI sets 6 as a headroom-vs-runtime compromise.
+//
+// WHAT THIS MAY AND MAY NOT TOUCH. Scaling a WAIT (how long we are willing to
+// wait for something to happen) retires no check: whatever never happens still
+// fails. Scaling a MEASUREMENT WINDOW is also correct and is the reason this is
+// a scale rather than a flat raise — "≥5 frames in 500ms" on a machine running
+// 6x slower is faithfully "≥5 frames in 3000ms", which preserves the rate being
+// asserted instead of deleting it. What it must NEVER do is scale a threshold
+// that IS the claim under test (mp-clock's 120ms convergence bound); those are
+// written as literals and stay literals.
+export const TIME_SCALE = Math.max(1, Number(process.env.SG_TIME_SCALE || 1));
+
+// Scale a duration that is a wait or an observation window. Named so call
+// sites read as a deliberate choice, and so grepping `scaled(` finds every
+// place a machine-speed assumption was acknowledged.
+export const scaled = (ms) => Math.round(ms * TIME_SCALE);
+
+// NOT action-scoped, despite the name it previously carried: setDefaultTimeout
+// governs EVERY page wait that does not pass an explicit timeout — click,
+// waitForSelector, waitForFunction alike. Codex flagged the old name
+// (SG_ACTION_TIMEOUT_MS) as claiming a narrowness it does not have, and it was
+// right; a job-wide widening deserves a job-wide name.
+//
+// Also worth recording honestly: the .probe-edit-link click that timed out at
+// exactly 30000ms is NOT yet proven to be an actionability/stability failure. A
+// previous comment here asserted that as fact. All the log establishes is that
+// some actionability condition went unmet within the default budget; which one
+// needs a Playwright trace to settle.
+const DEFAULT_TIMEOUT_MS = Number(process.env.SG_DEFAULT_TIMEOUT_MS || scaled(30000));
 
 function shimPage(page) {
-  page.setDefaultTimeout(ACTION_TIMEOUT_MS);
+  page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
   page.setViewport = (vp) => page.setViewportSize(vp);
 
   const rawGoto = page.goto.bind(page);
@@ -303,7 +352,11 @@ function shimPage(page) {
     // single 'networkidle'. Left explicit because a typo'd waitUntil is
     // accepted silently by neither library but produces very different waits.
     const waitUntil = w === 'networkidle0' || w === 'networkidle2' ? 'networkidle' : w;
-    return rawGoto(url, { ...opts, waitUntil });
+    return rawGoto(url, {
+      ...opts,
+      waitUntil,
+      ...(opts.timeout ? { timeout: scaled(opts.timeout) } : {}),
+    });
   };
 
   // waitForSelector defaults differ, and the difference HANGS rather than
@@ -312,8 +365,19 @@ function shimPage(page) {
   // uniform inspector does exactly this) blocks past any timeout you give
   // it. Restore puppeteer's contract; callers that genuinely want
   // visibility can still pass { state: 'visible' } explicitly.
+  //
+  // An explicit `timeout:` is also SCALED here. That is the whole point of
+  // doing this centrally: there are 101 hard-coded sub-10s timeouts across 20
+  // suite files, every one of them tuned on this workstation, and an explicit
+  // option overrides setDefaultTimeout — so without this, scaling would silently
+  // miss exactly the call sites that already proved they were too tight
+  // (`.cm-editor` at 8000ms, `.card` at 8000ms).
   const rawWaitForSelector = page.waitForSelector.bind(page);
-  page.waitForSelector = (sel, opts = {}) => rawWaitForSelector(sel, { state: 'attached', ...opts });
+  page.waitForSelector = (sel, opts = {}) => rawWaitForSelector(sel, {
+    state: 'attached',
+    ...opts,
+    ...(opts.timeout ? { timeout: scaled(opts.timeout) } : {}),
+  });
 
   // Puppeteer: waitForFunction(fn, options, ...args)
   // Playwright: waitForFunction(fn, arg, options)
@@ -333,7 +397,8 @@ function shimPage(page) {
         + 'Playwright is waitForFunction(fn, arg, options) — pass the options THIRD, and bundle any page '
         + 'arguments into the single `arg`.');
     }
-    return rawWaitForFunction(fn, arg, opts);
+    return rawWaitForFunction(fn, arg,
+      opts && opts.timeout ? { ...opts, timeout: scaled(opts.timeout) } : opts);
   };
 
   // evaluateOnNewDocument -> addInitScript (9 suites). Same semantics: runs

@@ -101,7 +101,12 @@ async function shareLinkFor(page, source, lang) {
 // it retires no check, it only stops the slowest legitimate machine from
 // being called broken. The failure it must still catch — a mount that never
 // happens at all — is unaffected by waiting longer.
-const EDITOR_TIMEOUT_MS = Number(process.env.SG_EDITOR_TIMEOUT_MS || 30000);
+// Back to the original tight 8000. It is no longer a special case: waitForSelector
+// scales an explicit timeout by SG_TIME_SCALE, so this is 8s on a dev box (where a
+// slow mount IS a regression worth failing on) and 48s on a runner measured at 6x.
+// A per-symptom env var here would double-scale and hide the very regressions the
+// tight local number exists to catch.
+const EDITOR_TIMEOUT_MS = 8000;
 
 async function waitForEditor(page) {
   const t0 = Date.now();
@@ -112,16 +117,35 @@ async function waitForEditor(page) {
     // that look identical from the outside: the page never navigated, the
     // editor host mounted but the adapter never resolved, or the adapter
     // resolved into a DOM we are selecting wrongly.
-    const diag = await page.evaluate(() => ({
-      url: location.href,
-      readyState: document.readyState,
-      title: document.title,
-      bodyLen: document.body ? document.body.innerHTML.length : -1,
-      hasEditorHost: !!document.querySelector('#editor, .editor, [data-organ="editor"]'),
-      canvases: document.querySelectorAll('canvas').length,
-      classesOnBody: document.body ? document.body.className : null,
-      firstIds: [...document.querySelectorAll('[id]')].slice(0, 12).map((n) => n.id),
-    })).catch((err) => ({ evaluateFailed: String(err) }));
+    const diag = await page.evaluate(async () => {
+      // Ask the APP whether it got ready, instead of only inferring readiness
+      // from a DOM side-effect. bus.js's recent() is a ring buffer, so this
+      // sees events that ALREADY fired — no listener-registered-too-late race
+      // (the trap that hung four relay suites tonight via once('listening')).
+      let organsOpened = 'unavailable';
+      try {
+        const { recent } = await import('./js/core/bus.js');
+        organsOpened = recent().filter((e) => e.type === 'organ.opened.v1')
+          .map((e) => (e.data && e.data.organ) || '?');
+      } catch (err) { organsOpened = 'import failed: ' + String(err); }
+      return {
+        url: location.href,
+        readyState: document.readyState,
+        title: document.title,
+        bodyLen: document.body ? document.body.innerHTML.length : -1,
+        // #region-editor is the ACTUAL host (site/index.html:77). The first
+        // version of this diagnostic looked for #editor/.editor/[data-organ],
+        // none of which exist in this app — it would have reported "no editor
+        // host" on EVERY timeout and sent the next investigation hunting a
+        // mount failure that was not there. A diagnostic that lies is worse
+        // than no diagnostic, because it is believed.
+        hasEditorHost: !!document.querySelector('#region-editor'),
+        organsOpened,
+        canvases: document.querySelectorAll('canvas').length,
+        classesOnBody: document.body ? document.body.className : null,
+        firstIds: [...document.querySelectorAll('[id]')].slice(0, 12).map((n) => n.id),
+      };
+    }).catch((err) => ({ evaluateFailed: String(err) }));
     console.log(`  [waitForEditor] TIMEOUT after ${Date.now() - t0}ms: ${JSON.stringify(diag)}`);
     throw e;
   }
@@ -326,31 +350,43 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     document.dispatchEvent(new Event('visibilitychange'));
     return n;
   });
+  // TWO samples, not one, and the assertion is that the count STOPPED GROWING
+  // rather than that it is exactly zero. A rAF callback already scheduled when
+  // the hide fired still runs and still increments — resetting the counter
+  // atomically with the hide (above) excludes frames counted BEFORE the reset,
+  // but cannot un-queue one already handed to the browser. The comment above
+  // claimed otherwise; on a runner that straggler is reliably 1-2 (measured
+  // raf=2), so `=== 0` fails there for a reason that is not a product defect.
+  //
+  // "Stopped growing across a full further window" is the honest form of the
+  // claim, and it is strictly stronger than `=== 0` in one respect: a loop that
+  // kept running slowly would satisfy a single lenient count but cannot hold
+  // steady across two samples.
   await sleep(500);
-  const whileHidden = await page.evaluate(() => window.__raf);
+  const hiddenDrain = await page.evaluate(() => window.__raf);
+  await sleep(500);
+  const hiddenSettled = await page.evaluate(() => window.__raf);
   check('(f) hero has a running rAF loop while visible', beforeHide > 5, 'raf=' + beforeHide);
-  check('(f) hero stops requesting frames once the tab hides', whileHidden === 0, 'raf=' + whileHidden);
+  check('(f) hero stops requesting frames once the tab hides',
+    hiddenSettled === hiddenDrain, `raf=${hiddenDrain}->${hiddenSettled} (in-flight stragglers allowed, new frames are not)`);
 
   await page.evaluate(() => { window.__raf = 0; });
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  // POLL for the frames rather than sleeping a fixed 500ms and reading once.
-  // The claim is "the loop resumed", and >5 frames is what separates a resumed
-  // loop from one stray frame — that bar is kept exactly. What cannot be
-  // assumed is the RATE at which they arrive: 500ms is ~30 frames at 60fps and
-  // 2 on a GPU-less 2-core runner (measured: raf=2). Sleeping a fixed window
-  // silently encodes a frame-rate assumption into a frame-COUNT assertion.
-  const RESUME_MIN_FRAMES = 6; // i.e. the same `> 5` as before
-  const RESUME_DEADLINE_MS = 15000;
-  let afterShow = 0;
-  const resumeDeadline = Date.now() + RESUME_DEADLINE_MS;
-  while (Date.now() < resumeDeadline) {
-    afterShow = await page.evaluate(() => window.__raf);
-    if (afterShow >= RESUME_MIN_FRAMES) break;
-    await sleep(250);
-  }
+  // A fixed window, restored deliberately. An earlier revision replaced this
+  // with a poll-until-6-frames-or-15s and claimed the bar was unchanged. It was
+  // not: ">5 frames in 500ms" is a RATE, and ">=6 frames within 15s" passes for
+  // a loop limping at one frame every two seconds. That is a weakened
+  // assertion wearing the costume of a widened budget, which is exactly the
+  // substitution the wait-vs-assertion rule is supposed to forbid.
+  //
+  // sleep() is scaled by SG_TIME_SCALE, so the rate survives the move to a slow
+  // machine instead of being deleted: at scale 6 this is ">5 frames in 3000ms",
+  // the same frames-per-unit-of-machine-time being asserted here.
+  await sleep(500);
+  const afterShow = await page.evaluate(() => window.__raf);
   check('(f) hero resumes once the tab is visible again', afterShow > 5, 'raf=' + afterShow);
   await page.close();
 }

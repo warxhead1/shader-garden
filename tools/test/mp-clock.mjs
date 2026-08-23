@@ -124,14 +124,29 @@ async function waitForClock(page, label) {
 
 async function sampleBoth(pageA, pageB) {
   // Promise.all fires both evaluate() calls back-to-back, but they still
-  // serialize on the CDP wire — the residual gap is real sampling skew, not
-  // clock skew, and is exactly what CLOCK_TOLERANCE_S below has to absorb
-  // on top of §3.2's own RESYNC_EPS=0.05s deadband.
+  // serialize on the CDP wire, so one page is read some milliseconds after
+  // the other. Both clocks are ADVANCING, so that gap shows up as clock
+  // skew that is not clock skew — and CLOCK_TOLERANCE_S was carrying it.
+  //
+  // Measured on the real-GPU gate with two rustc builds on the box: four
+  // samples at 10-30ms and one at 128.9ms against the 120ms bound. Widening
+  // the bound is the wrong repair (its own comment says so) — the reading
+  // was wrong, not the clock. Each page now stamps Date.now(), which is one
+  // wall clock shared by both documents (performance.now() is not: its time
+  // origin is per-document), and the sampling gap is subtracted. What is
+  // left is the quantity the check has always claimed to measure.
   const [a, b] = await Promise.all([
-    pageA.evaluate(() => window.__clock?.time ?? null),
-    pageB.evaluate(() => window.__clock?.time ?? null),
+    pageA.evaluate(() => ({ t: window.__clock?.time ?? null, at: Date.now() })),
+    pageB.evaluate(() => ({ t: window.__clock?.time ?? null, at: Date.now() })),
   ]);
-  return { a, b, diff: (a != null && b != null) ? Math.abs(a - b) : null };
+  if (a.t == null || b.t == null) return { a: a.t, b: b.t, diff: null };
+  const samplingGapS = (a.at - b.at) / 1000;
+  return {
+    a: a.t,
+    b: b.t,
+    skewMs: Math.round(samplingGapS * 1000),
+    diff: Math.abs((a.t - b.t) - samplingGapS),
+  };
 }
 
 const errorsA = [], errorsB = [];

@@ -121,11 +121,17 @@ function ensureDisplay() {
 ensureDisplay();
 
 export const SITE_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../site');
-// Scaled by SG_TIME_SCALE (see TIME_SCALE below). 214 call sites across 26
-// suites import this one definition, so scaling here is what makes a
-// slow-machine run faithful without editing 214 literals. A settle-wait that
-// is long enough here is not long enough on a box running 6x slower.
-export const sleep = (ms) => new Promise((r) => setTimeout(r, Math.round(ms * TIME_SCALE)));
+// Scaled by SLEEP_SCALE, NOT by TIME_SCALE — the two have opposite economics
+// and sharing one multiplier was a mistake. A timeout is a CEILING: it costs
+// nothing unless it is hit, so scaling it 6x is free insurance. A sleep is a
+// FLOOR: every millisecond is paid on every run, including green ones. At 6x,
+// garden.mjs's 44 sleeps (37.25s of literals) cost 224s per run to buy settle
+// headroom that 2x already provides.
+//
+// The original reasoning still holds and is why this is not simply unscaled:
+// a settle-wait long enough on this workstation is not long enough on a box
+// running 6x slower. SLEEP_SCALE keeps that safety at a fraction of the bill.
+export const sleep = (ms) => new Promise((r) => setTimeout(r, Math.round(ms * SLEEP_SCALE)));
 
 // Resolve the browser binary. SG_CHROME overrides; otherwise playwright-core
 // resolves its own pinned build from ~/.cache/ms-playwright. Kept as a named
@@ -321,7 +327,30 @@ const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 // asserted instead of deleting it. What it must NEVER do is scale a threshold
 // that IS the claim under test (mp-clock's 120ms convergence bound); those are
 // written as literals and stay literals.
-export const TIME_SCALE = Math.max(1, Number(process.env.SG_TIME_SCALE || 1));
+// `Math.max(1, NaN)` is NaN, not 1 — it does NOT clamp. Parsing straight into
+// Math.max meant a typo'd env value (`6x`, `'6 '`, `six`) silently produced a
+// NaN scale, which makes sleep() ~0ms and every scaled timeout NaN: the knob
+// inverts into "run everything faster and flakier", with nothing logged.
+// Reject non-finite input loudly instead of limping.
+function readScale(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`${name}='${raw}' is not a positive number. Timing scale must be numeric; refusing to run with an undefined scale.`);
+  }
+  return Math.max(1, n);
+}
+
+export const TIME_SCALE = readScale('SG_TIME_SCALE', 1);
+
+// Sleeps get their own, deliberately smaller multiplier. SG_TIME_SCALE raises
+// WAIT CEILINGS (free unless hit); SG_SLEEP_SCALE raises SETTLE FLOORS (paid
+// every run). Defaulting to min(TIME_SCALE, 2) means a CI box asking for 6x
+// timeouts still gets 2x settle headroom rather than 6x dead time, and a
+// developer box (TIME_SCALE 1) is unchanged at 1x. Override independently
+// when a machine genuinely needs more settle than that.
+export const SLEEP_SCALE = readScale('SG_SLEEP_SCALE', Math.min(TIME_SCALE, 2));
 
 // Scale a duration that is a wait or an observation window. Named so call
 // sites read as a deliberate choice, and so grepping `scaled(` finds every

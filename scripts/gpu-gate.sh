@@ -32,6 +32,22 @@ mkdir -p "$LOGS"
 ln -sfn "$RUN_ID" out/gate-logs/latest
 echo "gpu-gate: logs -> tools/test/$LOGS"
 
+# Say what the machine was doing, because on 2026-08-23 that turned out to be
+# the whole story for six separate "failures". This box also hosts a sibling
+# repo's self-hosted CI runner; during that session the load average went from
+# 15 to 69 while the gate ran, and suites failed on probe readbacks, editor
+# mounts and keydown listeners that had nothing wrong with them. Every one of
+# those was investigated as a product defect first.
+#
+# A number in the log at the top and the bottom of the run is enough to stop
+# that: the next person sees load 69 next to the failure and checks the
+# neighbours before the code. Advisory only — this never blocks, because
+# "the box is busy" is not a reason to skip the gate, only a reason to read
+# its output differently.
+load1() { cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo '?'; }
+CORES="$(nproc)"
+echo "gpu-gate: load average $(load1) on $CORES cores at start"
+
 SUITES=(
   smoke garden garden-movement garden-camera garden-locomotion-parity
   garden-perf garden-uniform-inspector
@@ -62,6 +78,9 @@ done
 if [ ${#failed[@]} -ne 0 ]; then
   echo
   echo "gpu-gate: ${#failed[@]} suite(s) failed: ${failed[*]}"
+  echo "gpu-gate: load average $(load1) on $CORES cores at failure — if this is"
+  echo "          well above $CORES, check what else is on this box before"
+  echo "          reading the failures below as product defects."
   for s in "${failed[@]}"; do
     echo "--- $s (failing checks) ---"
     grep -E '^FAIL' "$LOGS/$s.log" | head -20

@@ -505,7 +505,14 @@ if (editorsAvailable) {
   // options (opposite of puppeteer's (fn, options, ...args)).
   const draftMirrored = await pageB.waitForFunction(
     (expected) => document.querySelector('.component-editor .code-editor')?.value === expected,
-    GOOD_BODY, { timeout: 6000 },
+    // A draft is NOT gated (the check above proves a draft never reaches
+    // prepareShader), so this path is only relay round-trip plus a DOM write —
+    // nothing like the 14400ms retry ceiling the commit path carries. 6000ms is
+    // still an idle-box number though: it failed in a sequential gate run where
+    // this suite ran 20th, behind ~10 minutes of continuous real-GPU work, and
+    // passed standalone on the same commit. 20000 covers a loaded box without
+    // pretending a draft needs the commit path's budget.
+    GOOD_BODY, { timeout: 20000 },
   ).then(() => true).catch(() => false);
   check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', draftMirrored);
   const bStillReadOnly = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);

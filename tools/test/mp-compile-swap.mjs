@@ -339,7 +339,23 @@ check('(b) the relay broadcast the good commit', !!goodCommitEcho, JSON.stringif
 // options (opposite of puppeteer's (fn, options, ...args)).
 const editorBodyAfterGood = editorAvailable && await page.waitForFunction(
   (expected) => document.querySelector('.component-editor .code-editor')?.value === expected,
-  GOOD_BODY, { timeout: 15000 },
+  // 15000 was arithmetically too small, and the gate proved it. A remote commit
+  // is gated on the RECEIVER, and that gate retries a TLE (garden/index.js:859,
+  // REMOTE_GATE_TRIES=3, REMOTE_GATE_BACKOFF_MS=500). Worst case before the
+  // mirror can possibly update:
+  //
+  //   3 attempts x (contextMs 1000 + compileMs 2500 + frameMs 800) = 12900ms
+  //   backoff 500x1 + 500x2                                        =  1500ms
+  //                                                                = 14400ms
+  //
+  // against a 15000ms budget — leaving 600ms for the compile, the atomic swap
+  // and the DOM write. So this failed whenever a retry fired at all, and passed
+  // only on runs where none did. Not flake: a test budget smaller than the
+  // product's own documented worst-case latency.
+  //
+  // 45000 = the 14400ms ceiling plus room for prepareShader's compile+swap,
+  // still far below any wall-clock the suite runner cares about.
+  GOOD_BODY, { timeout: 45000 },
 ).then(() => true).catch(() => false);
 check('(b) the read-only mirror picks up the good commit\'s body', editorAvailable && editorBodyAfterGood, editorAvailable ? '' : 'BLOCKED: editor never mounted');
 

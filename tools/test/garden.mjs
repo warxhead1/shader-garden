@@ -444,6 +444,14 @@ async function openCharacterEditor(page, errors) {
     check('(e) the panel actually closed', (await page.$('.probe-panel')) === null);
 
     await probe(page, 720, 380);
+    // $eval does NOT wait — it throws the moment the selector is absent, and an
+    // uncaught throw here kills the whole suite before any check runs (which is
+    // why the gate reported "garden failed" with no FAIL line to show for it).
+    // The panel opens behind an animation, so "probe() returned" never implied
+    // ".probe-source exists"; on an idle box it happened to, and under a
+    // sequential real-GPU gate it does not. Wait for it explicitly — the budget
+    // then scales with SG_TIME_SCALE like every other wait in the harness.
+    await page.waitForSelector('.probe-source', { timeout: 10000 });
     const sourceText = await page.$eval('.probe-source', (el) => el.textContent);
     check('(e) re-probing the same component shows the EDITED body, not the stale original',
       sourceText.includes('0.77') && !sourceText.includes('SG_LEG_LEN = 0.5;'), 'source snippet=' + sourceText.slice(0, 160));

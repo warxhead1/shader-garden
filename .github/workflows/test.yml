@@ -153,87 +153,126 @@ jobs:
       # mp-netclient covers the PURE exports net.js/timesync.js promise not to
       # hide behind a socket (min-RTT estimator, slot allocator, relay
       # discovery). It shipped with lane L2 but no step ever ran it.
+      # EVERY suite step below carries `continue-on-error: true`, and the
+      # "Battery verdict" step at the end is what fails the job. This is not a
+      # softening — the verdict re-derives pass/fail from each suite's own log
+      # and exits non-zero on any failure, so the job still goes red for
+      # exactly the same reasons.
+      #
+      # It exists because a fail-fast battery reports ONE broken suite per
+      # 30-minute round trip, and this repo has a class of failure that only
+      # exists on a GPU-less runner. Finding four of them cost most of a day
+      # and four separate pushes; running them all and reporting a table costs
+      # one. The two suites that were already `continue-on-error` for their own
+      # reasons (mp-clock, webgpu-live/-fallback) stay ADVISORY — the verdict
+      # skips their logs by name, so they still cannot fail the job.
       - name: mp-netclient
+        continue-on-error: true
         working-directory: tools/test
         run: node mp-netclient.mjs 2>&1 | tee out/logs/mp-netclient.log
       - name: mp-protocol
+        continue-on-error: true
         working-directory: tools/test
         run: node mp-protocol.mjs 2>&1 | tee out/logs/mp-protocol.log
       - name: mp-relay
+        continue-on-error: true
         working-directory: tools/test
         run: node mp-relay.mjs 2>&1 | tee out/logs/mp-relay.log
       - name: smoke
+        continue-on-error: true
         working-directory: tools/test
         run: node smoke.mjs 2>&1 | tee out/logs/smoke.log
       - name: garden
         if: env.TIER == 'full'
+        continue-on-error: true
         working-directory: tools/test
         run: node garden.mjs 2>&1 | tee out/logs/garden.log
       - name: garden-connections
         if: env.TIER == 'full'
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-connections.mjs 2>&1 | tee out/logs/garden-connections.log
       - name: garden-movement
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-movement.mjs 2>&1 | tee out/logs/garden-movement.log
       - name: garden-perf
         if: env.TIER == 'full'
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-perf.mjs 2>&1 | tee out/logs/garden-perf.log
       - name: garden-wgsl-parity
         if: env.TIER == 'full'
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-wgsl-parity.mjs 2>&1 | tee out/logs/garden-wgsl-parity.log
       - name: garden-camera
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-camera.mjs 2>&1 | tee out/logs/garden-camera.log
       - name: garden-locomotion-parity
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-locomotion-parity.mjs 2>&1 | tee out/logs/garden-locomotion-parity.log
       - name: garden-uniform-inspector
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-uniform-inspector.mjs 2>&1 | tee out/logs/garden-uniform-inspector.log
       - name: dgc-graph
+        continue-on-error: true
         working-directory: tools/test
         run: node dgc-graph.mjs 2>&1 | tee out/logs/dgc-graph.log
       - name: garden-attribution
+        continue-on-error: true
         working-directory: tools/test
         run: node garden-attribution.mjs 2>&1 | tee out/logs/garden-attribution.log
       - name: attribution-page
+        continue-on-error: true
         working-directory: tools/test
         run: node attribution-page.mjs 2>&1 | tee out/logs/attribution-page.log
       - name: comp0
+        continue-on-error: true
         working-directory: tools/test
         run: node comp0.mjs 2>&1 | tee out/logs/comp0.log
       - name: comp1
+        continue-on-error: true
         working-directory: tools/test
         run: node comp1.mjs 2>&1 | tee out/logs/comp1.log
       - name: comp2
+        continue-on-error: true
         working-directory: tools/test
         run: node comp2.mjs 2>&1 | tee out/logs/comp2.log
       - name: comp3
         if: env.TIER == 'full'
+        continue-on-error: true
         working-directory: tools/test
         run: node comp3.mjs 2>&1 | tee out/logs/comp3.log
       - name: anatomy
+        continue-on-error: true
         working-directory: tools/test
         run: node anatomy.mjs 2>&1 | tee out/logs/anatomy.log
       - name: layout
+        continue-on-error: true
         working-directory: tools/test
         run: node layout.mjs 2>&1 | tee out/logs/layout.log
       - name: lineage
+        continue-on-error: true
         working-directory: tools/test
         run: node lineage.mjs 2>&1 | tee out/logs/lineage.log
       - name: loader
+        continue-on-error: true
         working-directory: tools/test
         run: node loader.mjs 2>&1 | tee out/logs/loader.log
       - name: seed
+        continue-on-error: true
         working-directory: tools/test
         run: node seed.mjs 2>&1 | tee out/logs/seed.log
       - name: admission-sac
+        continue-on-error: true
         working-directory: tools/test
         run: node admission-sac.mjs 2>&1 | tee out/logs/admission-sac.log
       - name: runtime-host-loss
+        continue-on-error: true
         working-directory: tools/test
         run: node runtime-host-loss.mjs 2>&1 | tee out/logs/runtime-host-loss.log
       # MP-4 (multiplayer-spec.md §6.1) acceptance for prepareShader()'s
@@ -242,13 +281,16 @@ jobs:
       # was gated only by scripts/gpu-gate.sh; its GL2 and WebGPU halves both
       # pass on a software adapter, so CI can block on it too.
       - name: runtime-prepare-shader
+        continue-on-error: true
         working-directory: tools/test
         run: node runtime-prepare-shader.mjs 2>&1 | tee out/logs/runtime-prepare-shader.log
       - name: servesite
+        continue-on-error: true
         working-directory: tools/test
         run: node servesite.mjs 2>&1 | tee out/logs/servesite.log
       - name: perf
         if: env.TIER == 'full'
+        continue-on-error: true
         working-directory: tools/test
         run: node perf.mjs 2>&1 | tee out/logs/perf.log
 
@@ -273,14 +315,17 @@ jobs:
         # one environment least able to judge it.
         run: node mp-clock.mjs 2>&1 | tee out/logs/mp-clock.log
       - name: mp-two-browsers
+        continue-on-error: true
         working-directory: tools/test
         run: node mp-two-browsers.mjs 2>&1 | tee out/logs/mp-two-browsers.log
       # I4: a receiver must keep rendering when a peer commits broken source.
       - name: mp-compile-swap
+        continue-on-error: true
         working-directory: tools/test
         run: node mp-compile-swap.mjs 2>&1 | tee out/logs/mp-compile-swap.log
       # I1/I3: the solo route must be byte-identical in behaviour to pre-MP.
       - name: mp-solo-parity
+        continue-on-error: true
         working-directory: tools/test
         run: node mp-solo-parity.mjs 2>&1 | tee out/logs/mp-solo-parity.log
 
@@ -315,6 +360,52 @@ jobs:
         # makes both of these real gates.
         working-directory: tools/test
         run: node webgpu-fallback.mjs 2>&1 | tee out/logs/webgpu-fallback.log
+
+      # THE gate. Every suite above is continue-on-error, so this step is what
+      # decides whether the battery passed, and it decides from each suite's
+      # own log rather than from a step outcome — a suite that crashed before
+      # printing its verdict has no "all-PASS" line and is counted as failed,
+      # which is the same conclusion by a more direct route.
+      #
+      # ADVISORY is a per-suite property with a reason attached, listed here so
+      # it is one place and not scattered through 30 steps. Everything else is
+      # blocking. Adding a name to this list is a deliberate act; it should
+      # come with the same kind of comment its step already carries.
+      - name: Battery verdict
+        if: always()
+        working-directory: tools/test
+        run: |
+          ADVISORY="mp-clock webgpu-live webgpu-fallback"
+          fail=0
+          echo "suite                          result"
+          echo "------------------------------ ------"
+          for f in out/logs/*.log; do
+            [ -e "$f" ] || continue
+            n=$(basename "$f" .log)
+            adv=no
+            for a in $ADVISORY; do [ "$a" = "$n" ] && adv=yes; done
+            if grep -q 'all-PASS' "$f"; then
+              printf '%-30s ok\n' "$n"
+            elif [ "$adv" = yes ]; then
+              printf '%-30s FAIL (advisory)\n' "$n"
+            else
+              printf '%-30s FAIL\n' "$n"
+              fail=1
+            fi
+          done
+          if [ "$fail" = 0 ]; then
+            echo; echo "battery: every blocking suite passed."
+            exit 0
+          fi
+          echo
+          echo "=== failing checks, all suites, one pass ==="
+          for f in out/logs/*.log; do
+            [ -e "$f" ] || continue
+            grep -q 'all-PASS' "$f" && continue
+            echo "--- $(basename "$f" .log) ---"
+            grep -E '^FAIL ' "$f" | head -40
+          done
+          exit 1
 
       - name: Upload screenshot/log artifacts on failure
         if: failure() || steps.webgpu_live.outcome == 'failure' || steps.webgpu_fallback.outcome == 'failure'

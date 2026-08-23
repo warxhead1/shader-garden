@@ -113,8 +113,24 @@ float sg_noise2(vec2 x) {
 uniform float TERRAIN_ROUGHNESS;
 
 float sg_biome_hills(vec2 p) {
+  // PERF-3: this is the fbm PERF-2 did not scale. sg_cloud_fbm drops octaves
+  // with SG_QUALITY and runs ONCE per sky pixel; this one ran a fixed 5
+  // octaves and is called from sg_terrain_height, i.e. up to `maxSteps` (88)
+  // times per ray plus normals — sg_march's own comment already names it
+  // "the single most expensive call in this march". Scaling the cheap one
+  // and not the hot one was an oversight, not a decision.
+  //
+  // High stays 5 octaves, so Auto/High output is byte-identical to before.
+  // Low/Medium trade high-frequency relief for step cost, which is the
+  // trade those presets exist to make.
+  //
+  // CONTRACT: the clamp to [0,1] is what sg_march's `terrainCeil` early-out
+  // relies on, and dropping octaves only ever REDUCES the sum, so that bound
+  // stays valid at every quality level.
+  int octaves = SG_QUALITY < 0.5 ? 3 : (SG_QUALITY < 1.5 ? 4 : 5);
   float v = 0.0, a = 0.58;
   for (int i = 0; i < 5; i++) {
+    if (i >= octaves) break;
     v += a * sg_noise2(p);
     p = vec2(p.x * 1.78 + p.y * 0.35, p.x * 0.35 + p.y * 1.78);
     a *= TERRAIN_ROUGHNESS;

@@ -331,8 +331,17 @@ export async function mount(ctx) {
   // starts with no custom uniforms set, so this must run on every (re)build,
   // not just once. Auto uses the same level ("high") the site shipped before
   // this feature existed — see scene.glsl's SG_QUALITY comment.
+  // PERF-4: in Auto, SG_QUALITY is no longer pinned at 2. The host's ladder
+  // drops resolution first and, once that is pinned at its FLOOR and the
+  // mount is STILL under LOW_FPS, calls onQualityStep(-1) — which walks this
+  // value down. A fresh mount always starts at 2, so Auto on a capable
+  // machine is still byte-identical to pre-PERF-2 behavior; only a mount that
+  // has already proved it cannot hold framerate at the lowest resolution ever
+  // sees a lower value. An explicit Low/Medium/High preset is untouched by
+  // the ladder, which is the whole point of choosing one.
+  let autoSgQuality = 2;
   function applyQualityUniform() {
-    const sgQuality = qualityMode === 'auto' ? 2 : QUALITY_PRESETS[qualityMode].sgQuality;
+    const sgQuality = qualityMode === 'auto' ? autoSgQuality : QUALITY_PRESETS[qualityMode].sgQuality;
     rh.runtime?.setUniforms({ SG_QUALITY: sgQuality });
   }
 
@@ -443,6 +452,18 @@ export async function mount(ctx) {
     prefer: 'auto', glslSrc: sceneSrc, wgslSrc: sceneWgslSrc, canvasClass: 'viewer-canvas garden-canvas',
     fpsBadge, onLost: 'rebuild', bus, organ: 'garden', onChange: onBuild,
     maxDpr: GARDEN_MAX_DPR, onPerf: fmtPerf,
+    // PERF-4: the rung below the resolution floor. Only Auto participates —
+    // an explicit preset is a user decision the ladder must not relitigate.
+    // Returns false at the ends of the range so the host keeps its timer
+    // armed instead of spinning on a step that changes nothing.
+    onQualityStep: (dir) => {
+      if (qualityMode !== 'auto') return false;
+      const next = Math.min(2, Math.max(0, autoSgQuality + dir));
+      if (next === autoSgQuality) return false;
+      autoSgQuality = next;
+      applyQualityUniform();
+      return true;
+    },
   });
   if (qualityMode !== 'auto') rh.setRenderScale(QUALITY_PRESETS[qualityMode].renderScale);
   onBuild(); // paint the state the in-flight onChange() couldn't see rh for yet

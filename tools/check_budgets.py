@@ -40,7 +40,12 @@ FILES = [
     # 195 -> 205: scoping the rebuild wipe to the host's OWN canvas needs
     # ownCanvas state threaded through build()/fallback-swap/dispose plus the
     # comment explaining why a shared host element cannot be blanket-wiped.
-    ("site/js/core/runtime-host.js", 205, None),
+    # 205 -> 218: PERF-4 gives the adaptive ladder a rung BELOW the resolution
+    # floor. Pinned at FLOOR and still under LOW_FPS, it now calls the new
+    # optional opts.onQualityStep(-1) instead of giving up, and hands quality
+    # back before resolution on the way up. That is a second branch in each
+    # arm of ladder() plus the opts contract line. Actual 215/218.
+    ("site/js/core/runtime-host.js", 218, None),
     # 60 -> 95: SUB-5 (v2 blueprint work item 14) — the one shared keydown
     # listener overlay organs (anatomy) hang a hotkey on, plus the
     # organ.open.v1 command listener and toggleOverlay()'s mount/cleanup.
@@ -227,7 +232,11 @@ AGGREGATES = [
     # 750 -> 765 LOC / 30720 -> 31744 bytes: wave-4's fresh-canvas fallback
     # fix (see runtime-host.js's own cap comment). Actual 745 LOC / 30827
     # bytes. Raised deliberately.
-    ("site/js/core/*.js", 765, 31744),
+    # 765/31744 -> 780/32512: carries the runtime-host.js PERF-4 raise above
+    # (the ladder's quality rung). The aggregate exists so a per-file bump
+    # cannot quietly grow the core as a whole, so it moves WITH that row
+    # rather than being loosened on its own. Actual 771 LOC / 32373 bytes.
+    ("site/js/core/*.js", 780, 32512),
     # 31744 -> 35840 bytes: ADM-C (V2_BLUEPRINT.md item 13) adds the GLSL
     # sacrificial worker path (sac-worker.js) and the full report.js UI
     # (badge hover legend, findings, preview, timing strip, copy button) —
@@ -308,7 +317,11 @@ AGGREGATES = [
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.
-    ("site/js/organs/garden/index.js", 1050, None),
+    # 1050 -> 1065: PERF-4's client half — an autoSgQuality level for Auto
+    # (previously pinned at 2) plus the onQualityStep callback the host's new
+    # rung calls, which is what actually delivers the cheaper terrain fbm to a
+    # machine that cannot hold framerate. Actual 1061/1065.
+    ("site/js/organs/garden/index.js", 1065, None),
     # net.js: connectRoom() + the frozen module surface in spec §8.1
     # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
     ("site/js/organs/garden/net.js", 480, None),

@@ -51,7 +51,9 @@ function tryWebgl2(canvas, glslSrc, maxDpr) {
 // opts: { prefer: 'auto'|'webgl2'|'webgpu', glslSrc?, wgslSrc?, canvasClass,
 //         fpsBadge?, onLost?: 'rebuild'|'release'|fn, bus?, organ?, onChange?,
 //         maxDpr? (PERF-2: webgl2-only per-mount DPR cap, see webgl2.js),
-//         onPerf?: ({fps, ms, emaMs, renderScale}) => void, ~1Hz, PERF-2 }
+//         onPerf?: ({fps, ms, emaMs, renderScale}) => void, ~1Hz, PERF-2,
+//         onQualityStep?: (-1|+1) => boolean, PERF-4 — the rung below the
+//           resolution floor; return false when the caller has no preset left }
 export async function runtimeHost(host, opts) {
   const h = { runtime: null, backend: null, ok: false, log: '', duration_ms: 0 };
   let disposed = false, gen = 0;
@@ -72,18 +74,31 @@ export async function runtimeHost(host, opts) {
 
   // Hysteretic: a fps sample inside [LOW_FPS, HIGH_FPS] resets both timers so
   // a mount hovering near a threshold doesn't oscillate the scale.
+  // PERF-4: resolution is only the first rung. Pinned at FLOOR and still
+  // starving, the ladder used to stop — leaving the mount slow forever at
+  // full shader cost. opts.onQualityStep(-1|+1) is the rung below; truthy
+  // means it changed something. Optional, so other organs are unaffected.
   function ladder(fps) {
     if (!autoScale || !h.runtime) return;
     const now = performance.now();
     if (fps < LOW_FPS) {
       highSince = 0; lowSince ||= now;
-      if (now - lowSince >= LOW_MS && scale > FLOOR) {
-        scale = Math.max(FLOOR, scale * STEP); h.runtime.setRenderScale(scale); lowSince = now;
+      if (now - lowSince >= LOW_MS) {
+        if (scale > FLOOR) {
+          scale = Math.max(FLOOR, scale * STEP); h.runtime.setRenderScale(scale); lowSince = now;
+        } else if (opts.onQualityStep?.(-1)) {
+          lowSince = now; // pixels are exhausted; shader work came down instead
+        }
       }
     } else if (fps > HIGH_FPS) {
       lowSince = 0; highSince ||= now;
-      if (now - highSince >= HIGH_MS && scale < CEIL) {
-        scale = Math.min(CEIL, scale / STEP); h.runtime.setRenderScale(scale); highSince = now;
+      if (now - highSince >= HIGH_MS) {
+        // Quality back before resolution: it was taken away last.
+        if (opts.onQualityStep?.(+1)) {
+          highSince = now;
+        } else if (scale < CEIL) {
+          scale = Math.min(CEIL, scale / STEP); h.runtime.setRenderScale(scale); highSince = now;
+        }
       }
     } else { lowSince = 0; highSince = 0; }
   }

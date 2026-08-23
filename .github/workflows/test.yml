@@ -27,7 +27,7 @@ on:
   workflow_call:
     inputs:
       tier:
-        description: 'fast|full — deploy.yml passes full, since a Pages deploy should not skip suites'
+        description: 'fast|full — deploy.yml passes fast; the pre-push real-GPU gate is the stronger check, and the nightly schedule runs full'
         type: string
         default: full
 
@@ -57,8 +57,11 @@ jobs:
       # alone exceeded 40 minutes against 283s on a real GPU. Those suites
       # still matter, but paying for them on every PR push makes the gate
       # unusable, so the PR tier skips them and the nightly `schedule` above
-      # runs the whole battery. deploy.yml calls this with tier=full — a
-      # Pages deploy never ships on a partial run.
+      # runs the whole battery. deploy.yml passes `fast` too: everything on
+      # main already cleared all 20 suites on a real GPU via the blocking
+      # pre-push gate, which SwiftShader cannot match, and a full run there
+      # took over three hours — long enough to fail on timeout and ship
+      # nothing.
       TIER: ${{ inputs.tier || (github.event_name == 'pull_request' && 'fast' || 'full') }}
       SG_ALLOW_SOFTWARE: '1'
       # A GitHub runner is 2 cores with no GPU, and it is roughly an order of

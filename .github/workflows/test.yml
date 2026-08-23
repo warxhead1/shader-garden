@@ -31,6 +31,19 @@ jobs:
       # unprovable here by construction, so it is enforced there instead.
       # Nothing in CI should ever be read as evidence of real-GPU behaviour.
       SG_ALLOW_SOFTWARE: '1'
+      # A GitHub runner is 2 cores with no GPU, and it is roughly an order of
+      # magnitude slower than the workstation every timeout in this harness was
+      # tuned on. Measured on this runner: the #/garden route took 44s against
+      # ~4s locally, and the editor mount took 18269ms against a budget of 8000.
+      #
+      # These raise WAIT BUDGETS only. No assertion is weakened: a mount that
+      # never happens still fails, an element that never becomes actionable
+      # still fails, a hero loop that does not resume still fails. They exist so
+      # that "this machine is slow" stops being reported as "this product is
+      # broken". Deliberately set HERE and not as the library default, so a
+      # developer box keeps the tight budgets that surface real regressions.
+      SG_EDITOR_TIMEOUT_MS: '60000'
+      SG_ACTION_TIMEOUT_MS: '90000'
     defaults:
       run:
         # Explicit `shell: bash` runs steps with `-o pipefail` (the implicit

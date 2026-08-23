@@ -336,8 +336,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await sleep(500);
-  const afterShow = await page.evaluate(() => window.__raf);
+  // POLL for the frames rather than sleeping a fixed 500ms and reading once.
+  // The claim is "the loop resumed", and >5 frames is what separates a resumed
+  // loop from one stray frame — that bar is kept exactly. What cannot be
+  // assumed is the RATE at which they arrive: 500ms is ~30 frames at 60fps and
+  // 2 on a GPU-less 2-core runner (measured: raf=2). Sleeping a fixed window
+  // silently encodes a frame-rate assumption into a frame-COUNT assertion.
+  const RESUME_MIN_FRAMES = 6; // i.e. the same `> 5` as before
+  const RESUME_DEADLINE_MS = 15000;
+  let afterShow = 0;
+  const resumeDeadline = Date.now() + RESUME_DEADLINE_MS;
+  while (Date.now() < resumeDeadline) {
+    afterShow = await page.evaluate(() => window.__raf);
+    if (afterShow >= RESUME_MIN_FRAMES) break;
+    await sleep(250);
+  }
   check('(f) hero resumes once the tab is visible again', afterShow > 5, 'raf=' + afterShow);
   await page.close();
 }
@@ -618,7 +631,11 @@ async function clickTransportButton(page, label) {
     decodedPayload.includes('sg_character_sdf'), 'len=' + decodedPayload.length);
 
   await page.click('.probe-edit-link');
-  await page.waitForSelector('.cm-editor, .code-editor', { timeout: 8000 });
+  // waitForEditor, not a second hand-rolled 8000ms copy of it — that duplicate
+  // was the same workstation-tuned budget the top of this file already fixed,
+  // and it would have failed here for the identical reason (measured mount:
+  // 18269ms on a runner).
+  await waitForEditor(page);
   await sleep(700);
   check('(l) "open in editor" navigated to #/edit', (await page.evaluate(() => location.hash)).startsWith('#/edit'));
   const loadedInfo = await editorInfo(page);

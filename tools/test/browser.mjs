@@ -277,7 +277,23 @@ const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 // almost unchanged; these are the gaps that actually bit. Kept as a thin
 // shim rather than rewritten call sites so the migration stays reviewable —
 // a suite that needs Playwright-native behaviour can always reach past it.
+// Playwright's default action timeout is 30s, and an action waits for the
+// element to be visible, enabled and STABLE (bounding box unchanged across two
+// frames) — a stability check that is a function of frame rate, not of the
+// product. On a GPU-less 2-core runner rendering an animated scene, a click on
+// a live panel can burn the whole 30s waiting to settle; measured on CI, a
+// .probe-edit-link click timed out at exactly 30000ms on a page whose href the
+// previous assertion had just read successfully.
+//
+// Raising this retires nothing: actionability is still required, the element
+// must still become visible, enabled and stable. It only stops the slowest
+// legitimate machine from being reported as a broken product. Default is
+// unchanged from Playwright's own, so local behaviour does not move; CI sets
+// the env var because CI is the environment that needed it.
+const ACTION_TIMEOUT_MS = Number(process.env.SG_ACTION_TIMEOUT_MS || 30000);
+
 function shimPage(page) {
+  page.setDefaultTimeout(ACTION_TIMEOUT_MS);
   page.setViewport = (vp) => page.setViewportSize(vp);
 
   const rawGoto = page.goto.bind(page);

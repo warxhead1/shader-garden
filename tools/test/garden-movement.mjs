@@ -88,10 +88,29 @@ async function awaitGardenCanvas(page, errors) {
       fps: document.querySelector('.badge-fps')?.textContent || null,
       bodyLen: document.body.innerHTML.length,
     })).catch((e) => ({ evaluateFailed: String(e) }));
-    errors.push('no garden-canvas ' + JSON.stringify(seen));
+    errors.push('no garden-canvas ' + gardenStateJson(await gardenState(page)));
     return false;
   }
 }
+
+// One snapshot shape, used by every "the garden never came up" path in this
+// file. Kept deliberately fat: these failures are rare, contention-dependent
+// and have so far only ever been seen in a log someone reads hours later.
+async function gardenState(page) {
+  return page.evaluate(() => ({
+    hash: location.hash,
+    canvases: document.querySelectorAll('canvas').length,
+    classes: [...document.querySelectorAll('canvas')].map((c) => c.className),
+    canvasSize: [...document.querySelectorAll('canvas')].map((c) => [c.width, c.height]),
+    trayItems: document.querySelectorAll('.garden-tray-item').length,
+    backend: document.querySelector('.badge-backend')?.textContent || null,
+    fps: document.querySelector('.badge-fps')?.textContent || null,
+    runtime: typeof window.__runtime,
+    contextLost: (() => { try { return window.__runtime?.isContextLost?.() ?? null; } catch (e) { return String(e); } })(),
+    bodyLen: document.body.innerHTML.length,
+  })).catch((e) => ({ evaluateFailed: String(e) }));
+}
+function gardenStateJson(v) { return JSON.stringify(v); }
 
 // Same GL2Runtime.setUniforms spy garden.mjs's armSpies uses — patched on
 // the prototype so it takes effect regardless of when the instance under
@@ -141,8 +160,15 @@ async function armSpies(page) {
   await page.waitForFunction(
     () => !!document.querySelector('.badge-fps')?.textContent,
     undefined,
-    { timeout: scaled(6000), polling: 300 },
-  ).catch(() => errors.push('fps badge never populated'));
+    // 30s, not the 6s the old `20 x sleep(300)` loop bought. This wait spans
+    // a COLD pipeline compile of the whole garden scene on the first page of
+    // the run, and it is a CEILING — it costs nothing on a run that boots
+    // promptly, and every assertion below is unchanged. Measured on the
+    // real-GPU gate under load (the `garden` suite ahead of it took 449s
+    // against a usual 283s): 6s was not enough, and the resulting cascade
+    // was indistinguishable from the product being broken.
+    { timeout: scaled(30000), polling: 300 },
+  ).catch(async () => errors.push('fps badge never populated ' + gardenStateJson(await gardenState(page))));
   await sleep(500); // margin past first frame for the rest of boot's synchronous setup (incl. the keydown listener) to land
 
   await page.keyboard.down('d');
@@ -174,11 +200,25 @@ async function armSpies(page) {
   // test uses (character center-frame regardless of iTime) and has two
   // @tune sliders (BOUNCE_HEIGHT, BOUNCE_SPEED) — real production UI, not a
   // synthetic input planted for this test.
+  // The probe is an ASYNC GPU readback, so sleep(300) was a bet on how fast
+  // this box can round-trip one — the same shape that was flaking smoke.mjs's
+  // terrain probe. Wait for the panel the readback produces.
   await page.mouse.click(720, 380);
-  await sleep(300);
+  await page.waitForSelector('.probe-title', { timeout: 10000 })
+    .catch(() => { /* fall through: the check below reports what is actually there */ });
   const opened = await page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
-  check('(b) opened the Bouncing Figure panel (has @tune sliders)', opened === 'Bouncing Figure', 'got ' + opened);
+  check('(b) opened the Bouncing Figure panel (has @tune sliders)', opened === 'Bouncing Figure',
+    opened === 'Bouncing Figure' ? '' : 'got ' + opened + ' state=' + gardenStateJson(await gardenState(page)));
 
+  // Without this the run does not FAIL here, it THROWS here: page.focus on a
+  // selector that never appears takes the default 30s timeout and kills the
+  // process, so every remaining section (c)-(g) is never reported and the
+  // gate log ends in a stack trace instead of a check list. A panel that
+  // never opened has already been recorded as a failure above.
+  if (opened !== 'Bouncing Figure') {
+    check('(b) no console errors', errors.length === 0, errors.join(' | '));
+    await page.close();
+  } else {
   await page.focus('.probe-tune-range');
   await page.evaluate(() => { window.__uniformCalls.length = 0; }); // ignore panel-open noise, isolate the held-key window
 
@@ -205,6 +245,7 @@ async function armSpies(page) {
 
   check('(b) no console errors', errors.length === 0, errors.join(' | '));
   await page.close();
+  }
 }
 
 /* ---------- (c) play-radius clamp holds ---------- */

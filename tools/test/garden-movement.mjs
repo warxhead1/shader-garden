@@ -112,6 +112,40 @@ async function gardenState(page) {
 }
 function gardenStateJson(v) { return JSON.stringify(v); }
 
+// The mount is not ready when `.garden-canvas` appears — that element is
+// prepended before either backend is even attempted. index.js attaches its
+// window keydown listener well AFTER the async runtimeHost() build, so a key
+// sent between those two moments lands on nothing and produces silently zero
+// movement. The fps badge is populated by the runtime's own render loop, so
+// it is the first observable downstream of the same build the listener waits
+// on.
+//
+// EVERY section here waits for it, not just the first. The old comment said
+// only the cold first page needed the margin and "every later page in this
+// run is on a warm cache" — measured false on 2026-08-23, on a box at load
+// average 43 with a sibling repo's CI runner and a rustc build going: the
+// garden came up at 11 fps and sections (c) and (f) each recorded ZERO
+// uniform writes while (a), which did wait, passed. A warm module cache does
+// not warm the GPU.
+async function awaitGardenReady(page, errors) {
+  const haveCanvas = await awaitGardenCanvas(page, errors);
+  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
+  if (!haveCanvas) return false;
+  // A CEILING, so it costs nothing on a run that boots promptly, and scaled
+  // by TIME_SCALE rather than counted in SLEEP_SCALE'd steps — the original
+  // `20 x sleep(300)` silently fell from a 36s budget to 12s when sleeps
+  // moved onto the smaller multiplier, the wrong direction for the one wait
+  // in this file that exists because the machine may be slow.
+  const live = await page.waitForFunction(
+    () => !!document.querySelector('.badge-fps')?.textContent,
+    undefined,
+    { timeout: scaled(30000), polling: 300 },
+  ).then(() => true).catch(() => false);
+  if (!live) errors.push('fps badge never populated ' + gardenStateJson(await gardenState(page)));
+  await sleep(500); // margin past the first frame for the rest of boot's synchronous setup to land
+  return live;
+}
+
 // Same GL2Runtime.setUniforms spy garden.mjs's armSpies uses — patched on
 // the prototype so it takes effect regardless of when the instance under
 // test was constructed (method lookup happens at call time).
@@ -137,39 +171,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await awaitGardenCanvas(page, errors);
-  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
-  // MEASURED: this is the FIRST page opened on this browser, and on a cold
-  // module/pipeline cache the mount's window.addEventListener('keydown', ...)
-  // (index.js, attached well after the async runtimeHost() build — line
-  // ~717) can still be un-attached at the moment '.garden-canvas' first
-  // appears in the DOM, so a keydown sent right after waitForSelector can
-  // land before the app is listening for it and silently produce zero
-  // movement. Every later page in this run (b onward) is on a warm cache and
-  // needs no such margin — same real-GPU-is-slower-to-boot effect
-  // garden.mjs's own sleep(2500)-after-nav margin exists for. Polls the fps
-  // badge (populated once the runtime's own render loop starts, which
-  // happens after the async build the keydown listener also waits on) with
-  // a bounded ceiling instead of a single fixed sleep, since real-GPU
-  // pipeline-compile time on this box also varies with contention from
-  // sibling suites/agents running concurrently.
-  // A ceiling, scaled by TIME_SCALE rather than counted in SLEEP_SCALE'd
-  // steps: `20 x sleep(300)` silently fell from a 36s budget to 12s when
-  // sleeps moved onto the smaller multiplier, which is the wrong direction
-  // for the one wait in this file that exists because CI is slow.
-  await page.waitForFunction(
-    () => !!document.querySelector('.badge-fps')?.textContent,
-    undefined,
-    // 30s, not the 6s the old `20 x sleep(300)` loop bought. This wait spans
-    // a COLD pipeline compile of the whole garden scene on the first page of
-    // the run, and it is a CEILING — it costs nothing on a run that boots
-    // promptly, and every assertion below is unchanged. Measured on the
-    // real-GPU gate under load (the `garden` suite ahead of it took 449s
-    // against a usual 283s): 6s was not enough, and the resulting cascade
-    // was indistinguishable from the product being broken.
-    { timeout: scaled(30000), polling: 300 },
-  ).catch(async () => errors.push('fps badge never populated ' + gardenStateJson(await gardenState(page))));
-  await sleep(500); // margin past first frame for the rest of boot's synchronous setup (incl. the keydown listener) to land
+  await awaitGardenReady(page, errors);
 
   await page.keyboard.down('d');
   await sleep(600);
@@ -193,8 +195,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await awaitGardenCanvas(page, errors);
-  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
+  await awaitGardenReady(page, errors);
 
   // Bouncing Figure sits at the same screen-point oracle every other garden
   // test uses (character center-frame regardless of iTime) and has two
@@ -204,7 +205,7 @@ async function armSpies(page) {
   // this box can round-trip one — the same shape that was flaking smoke.mjs's
   // terrain probe. Wait for the panel the readback produces.
   await page.mouse.click(720, 380);
-  await page.waitForSelector('.probe-title', { timeout: 10000 })
+  await page.waitForSelector('.probe-title', { timeout: 20000 })
     .catch(() => { /* fall through: the check below reports what is actually there */ });
   const opened = await page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
   check('(b) opened the Bouncing Figure panel (has @tune sliders)', opened === 'Bouncing Figure',
@@ -255,7 +256,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await awaitGardenCanvas(page, errors);
+  await awaitGardenReady(page, errors);
   await page.click('.garden-canvas');
   await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
@@ -293,7 +294,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await awaitGardenCanvas(page, errors);
+  await awaitGardenReady(page, errors);
 
   const coarse = await page.evaluate(() => matchMedia('(pointer: coarse)').matches);
   check('(d) coarse-pointer emulation actually took effect', coarse);
@@ -332,7 +333,7 @@ async function armSpies(page) {
   const page = await freshPage(errors);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await awaitGardenCanvas(page, errors);
+  await awaitGardenReady(page, errors);
   const nub = await page.$('.garden-joystick');
   check('(e) no joystick DOM on a regular (fine-pointer) desktop viewport', nub === null);
   check('(e) no console errors', errors.length === 0, errors.join(' | '));
@@ -346,8 +347,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await awaitGardenCanvas(page, errors);
-  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
+  await awaitGardenReady(page, errors);
 
   await page.keyboard.down('d');
   await sleep(600);
@@ -403,8 +403,7 @@ async function armSpies(page) {
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await awaitGardenCanvas(page, errors);
-  await page.bringToFront(); // real headed browser: keyboard input needs the window focused
+  await awaitGardenReady(page, errors);
 
   // Face +X, then reverse straight to -X — a 180-degree heading flip across
   // one input transition. Both phases (and the transition between them) land

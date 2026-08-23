@@ -100,7 +100,12 @@ async function probe(page, x, y) {
     return window.__probeN;
   }).catch(() => 0);
   await page.mouse.click(x, y);
-  await page.waitForFunction((n) => window.__probeN > n, before, { timeout: 10000 })
+  // 30s, raised from 10s. A GPU readback's latency is a function of how
+  // loaded the machine is, and this box runs a sibling repo's self-hosted CI
+  // runner: the blocking pre-push gate failed here at load average 43 with
+  // "(a) probing the character opens its panel (got null)". It is a ceiling,
+  // so a prompt run pays nothing, and a probe that never opens still fails.
+  await page.waitForFunction((n) => window.__probeN > n, before, { timeout: 30000 })
     .catch(() => { /* fall through: the read below reports what is actually there */ });
   return page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
 }

@@ -68,6 +68,32 @@ jobs:
         # fires and the versioned precache is rebuilt (see site/sw.js VERSION).
         run: sed -i "s|SW_BUILD_PLACEHOLDER|${{ github.sha }}|g" site/sw.js
 
+      - name: Point the deployed site at the relay
+        # site/assets/relay.json ships as {"url": null} — "no relay configured",
+        # which resolveRelayUrl() treats as a clean no-multiplayer site rather
+        # than an error. Set the repository VARIABLE SG_RELAY_URL (Settings ->
+        # Secrets and variables -> Actions -> Variables) to a public wss://
+        # endpoint to switch multiplayer on. A variable, not a secret: this is
+        # a public endpoint that ships inside a public artifact, and pretending
+        # otherwise would just hide it from the people maintaining it.
+        env:
+          RELAY_URL: ${{ vars.SG_RELAY_URL }}
+        run: |
+          if [ -z "$RELAY_URL" ]; then
+            echo "SG_RELAY_URL unset — deploying a single-player site."
+            exit 0
+          fi
+          # Pages is https, and a ws:// dial from an https page is blocked by
+          # the browser SILENTLY (net.js says so at its own localhost branch).
+          # Fail the deploy instead of shipping a site whose multiplayer looks
+          # broken for no visible reason.
+          case "$RELAY_URL" in
+            wss://*) ;;
+            *) echo "::error::SG_RELAY_URL must be wss:// (got '$RELAY_URL'); ws:// is blocked as mixed content on Pages." ; exit 1 ;;
+          esac
+          printf '{"url": "%s"}\n' "$RELAY_URL" > site/assets/relay.json
+          echo "Relay configured: $RELAY_URL"
+
       - name: Check budgets
         run: python3 tools/check_budgets.py
 

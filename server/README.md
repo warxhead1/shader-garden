@@ -114,3 +114,61 @@ reducer, both without a socket (see invariant I8 — `room.mjs` has no I/O in
 it at all, so its tests just call `createRoom`/`reduce`/`tick` directly with
 a made-up clock). `mp-relay.mjs` (lane L6, `tools/test/`) is the suite that
 exercises the real socket + real process end to end.
+
+## Deploying the relay (what "friends can actually play" needs)
+
+Until a relay is reachable on the public internet, the deployed site is
+single-player by construction — not by bug. `net.js`'s `resolveRelayUrl()` has
+exactly three sources: a `?relay=` query parameter, `assets/relay.json`, and
+`ws://localhost:8787`. GitHub Pages is https, and the localhost branch is
+deliberately barred there because a `ws://` dial from an https page is blocked
+by the browser *silently*. So a Pages deploy with no `relay.json` resolves to
+`no-relay` and shows a clean single-player garden.
+
+Two things switch multiplayer on.
+
+### 1. Run the relay somewhere
+
+`server/Dockerfile` builds it. The relay has **zero npm dependencies** (see
+`ws.mjs` — Node ships no WebSocket *server*, so this repo implements the RFC6455
+framing rather than pulling in `ws`), so the image is just the base plus three
+files, and there is no install step to break.
+
+```sh
+docker build -t sg-relay server/
+docker run -p 8787:8787 -e SG_ALLOWED_ORIGINS=https://<owner>.github.io sg-relay
+```
+
+Any host that runs a container and terminates TLS works — Fly, Render, Railway.
+All three inject `PORT`, which the image honours. You need TLS: the browser
+requires `wss://` from an https page.
+
+**Set `SG_ALLOWED_ORIGINS` before going public.** Without it the relay accepts
+WebSocket upgrades from any origin and warns about it on every boot, which
+means anyone's page can open rooms on your relay. Verified behaviour with the
+allowlist set: matching origin gets `101`, any other origin gets `403`.
+
+State is in memory. A room exists while someone is in it and is gone when the
+last member leaves, so restarting the relay costs an in-progress round and
+nothing else, and scaling is "run another one".
+
+### 2. Tell the site where it is
+
+Set the repository **variable** `SG_RELAY_URL` (Settings -> Secrets and
+variables -> Actions -> Variables) to your `wss://` endpoint. `deploy.yml`
+writes it into `site/assets/relay.json` at deploy time; unset means a
+single-player deploy, and a non-`wss://` value fails the deploy loudly rather
+than shipping multiplayer that appears broken for no visible reason.
+
+A variable rather than a secret on purpose: this endpoint ships inside a public
+artifact and is trivially readable from the deployed page. Marking it secret
+would hide it from the people maintaining it without hiding it from anyone else.
+
+### Playing locally, no deploy needed
+
+```sh
+node server/relay.mjs                      # :8787
+python3 -m http.server -d site 8080        # then open http://localhost:8080
+```
+Both browsers on `http://localhost:8080/#/garden/<room>` find the relay through
+the localhost branch, no configuration at all.

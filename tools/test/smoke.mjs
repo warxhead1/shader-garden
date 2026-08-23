@@ -90,8 +90,45 @@ async function shareLinkFor(page, source, lang) {
   }, { src: source, l: lang });
 }
 
+// The editor mount is async: createDocAdapter() awaits the 375KB CodeMirror
+// vendor chunk and falls back to a textarea, so BOTH outcomes end in an
+// element carrying one of these classes. Only a never-settling await, or a
+// machine slow enough to miss the budget, produces neither.
+//
+// 8000ms was tuned on a workstation and is not a bound on anything real — a
+// GitHub runner is 2 cores with no GPU, and measured on one, a single garden
+// route took 44s against ~4s here. A wait budget is not an assertion: raising
+// it retires no check, it only stops the slowest legitimate machine from
+// being called broken. The failure it must still catch — a mount that never
+// happens at all — is unaffected by waiting longer.
+const EDITOR_TIMEOUT_MS = Number(process.env.SG_EDITOR_TIMEOUT_MS || 30000);
+
 async function waitForEditor(page) {
-  await page.waitForSelector('.cm-editor, .code-editor', { timeout: 8000 });
+  const t0 = Date.now();
+  try {
+    await page.waitForSelector('.cm-editor, .code-editor', { timeout: EDITOR_TIMEOUT_MS });
+  } catch (e) {
+    // Report WHY rather than just "timed out". Distinguishes the three cases
+    // that look identical from the outside: the page never navigated, the
+    // editor host mounted but the adapter never resolved, or the adapter
+    // resolved into a DOM we are selecting wrongly.
+    const diag = await page.evaluate(() => ({
+      url: location.href,
+      readyState: document.readyState,
+      title: document.title,
+      bodyLen: document.body ? document.body.innerHTML.length : -1,
+      hasEditorHost: !!document.querySelector('#editor, .editor, [data-organ="editor"]'),
+      canvases: document.querySelectorAll('canvas').length,
+      classesOnBody: document.body ? document.body.className : null,
+      firstIds: [...document.querySelectorAll('[id]')].slice(0, 12).map((n) => n.id),
+    })).catch((err) => ({ evaluateFailed: String(err) }));
+    console.log(`  [waitForEditor] TIMEOUT after ${Date.now() - t0}ms: ${JSON.stringify(diag)}`);
+    throw e;
+  }
+  const ms = Date.now() - t0;
+  // Surfaced so a runner that is merely slow is visible in the log as slow,
+  // instead of silently creeping back up on the budget.
+  if (ms > 5000) console.log(`  [waitForEditor] slow mount: ${ms}ms`);
 }
 
 async function editorInfo(page) {

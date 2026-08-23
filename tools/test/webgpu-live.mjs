@@ -70,6 +70,27 @@ try {
     } catch (e) { return { hasGpu, error: String(e) }; }
     return { hasGpu, adapterInfo: adapter ? (adapter.info || {}) : null, features, deviceOk };
   });
+  // A GPU-less runner cannot produce WebGPU evidence, and pretending
+  // otherwise is what put this suite in the CI fast tier reporting four
+  // guaranteed failures. `SG_ALLOW_SOFTWARE=1` is the operator SAYING this
+  // box has no GPU (CI sets it; the pre-push real-GPU gate never does), so
+  // that — and only that — turns "no WebGPU device here" into a loud SKIP
+  // instead of a failure. Without the flag, the checks below still run and
+  // still fail, which is the behaviour that matters: this suite exists so a
+  // green run cannot quietly mean SwiftShader.
+  if (process.env.SG_ALLOW_SOFTWARE && gpuProbe.deviceOk !== true) {
+    console.log('SKIP webgpu-live: no usable WebGPU device on this box and SG_ALLOW_SOFTWARE=1 '
+      + '(probe=' + JSON.stringify(gpuProbe) + '). Real-WebGPU evidence comes from the pre-push '
+      + 'GPU gate, which never sets that flag.');
+    console.log('all-PASS (skipped: no WebGPU device)');
+    // process.exit() from inside the try skips the finally below, so tear
+    // down here explicitly — a leaked chromium plus a still-bound serveSite
+    // port is exactly the orphan that makes the NEXT suite's derivePort()
+    // pick fail.
+    await browser.close().catch(() => {});
+    server.kill();
+    process.exit(0);
+  }
   check('navigator.gpu exists on a real http origin', gpuProbe.hasGpu, JSON.stringify(gpuProbe));
   check('requestAdapter() returned a live adapter', !!gpuProbe.adapterInfo, JSON.stringify(gpuProbe.adapterInfo));
   check('requestDevice() succeeded', gpuProbe.deviceOk === true);

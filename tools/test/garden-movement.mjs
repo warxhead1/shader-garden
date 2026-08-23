@@ -32,7 +32,7 @@
 // setUniforms into the same window.__uniformCalls array (decision rule:
 // "asserts on output generically" -> let it run WebGPU).
 // Prints "all-PASS" and exits 0 only if every check passed.
-import { launch, serveSite, sleep, gotoSafe, assertRealGpu } from './browser.mjs';
+import { launch, serveSite, sleep, scaled, gotoSafe, assertRealGpu } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -64,6 +64,35 @@ function freshPage(errors, viewportOpts) {
   });
 }
 
+// `.garden-canvas` is prepended SYNCHRONOUSLY by runtime-host's build(),
+// before either backend is attempted — so its absence never means "the GPU is
+// slow", it means the organ never got as far as building, or built and then
+// removed the canvas because BOTH backends failed (runtime-host.js: `if
+// (!picked) { canvas.remove(); ... }`). A bare `errors.push('no
+// garden-canvas')` cannot tell those apart, and this failed on CI in a shape
+// that does not reproduce on this workstation under any combination of
+// SwiftShader, WebGPU-disabled and 2-core pinning that was tried. So the
+// timeout path SAYS WHAT IT SAW: enough state to distinguish "still booting",
+// "route never mounted" and "both backends refused" from a log alone.
+async function awaitGardenCanvas(page, errors) {
+  try {
+    await page.waitForSelector('.garden-canvas', { timeout: 8000 });
+    return true;
+  } catch {
+    const seen = await page.evaluate(() => ({
+      hash: location.hash,
+      canvases: document.querySelectorAll('canvas').length,
+      classes: [...document.querySelectorAll('canvas')].map((c) => c.className),
+      stage: !!document.querySelector('.garden-stage, .stage'),
+      badge: document.querySelector('.badge-backend')?.textContent || null,
+      fps: document.querySelector('.badge-fps')?.textContent || null,
+      bodyLen: document.body.innerHTML.length,
+    })).catch((e) => ({ evaluateFailed: String(e) }));
+    errors.push('no garden-canvas ' + JSON.stringify(seen));
+    return false;
+  }
+}
+
 // Same GL2Runtime.setUniforms spy garden.mjs's armSpies uses — patched on
 // the prototype so it takes effect regardless of when the instance under
 // test was constructed (method lookup happens at call time).
@@ -89,7 +118,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors);
   await page.bringToFront(); // real headed browser: keyboard input needs the window focused
   // MEASURED: this is the FIRST page opened on this browser, and on a cold
   // module/pipeline cache the mount's window.addEventListener('keydown', ...)
@@ -105,11 +134,15 @@ async function armSpies(page) {
   // a bounded ceiling instead of a single fixed sleep, since real-GPU
   // pipeline-compile time on this box also varies with contention from
   // sibling suites/agents running concurrently.
-  for (let i = 0; i < 20; i++) {
-    const fps = await page.$eval('.badge-fps', (el) => el.textContent).catch(() => '');
-    if (fps) break;
-    await sleep(300);
-  }
+  // A ceiling, scaled by TIME_SCALE rather than counted in SLEEP_SCALE'd
+  // steps: `20 x sleep(300)` silently fell from a 36s budget to 12s when
+  // sleeps moved onto the smaller multiplier, which is the wrong direction
+  // for the one wait in this file that exists because CI is slow.
+  await page.waitForFunction(
+    () => !!document.querySelector('.badge-fps')?.textContent,
+    undefined,
+    { timeout: scaled(6000), polling: 300 },
+  ).catch(() => errors.push('fps badge never populated'));
   await sleep(500); // margin past first frame for the rest of boot's synchronous setup (incl. the keydown listener) to land
 
   await page.keyboard.down('d');
@@ -134,7 +167,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors);
   await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
   // Bouncing Figure sits at the same screen-point oracle every other garden
@@ -181,7 +214,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors);
   await page.click('.garden-canvas');
   await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
@@ -219,7 +252,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors);
 
   const coarse = await page.evaluate(() => matchMedia('(pointer: coarse)').matches);
   check('(d) coarse-pointer emulation actually took effect', coarse);
@@ -258,7 +291,7 @@ async function armSpies(page) {
   const page = await freshPage(errors);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors);
   const nub = await page.$('.garden-joystick');
   check('(e) no joystick DOM on a regular (fine-pointer) desktop viewport', nub === null);
   check('(e) no console errors', errors.length === 0, errors.join(' | '));
@@ -272,7 +305,7 @@ async function armSpies(page) {
   await armSpies(page);
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors);
   await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
   await page.keyboard.down('d');
@@ -300,10 +333,25 @@ async function armSpies(page) {
   const page = await freshPage(errors);
   await page.evaluateOnNewDocument(() => {
     window.__yawCalls = [];
+    // Record the rAF timestamp the integrator is ACTUALLY handed, not the
+    // wall clock at the moment it happens to call setUniforms. moveFrame(t)
+    // (garden/index.js) computes `dt = t - moveLastT` from the timestamp rAF
+    // passes it; performance.now() inside setUniforms is that same frame plus
+    // however long the callback has been running. On a real GPU those agree
+    // to within noise. Under SwiftShader they do not: the callback-start-to-
+    // setUniforms offset swings by tens of ms frame to frame, so a pair whose
+    // rAF dt was 40ms can look like 12ms of wall clock — and the check then
+    // fails a turn the integrator itself had already clamped to TURN_RATE*dt.
+    // Measured overshoots of 0.006-0.072 rad reproduced locally only once
+    // SwiftShader was actually forced (SG_EXTRA_CHROME_ARGS); the integrator
+    // is correct, the yardstick was not.
+    window.__lastRafT = 0;
+    const rawRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (cb) => rawRaf((t) => { window.__lastRafT = t; return cb(t); });
     const hook = (mod, className) => {
       const orig = mod[className].prototype.setUniforms;
       mod[className].prototype.setUniforms = function (values) {
-        if ('uCharYaw' in values) window.__yawCalls.push({ yaw: values.uCharYaw, t: performance.now() });
+        if ('uCharYaw' in values) window.__yawCalls.push({ yaw: values.uCharYaw, t: window.__lastRafT });
         return orig.call(this, values);
       };
     };
@@ -314,7 +362,7 @@ async function armSpies(page) {
   page.on('pageerror', (e) => errors.push(String(e)));
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.waitForSelector('.garden-canvas', { timeout: 8000 }).catch(() => errors.push('no garden-canvas'));
+  await awaitGardenCanvas(page, errors);
   await page.bringToFront(); // real headed browser: keyboard input needs the window focused
 
   // Face +X, then reverse straight to -X — a 180-degree heading flip across

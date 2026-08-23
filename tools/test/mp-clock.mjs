@@ -5,7 +5,7 @@
 // single most likely bug in the whole slice", so it's exercised directly,
 // not just the steady-state convergence.
 // Usage: node tools/test/mp-clock.mjs   (first: npm ci in tools/test)
-import { launch, serveSite, sleep, gotoSafe, derivePort, assertRealGpu, startRelayOnFreePort } from './browser.mjs';
+import { launch, serveSite, sleep, scaled, gotoSafe, derivePort, assertRealGpu, startRelayOnFreePort } from './browser.mjs';
 
 let failed = false;
 function check(name, cond, detail) {
@@ -218,7 +218,25 @@ check('(b) forcing B\'s live runtime context/device lost produced a fresh clock 
 // Re-convergence needs its own settle window: the fresh clock starts at
 // time=0, arbitrarily far from the room's shared time, so the deadband loop
 // has real distance to seek across before landing back inside tolerance.
-await sleep(2500);
+//
+// That window is a WAIT FOR A CONDITION, not a duration, and writing it as
+// sleep(2500) hid a real dependency: the deadband loop seeks PER FRAME, so
+// how long the seek takes in wall-clock is a function of the frame rate.
+// Under SwiftShader (measured) the first post-rebuild sample was still
+// 1653ms out while samples 3-5 had landed at 0.6-2.0ms — a converging clock
+// being failed for the seek it is defined to perform. Poll until it lands
+// (bounded), then measure. Nothing is retired: if it never converges the
+// poll exhausts its budget and the five samples below fail exactly as before.
+const seekDeadline = Date.now() + scaled(20000);
+let seekProbe = null;
+do {
+  seekProbe = await sampleBoth(pageA, pageB);
+  if (seekProbe.diff != null && seekProbe.diff <= CLOCK_TOLERANCE_S) break;
+  await sleep(250);
+} while (Date.now() < seekDeadline);
+console.log('  [seek] post-rebuild convergence probe: '
+  + (seekProbe?.diff == null ? 'no sample' : (seekProbe.diff * 1000).toFixed(1) + 'ms')
+  + ' after ' + (scaled(20000) - Math.max(0, seekDeadline - Date.now())) + 'ms');
 const reSamples = [];
 for (let i = 0; i < 5; i++) {
   reSamples.push(await sampleBoth(pageA, pageB));

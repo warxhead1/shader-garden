@@ -619,7 +619,16 @@ export async function launch({ software = false, viewport = DEFAULT_VIEWPORT, ar
     executablePath: chromePath(),
     headless: false,
     env,
-    args: [...(useSoftware ? SOFTWARE_ARGS : GPU_ARGS), ...platformArgs, ...args],
+    // SG_EXTRA_CHROME_ARGS exists for ONE job: reproducing a CI-only failure
+    // locally. SG_ALLOW_SOFTWARE only TOLERATES SwiftShader, it does not
+    // select it — on this workstation `--enable-unsafe-swiftshader` still
+    // lands on the real Vulkan adapter, so a "CI conditions" run here is not
+    // one. Forcing the runner's actual backend takes
+    // SG_EXTRA_CHROME_ARGS='--use-gl=swiftshader --use-angle=swiftshader'.
+    // Deliberately unset everywhere in CI: it is a debugging lever, never a
+    // configuration surface a suite depends on.
+    args: [...(useSoftware ? SOFTWARE_ARGS : GPU_ARGS), ...platformArgs, ...args,
+      ...(process.env.SG_EXTRA_CHROME_ARGS || '').split(/\s+/).filter(Boolean)],
   });
   const rawNewPage = browser.newPage.bind(browser);
   browser.newPage = async (opts = {}) => shimPage(await rawNewPage({ viewport, ...opts }));

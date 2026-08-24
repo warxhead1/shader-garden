@@ -12,9 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: 'fast = skip the SwiftShader-bound visual suites; full = everything'
+        description: 'deploy = only what a GPU-less runner can actually finish; fast = adds the SwiftShader-bound visual suites; full = everything'
         type: choice
-        options: [fast, full]
+        options: [deploy, fast, full]
         default: full
   # The full battery on a schedule, so the suites the PR tier skips still run
   # every day against main rather than only when someone remembers to dispatch.
@@ -27,7 +27,7 @@ on:
   workflow_call:
     inputs:
       tier:
-        description: 'fast|full — deploy.yml passes fast; the pre-push real-GPU gate is the stronger check, and the nightly schedule runs full'
+        description: 'deploy|fast|full — deploy.yml passes deploy; the pre-push real-GPU gate is the stronger check, and the nightly schedule runs full'
         type: string
         default: full
 
@@ -40,7 +40,7 @@ jobs:
     # dominated by SwiftShader software-rasterizing a full-screen raymarch
     # (`garden` alone measured >40 min), so this is set well above the honest
     # worst case rather than tight — it is a runaway backstop, not a budget.
-    # 150 for the fast tier deploy.yml runs, 330 for the nightly full tier
+    # 45 for the deploy tier, 150 for fast, 330 for the nightly full tier
     # (which adds `garden` alone at >40 min under SwiftShader). This is now
     # only a RUNAWAY BACKSTOP: the real budget is the per-step
     # `timeout-minutes` on every suite below.
@@ -54,7 +54,7 @@ jobs:
     # upload was skipped, and 2.5 hours of runner time produced nothing that
     # could be read. Per-step caps turn that into "one suite reports FAIL"
     # instead of "the run reports nothing".
-    timeout-minutes: ${{ (inputs.tier || (github.event_name == 'pull_request' && 'fast' || 'full')) == 'fast' && 150 || 330 }}
+    timeout-minutes: ${{ (inputs.tier || (github.event_name == 'pull_request' && 'fast' || 'full')) == 'deploy' && 45 || ((inputs.tier || (github.event_name == 'pull_request' && 'fast' || 'full')) == 'fast' && 150 || 330) }}
     env:
       # GitHub's runners have no GPU. Every suite that calls assertRealGpu()/
       # assertRealWebgl2() would refuse the SwiftShader adapter it finds here,
@@ -76,6 +76,32 @@ jobs:
       # pre-push gate, which SwiftShader cannot match, and a full run there
       # took over three hours — long enough to fail on timeout and ship
       # nothing.
+      # THREE tiers, because the runner has no GPU and that is not a budget
+      # problem, it is a physics problem.
+      #
+      #   deploy — what a GPU-less runner can actually FINISH. Pure-node
+      #            protocol/relay suites, the DOM/composition/loader suites,
+      #            and smoke. Measured on this runner: ~20 minutes.
+      #   fast   — adds the suites SwiftShader can technically run but only
+      #            very slowly (garden movement/camera, the two-page MP
+      #            suites). PRs get this; nobody is blocked on a PR.
+      #   full   — everything, including `garden` at >40 minutes. Nightly.
+      #
+      # The split is not a coverage cut, it is a routing decision. Every
+      # commit that reaches main has already passed ALL 20 suites on a real
+      # GPU in ~11 minutes via the blocking pre-push gate — strictly stronger
+      # evidence than SwiftShader can produce, since a software rasterizer
+      # cannot prove a pixel came off hardware at all. What the deploy tier
+      # drops is the suites where CI was measuring SwiftShader rather than
+      # the product, and MEASURING IT BADLY: run 32676190323 rendered the
+      # garden at `0 fps · 0.56x` with the auto-ladder already on its floor,
+      # so every rAF-driven assertion in those suites was waiting on frames
+      # that were never going to arrive. garden-movement and garden-camera
+      # each burned their full 10-minute step cap doing it.
+      #
+      # Those suites still run — on PRs, and nightly against main. They just
+      # no longer stand between a green commit and a published site. The
+      # deploy had not shipped since 2026-07-05 because they did.
       TIER: ${{ inputs.tier || (github.event_name == 'pull_request' && 'fast' || 'full') }}
       SG_ALLOW_SOFTWARE: '1'
       # A GitHub runner is 2 cores with no GPU, and it is roughly an order of
@@ -222,6 +248,7 @@ jobs:
         working-directory: tools/test
         run: node garden-connections.mjs 2>&1 | tee out/logs/garden-connections.log
       - name: garden-movement
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -239,6 +266,7 @@ jobs:
         working-directory: tools/test
         run: node garden-wgsl-parity.mjs 2>&1 | tee out/logs/garden-wgsl-parity.log
       - name: garden-camera
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -249,6 +277,7 @@ jobs:
         working-directory: tools/test
         run: node garden-locomotion-parity.mjs 2>&1 | tee out/logs/garden-locomotion-parity.log
       - name: garden-uniform-inspector
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -264,6 +293,7 @@ jobs:
         working-directory: tools/test
         run: node garden-attribution.mjs 2>&1 | tee out/logs/garden-attribution.log
       - name: attribution-page
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -354,6 +384,7 @@ jobs:
       # it with ?relay=ws://... — site/assets/relay.json stays {"url": null}.
       - name: mp-clock (timing quality — non-blocking, see comment)
         id: mp_clock
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -368,18 +399,21 @@ jobs:
         # one environment least able to judge it.
         run: node mp-clock.mjs 2>&1 | tee out/logs/mp-clock.log
       - name: mp-two-browsers
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 22
         working-directory: tools/test
         run: node mp-two-browsers.mjs 2>&1 | tee out/logs/mp-two-browsers.log
       # I4: a receiver must keep rendering when a peer commits broken source.
       - name: mp-compile-swap
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 18
         working-directory: tools/test
         run: node mp-compile-swap.mjs 2>&1 | tee out/logs/mp-compile-swap.log
       # I1/I3: the solo route must be byte-identical in behaviour to pre-MP.
       - name: mp-solo-parity
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -387,6 +421,7 @@ jobs:
 
       - name: webgpu-live (real WebGPU execution — non-blocking, see comment)
         id: webgpu_live
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         # NOT part of the required gate. webgpu-live.mjs proves real WebGPU
@@ -409,6 +444,7 @@ jobs:
 
       - name: webgpu-fallback (broken-WGSL → WebGL2 regression — non-blocking, same GPU constraint)
         id: webgpu_fallback
+        if: env.TIER != 'deploy'
         continue-on-error: true
         timeout-minutes: 10
         # Same runner-class limitation as webgpu-live above: the canvas

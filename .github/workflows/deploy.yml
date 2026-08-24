@@ -23,21 +23,31 @@ jobs:
     # gate PRs via its own pull_request trigger.
     uses: ./.github/workflows/test.yml
     with:
-      # `fast`, not `full`, and deliberately. Every commit that reaches main
-      # has already passed all 20 suites on a REAL GPU via the blocking
-      # pre-push gate (scripts/gpu-gate.sh) — strictly stronger evidence than
-      # a SwiftShader runner can produce, since CI cannot prove a pixel came
-      # off real hardware at all (see test.yml's SG_ALLOW_SOFTWARE comment).
+      # `deploy`, and deliberately. Every commit that reaches main has already
+      # passed all 20 suites on a REAL GPU via the blocking pre-push gate
+      # (scripts/gpu-gate.sh), in about eleven minutes — strictly stronger
+      # evidence than a SwiftShader runner can produce, since CI cannot prove
+      # a pixel came off real hardware at all (see test.yml's
+      # SG_ALLOW_SOFTWARE comment).
       #
-      # Running the heavy visual suites here anyway cost hours: the run on
-      # 42fdf0f sat in `garden` alone for over three of them. Against the
+      # `fast` was already an attempt at this and was still not enough. The
+      # run on 42fdf0f sat in `garden` for over three hours; run 32654025156
+      # hit the 150-minute cap and reported nothing; run 32676190323 spent ten
+      # minutes each in garden-movement and garden-camera without finishing
+      # either, because the garden renders at 0 fps on a machine with no GPU
+      # and every assertion in those suites is driven by a frame. Against the
       # job's timeout-minutes that is not "slow", it is a deploy that fails on
-      # timeout and ships nothing. The nightly `schedule` in test.yml still
-      # runs the full battery against main, which is what catches a commit
+      # timeout and ships nothing — which is exactly what happened on every
+      # single run between 2026-07-06 and 2026-08-23.
+      #
+      # The suites this drops are not unowned. test.yml's nightly `schedule`
+      # runs the FULL battery against main, and PRs run `fast` — so a commit
       # that reached main without the local gate (--no-verify, a GitHub-side
-      # merge). A day of exposure to a SwiftShader-only regression is a much
-      # smaller risk than a deploy path that cannot complete.
-      tier: fast
+      # merge) is still caught within a day. A day of exposure to a
+      # SwiftShader-only regression is a much smaller risk than a deploy path
+      # that cannot complete, and seven weeks of not deploying at all is what
+      # the stricter choice actually bought.
+      tier: deploy
 
   editor-bundle-diff:
     # ED-2: site/js/vendor/cm-editor.bundle.js is committed, not CI-built

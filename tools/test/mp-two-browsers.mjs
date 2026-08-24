@@ -431,7 +431,7 @@ await sleep(1500);
 // this reading window.__uniformCalls on A, where it is undefined.
 await pageB.waitForFunction(
   () => window.__uniformCalls.filter((c) => 'uPeer0X' in c || 'uPeer0Z' in c).length >= 2,
-  undefined, { timeout: scaled(30000), polling: 200 },
+  undefined, { timeout: scaled(10000), polling: 200 },
 ).catch(() => { /* fall through: (a)'s checks report what actually arrived */ });
 await pageA.keyboard.up('d');
 await pageA.keyboard.up('w');

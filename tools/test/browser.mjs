@@ -385,10 +385,16 @@ export const slowSleep = (ms) => new Promise((r) => setTimeout(r, scaled(ms)));
 // weakened. A key that produces no writes at all still fails, exactly as
 // before, just after a bounded wait rather than a guessed one.
 export async function holdKey(page, key, opts = {}) {
-  const { ms = 500, until = null, timeout = 30000, settle = 150 } = opts;
+  const { ms = 500, until = null, timeout = 10000, settle = 150 } = opts;
   await page.keyboard.down(key);
   await sleep(ms);
   if (until) {
+      // 10000 (60s scaled), not 30000. A ceiling is free only while it is not
+      // hit; on a runner that renders at 0 fps it is hit EVERY time, and four
+      // sections x 180s is a suite that exceeds its own CI step budget while
+      // waiting for frames that are never coming. 60s is generous for a
+      // 1-fps machine to produce two frames and honest about the fact that a
+      // machine slower than that is not going to be rescued by waiting.
     await page.waitForFunction(until, undefined, { timeout: scaled(timeout), polling: 100 })
       .catch(() => { /* fall through: the caller's own check reports the shortfall */ });
   }

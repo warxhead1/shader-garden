@@ -7,7 +7,7 @@
 // Plus the substrate §8 behaviors: input/textarea/CodeMirror focus guard,
 // organ graph (dashed -> solid+lit on live traffic), event log filter,
 // layout inspector apply + reset.
-import { launch, serveSite, sleep, slowSleep, settle, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, slowSleep, settle, scaled, gotoSafe } from './browser.mjs';
 
 // Shift+A is only anatomy's keystroke once the overlay module has registered its
 // keydown listener, and nothing on the page announces that moment. Every open
@@ -17,14 +17,20 @@ import { launch, serveSite, sleep, slowSleep, settle, gotoSafe } from './browser
 // Press until it opens instead: the retry cannot manufacture a pass, because an
 // overlay that never opens still exhausts the deadline and still fails below.
 async function openAnatomy(page, { timeout = 15000 } = {}) {
-  const deadline = Date.now() + timeout;
+  // scaled(), and RETURNS rather than throws. The first cut of this helper did
+  // neither, and CI run 32695704181 shows what that cost: a bare 15000ms
+  // deadline is not scaled by SG_TIME_SCALE, so on a GPU-less runner it was a
+  // BUDGET CUT — the sleep(500)+waitForSelector(8000) it replaced came to ~49s
+  // scaled, this came to 15s flat — and the throw then killed the suite after
+  // one check, so the Battery verdict read "anatomy FAIL" with no failing
+  // check under it. That is the same evidence-deleting crash this commit fixes
+  // twice in garden.mjs; a helper that cannot report is worse than the guess.
+  const deadline = Date.now() + scaled(timeout);
   for (;;) {
     await page.keyboard.down('Shift'); await page.keyboard.press('KeyA'); await page.keyboard.up('Shift');
-    try {
-      return await page.waitForSelector('.anatomy-overlay', { timeout: 1500 });
-    } catch {
-      if (Date.now() > deadline) throw new Error('anatomy overlay never opened within ' + timeout + 'ms of Shift+A');
-    }
+    const el = await page.waitForSelector('.anatomy-overlay', { timeout: 1500 }).catch(() => null);
+    if (el) return el;
+    if (Date.now() > deadline) return null; // the caller's own checks report the empty overlay
   }
 }
 

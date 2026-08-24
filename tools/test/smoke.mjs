@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, sleep, slowSleep, scaled, gotoSafe, SITE_ROOT, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
+import { launch, serveSite, sleep, slowSleep, scaled, settle, gotoSafe, SITE_ROOT, assertRealGpu, assertRealWebgl2 } from './browser.mjs';
 
 const routes = process.argv.slice(2);
 const DEFAULT_ROUTES = ['#/', '#/s/biome-rolling-hills', '#/edit', '#/edit?k=biome-rolling-hills', '#/garden'];
@@ -224,7 +224,11 @@ async function replaceAllAndType(page, text) {
   const page = await browser.pooledPage();
   await gotoSafe(page, vfLink, { waitUntil: 'networkidle0' });
   await waitForEditor(page);
-  await sleep(600);
+  // Scaled floor first: "(a) no autorun — status pill still idle" is a NEGATIVE
+  // claim riding this same window, and a poll cannot make a floor for it.
+  await slowSleep(600);
+  await settle(page, () => (document.querySelector('.code-editor')?.value || '').includes('wrapper subversion attempt')
+    && !!document.querySelector('.admission-scrim'));
 
   const loaded = await editorInfo(page);
   check('(a) foreign source loaded into the editor', (loaded.value || '').includes('wrapper subversion attempt'), 'kind=' + loaded.kind);
@@ -239,7 +243,8 @@ async function replaceAllAndType(page, text) {
   // the user's own edit clears the scrim and reclassifies the session as editor-self
   await focusEditor(page);
   await page.keyboard.type(' ');
-  await sleep(900);
+  await settle(page, () => !document.querySelector('.admission-scrim')
+    && document.querySelector('.pill')?.textContent.trim() !== 'idle', { ms: 300 });
   check('(a) scrim clears on the first user edit', (await page.$('.admission-scrim')) === null);
   const statusAfterEdit = await page.$eval('.pill', (el) => el.textContent.trim());
   check('(a) compile attempted after the edit — not stuck idle', statusAfterEdit !== 'idle', 'status=' + statusAfterEdit);
@@ -252,7 +257,9 @@ async function replaceAllAndType(page, text) {
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   const kind = await replaceAllAndType(page, FORBIDDEN);
-  await sleep(900);
+  // NEGATIVE claim — "never shows". The window IS the evidence here, so it has
+  // to scale with TIME_SCALE: too short does not fail, it passes VACUOUSLY.
+  await slowSleep(900);
 
   check('(b) editor-self typing never shows the gate scrim', (await page.$('.admission-scrim')) === null);
   const statusB = await page.$eval('.pill', (el) => el.textContent.trim());
@@ -288,7 +295,10 @@ async function replaceAllAndType(page, text) {
   const page = await browser.pooledPage();
   await gotoSafe(page, cleanLink, { waitUntil: 'networkidle0' });
   await waitForEditor(page);
-  await sleep(900);
+  // (e)'s second claim ("it autoran") is the POSITIVE one, so poll for that; the
+  // no-scrim claim rides the same window, which a longer wait can only make stricter.
+  await slowSleep(900); // NEGATIVE half ("no scrim") — the window is its evidence
+  await settle(page, () => document.querySelector('.pill')?.textContent.trim() !== 'idle');
   check('(e) clean share link shows no scrim', (await page.$('.admission-scrim')) === null);
   const cleanStatus = await page.$eval('.pill', (el) => el.textContent.trim());
   check('(e) clean share link autoran', cleanStatus !== 'idle', 'status=' + cleanStatus);
@@ -519,7 +529,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   await gotoSafe(page, BASE + '/index.html#/s/biome-rolling-hills', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
-  await sleep(1500);
+  await settle(page, () => !!document.querySelector('.badge-backend')?.textContent.trim(), { ms: 500 });
 
   const badge = await page.$eval('.badge-backend', (el) => el.textContent.trim()).catch(() => null);
   check('(h) headless lands on WebGL2 despite biome-rolling-hills having a WGSL port',
@@ -770,7 +780,7 @@ async function clickTransportButton(page, label) {
   // and it would have failed here for the identical reason (measured mount:
   // 18269ms on a runner).
   await waitForEditor(page);
-  await sleep(700);
+  await settle(page, () => location.hash.startsWith('#/edit') && !!document.querySelector('.code-editor'), { ms: 200 });
   check('(l) "open in editor" navigated to #/edit', (await page.evaluate(() => location.hash)).startsWith('#/edit'));
   const loadedInfo = await editorInfo(page);
   check('(l) the editor mounted with no decode error', loadedInfo.value != null, 'kind=' + loadedInfo.kind);
@@ -906,7 +916,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   await page.waitForSelector('.transport-row', { timeout: 8000 });
-  await sleep(500);
+  await settle(page, () => [...document.querySelectorAll('.transport-row button')].some((b) => b.textContent.startsWith('Record')), { ms: 200 });
 
   const findRecordBtn = () => page.evaluateHandle(() =>
     [...document.querySelectorAll('.transport-row button')].find((b) => b.textContent.startsWith('Record')));
@@ -918,7 +928,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     [...document.querySelectorAll('.transport-row button')].find((b) => b.textContent.startsWith('Stop')));
   check('(n) button reads Stop(Ns) while recording', !!stopBtn.asElement());
   await stopBtn.asElement().click(); // manual early stop — the 10s cap is the OTHER path, not exercised here for speed
-  await sleep(500);
+  await settle(page, () => window.__capturedBlobs.length > 0
+    && [...document.querySelectorAll('.transport-row button')].some((b) => b.textContent === 'Record'), { ms: 200 });
 
   const blobInfo = await page.evaluate(() => window.__capturedBlobs.map((b) => ({ size: b.size, type: b.type })));
   check('(n) recording produced exactly one captured blob', blobInfo.length === 1, JSON.stringify(blobInfo));
@@ -986,7 +997,8 @@ export async function admitComposition(passes, opts) {
 
   await gotoSafe(page, link, { waitUntil: 'networkidle0' });
   await waitForEditor(page);
-  await sleep(700);
+  await slowSleep(700); // NEGATIVE claim below ("still idle" before consent)
+  await settle(page, () => !!document.querySelector('.admission-scrim button.btn-primary'));
 
   const runBtn = await page.$('.admission-scrim button.btn-primary');
   check('(p) a safe-but-withheld verdict shows a "Run it" button', !!runBtn);
@@ -997,7 +1009,8 @@ export async function admitComposition(passes, opts) {
   check('(p) autorun withheld before consent — status still idle', statusBefore === 'idle', 'status=' + statusBefore);
 
   await runBtn.click();
-  await sleep(700);
+  await settle(page, () => !document.querySelector('.admission-scrim')
+    && document.querySelector('.pill')?.textContent.trim() !== 'idle', { ms: 300 });
   check('(p) scrim clears after Run it', (await page.$('.admission-scrim')) === null);
   const statusAfter = await page.$eval('.pill', (el) => el.textContent.trim());
   check('(p) compile attempted after Run it — not stuck idle', statusAfter !== 'idle', 'status=' + statusAfter);
@@ -1011,7 +1024,11 @@ export async function admitComposition(passes, opts) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
-  await sleep(900); // boot compile
+  // The boot compile has to have RUN, not merely have had 900ms in which to.
+  await settle(page, async () => {
+    const { recent } = await import('./js/core/bus.js');
+    return recent().some((e) => e.type === 'shader.compiled.v1');
+  }, { ms: 300 });
   const envelopes = await page.evaluate(async () => {
     const { recent } = await import('./js/core/bus.js');
     return recent().filter((e) => e.type === 'shader.compiled.v1');
@@ -1153,11 +1170,13 @@ async function buttonState(page, text) {
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   await replaceAllAndType(page, FORBIDDEN);
-  await sleep(600);
+  await slowSleep(600); // NEGATIVE claim — a short window passes vacuously
   check('(s) typing the hostile source was never blocked (no scrim)', (await page.$('.admission-scrim')) === null);
 
   await clickButtonByText(page, 'Check shader');
-  await sleep(600); // VF is a pre-GPU static reject — fast
+  // VF is a pre-GPU static reject — fast, but "fast" is a claim about the
+  // ALGORITHM, not about a runner that may not have scheduled it yet.
+  await settle(page, () => !!document.querySelector('.check-report-host .badge')?.textContent, { ms: 200 });
   const badgeText = await page.$eval('.check-report-host .badge', (el) => el.textContent).catch(() => null);
   check('(s) "Check shader" on hostile source reports VF', badgeText === 'VF', 'verdict=' + badgeText);
   const suggestState = await buttonState(page, 'Suggest for gallery');
@@ -1235,7 +1254,7 @@ async function buttonState(page, text) {
     return true;
   });
   check('(u) export button clicked', clickedExport === true);
-  await sleep(400);
+  await settle(page, () => !!window.__capturedBlobText, { ms: 200 });
   const blobText = await page.evaluate(() => window.__capturedBlobText);
   let ring = null;
   try { ring = blobText && JSON.parse(blobText); } catch { /* checked below */ }

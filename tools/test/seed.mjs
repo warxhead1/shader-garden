@@ -56,7 +56,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { launch, serveSite, serveSiteCors, sleep, scaled, SITE_ROOT, gotoSafe } from './browser.mjs';
+import { launch, serveSite, serveSiteCors, sleep, slowSleep, scaled, SITE_ROOT, gotoSafe } from './browser.mjs';
 
 const FIXTURE_ROOT = path.resolve(
   path.dirname(new URL(import.meta.url).pathname),
@@ -176,7 +176,10 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
   await waitForState(page, 'playing', '#seed');
   await waitForState(page, 'playing', '#seed-1');
   await waitForState(page, 'playing', '#seed-2');
-  await sleep(300);
+  // "exactly once" is half positive, half negative: the fetch must have happened
+  // AND no second one may follow. Both halves want a LONGER window, never a
+  // shorter one, so this scales rather than becoming a poll.
+  await slowSleep(300);
   const jsonReqs = [...new Set(gardenReqs)].filter((u) => u.endsWith('.json'));
   check('(a2) three same-kernel seeds still fetch the kernel JSON exactly once',
     jsonReqs.length === 1, JSON.stringify(jsonReqs));
@@ -188,7 +191,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
   const { page, errors } = await instrumentedPage();
   await gotoSafe(page, fixtureUrl({ offscreen: true }), { waitUntil: 'networkidle0', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await sleep(1500); // outlive the IO's rootMargin settle + any stray timers
+  await slowSleep(1500); // NEGATIVE ('never leaves idle') — outlive the IO's rootMargin settle + any stray timers
 
   const state = await seedState(page);
   const glContexts = await page.evaluate(() => window.__glContexts);
@@ -219,7 +222,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
   check('(c) reduced-motion never reaches "playing"', state !== 'playing');
 
   await page.evaluate(() => { window.__raf = 0; });
-  await sleep(700);
+  await slowSleep(700); // NEGATIVE ('no rAF while posterized') — the window is the evidence
   const rafDuringPoster = await page.evaluate(() => window.__raf);
   check('(c) no animation-frame loop while posterized', rafDuringPoster === 0, 'raf=' + rafDuringPoster);
 
@@ -346,7 +349,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
       .then(() => true)
       .catch(() => false);
     check('(f) context loss knocks the unsafe seed off "playing"', knockedOff);
-    await sleep(1200); // outlive any (absent) automatic rebuild attempt
+    await slowSleep(1200); // NEGATIVE ('never rebuilds') — outlive any (absent) automatic rebuild attempt
     const after = await page.evaluate(() => {
       const el = document.getElementById('unsafe-seed');
       return { state: el.state, backend: el.backend, readyCount: window.__readyCount };
@@ -504,7 +507,7 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     const corrupted = pinnedSnippet.replace(/integrity="sha384-[A-Za-z0-9+/=]+"/, 'integrity="sha384-not-the-right-hash-at-all-0000000000000000000000000000000000000000"');
     const replay = await browser.newPage();
     await replay.setContent(`<!doctype html><html><body>${corrupted}</body></html>`, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    await sleep(1500);
+    await slowSleep(1500); // NEGATIVE ('never gets defined') — a short window passes vacuously
     const defined = await replay.evaluate(() => !!customElements.get('shader-seed'));
     check('(h) a corrupted integrity hash blocks the module — shader-seed never gets defined', !defined);
     await replay.close();
@@ -636,12 +639,21 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
   check('(k) chip is invisible before any touch (hover-gated default)', beforeOpacity === '0', 'opacity=' + beforeOpacity);
   check('(k) a synthetic touchstart reveals the chip immediately', afterTouchOpacity === '1', 'opacity=' + afterTouchOpacity);
 
-  await sleep(3400); // outlive the 3s reveal window
-  const fadedOpacity = await page.evaluate(() => {
+  // "within ~3s" is an UPPER-BOUND claim, so it cannot simply be given a longer
+  // wait — that would weaken it into "fades back eventually". Measure it instead:
+  // poll on the PAGE's own clock and assert the elapsed time. The tolerance is
+  // scaled because a machine we have declared N-times slower runs the product's
+  // own 3s timer late too; what is never tolerated is a chip that never fades.
+  const fade = await page.evaluate(async (budget) => {
     const chip = document.getElementById('touch-seed').shadowRoot.querySelector('.chip');
-    return getComputedStyle(chip).opacity;
-  });
-  check('(k) the chip fades back within ~3s of the tap (seed.md §6)', fadedOpacity === '0', 'opacity=' + fadedOpacity);
+    const t0 = performance.now();
+    while (getComputedStyle(chip).opacity !== '0' && performance.now() - t0 < budget) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return { opacity: getComputedStyle(chip).opacity, ms: Math.round(performance.now() - t0) };
+  }, scaled(8000));
+  check('(k) the chip fades back within ~3s of the tap (seed.md §6)',
+    fade.opacity === '0' && fade.ms <= scaled(4500), JSON.stringify(fade));
   check('(k) no console/page errors', errors.length === 0, errors.join(' | '));
   await page.close();
 }

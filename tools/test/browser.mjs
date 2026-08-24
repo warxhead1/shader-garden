@@ -368,6 +368,32 @@ export const scaled = (ms) => Math.round(ms * TIME_SCALE);
 // is greppable.
 export const slowSleep = (ms) => new Promise((r) => setTimeout(r, scaled(ms)));
 
+// The settle-then-assert helper, for the shape that has caused every CI
+// failure this repo has had on a GPU-less runner: sleep a guessed duration,
+// read, assert on what you read. There are 72 such sites left across 9 suites,
+// each one a bet that N milliseconds of wall clock is enough on a machine
+// nobody measured.
+//
+// `ms` is the MINIMUM wait (keep it when the sleep encodes a real product
+// duration — a 300ms debounce, a 1 Hz sampler). `until` is then polled on top
+// as a CEILING, so a prompt machine pays only `ms` and a slow one waits for
+// the thing to actually happen instead of being told it did not.
+//
+// This is only ever valid for a POSITIVE assertion — "X should have happened".
+// Waiting longer for something that must occur cannot weaken the claim, and a
+// thing that never occurs still fails at the caller's own check. For a
+// NEGATIVE assertion — "X should NOT have happened" — there is no condition to
+// poll and the window itself is the evidence, so those use slowSleep() above:
+// a longer window makes them stricter, and a short one makes them VACUOUS,
+// which is the more dangerous half of this bug and the half that shows up
+// green.
+export async function settle(page, until, opts = {}) {
+  const { ms = 0, timeout = 15000, polling = 100, arg } = opts;
+  if (ms) await sleep(ms);
+  await page.waitForFunction(until, arg, { timeout: scaled(timeout), polling })
+    .catch(() => { /* fall through: the caller's own check reports what is really there */ });
+}
+
 // Hold a key down until the page has actually PRODUCED the thing the caller
 // is about to assert on, then release.
 //

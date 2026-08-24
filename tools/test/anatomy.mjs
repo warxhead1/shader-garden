@@ -7,7 +7,26 @@
 // Plus the substrate §8 behaviors: input/textarea/CodeMirror focus guard,
 // organ graph (dashed -> solid+lit on live traffic), event log filter,
 // layout inspector apply + reset.
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, slowSleep, settle, gotoSafe } from './browser.mjs';
+
+// Shift+A is only anatomy's keystroke once the overlay module has registered its
+// keydown listener, and nothing on the page announces that moment. Every open
+// site here used to guess it with sleep(500) and then hard-wait 8s on the
+// overlay, so a runner that was slow to run the module's first tick did not fail
+// the CLAIM — it threw out of waitForSelector and took the whole suite with it.
+// Press until it opens instead: the retry cannot manufacture a pass, because an
+// overlay that never opens still exhausts the deadline and still fails below.
+async function openAnatomy(page, { timeout = 15000 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    await page.keyboard.down('Shift'); await page.keyboard.press('KeyA'); await page.keyboard.up('Shift');
+    try {
+      return await page.waitForSelector('.anatomy-overlay', { timeout: 1500 });
+    } catch {
+      if (Date.now() > deadline) throw new Error('anatomy overlay never opened within ' + timeout + 'ms of Shift+A');
+    }
+  }
+}
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -36,7 +55,7 @@ async function freshPage(errors) {
 
   await gotoSafe(page, `${BASE}/index.html#/`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await sleep(1000);
+  await slowSleep(1000); // NEGATIVE claim — the window IS the evidence for "zero bytes"
 
   const preHits = requestedUrls.filter((u) => u.includes('/organs/anatomy/'));
   check('(1) idle page fetches ZERO anatomy bytes', preHits.length === 0, JSON.stringify(preHits));
@@ -72,7 +91,7 @@ async function freshPage(errors) {
   await page.keyboard.down('Shift');
   await page.keyboard.press('KeyA');
   await page.keyboard.up('Shift');
-  await sleep(400);
+  await slowSleep(400); // NEGATIVE claim — too short does not fail, it passes vacuously
   check('(2) Shift+A while the editor is focused does NOT open anatomy',
     await page.evaluate(() => document.getElementById('region-overlay').hidden === true));
 
@@ -94,9 +113,7 @@ async function freshPage(errors) {
   const page = await freshPage(errors);
   await gotoSafe(page, `${BASE}/index.html#/s/biome-rolling-hills`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await sleep(500);
-  await page.keyboard.down('Shift'); await page.keyboard.press('KeyA'); await page.keyboard.up('Shift');
-  await page.waitForSelector('.anatomy-overlay', { timeout: 8000 });
+  await openAnatomy(page);
 
   const cardIds = await page.evaluate(() => [...document.querySelectorAll('.anatomy-card-id')].map((n) => n.textContent));
   check('(3) a card renders for every manifest organ', cardIds.includes('viewer') && cardIds.includes('anatomy') && cardIds.includes('gallery'),
@@ -105,7 +122,8 @@ async function freshPage(errors) {
   // The viewer already emitted kernel.opened.v1 on its own mount, backfilled
   // via bus.recent() — that edge should already be lit/solid, not dashed,
   // by the time anatomy finishes its first layout pass.
-  await sleep(300);
+  await settle(page, () => [...document.querySelectorAll('.anatomy-edge')]
+    .some((l) => l.querySelector('title')?.textContent.includes('kernel.opened.v1')), { ms: 150 });
   const kernelOpenedSolid = await page.evaluate(() => {
     const lines = [...document.querySelectorAll('.anatomy-edge')];
     return lines.some((l) => l.querySelector('title')?.textContent.includes('kernel.opened.v1') && !l.classList.contains('anatomy-edge-dashed'));
@@ -125,15 +143,13 @@ async function freshPage(errors) {
   const page = await freshPage(errors);
   await gotoSafe(page, `${BASE}/index.html#/s/biome-rolling-hills`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await sleep(500);
-  await page.keyboard.down('Shift'); await page.keyboard.press('KeyA'); await page.keyboard.up('Shift');
-  await page.waitForSelector('.anatomy-overlay', { timeout: 8000 });
+  await openAnatomy(page);
 
   const rowCountBefore = await page.evaluate(() => document.querySelectorAll('.anatomy-log-row').length);
   check('(4) event log has rows from bus.recent() backfill on open', rowCountBefore > 0, 'rows=' + rowCountBefore);
 
   await page.type('.anatomy-filter', 'kernel.opened');
-  await sleep(150);
+  await settle(page, () => [...document.querySelectorAll('.anatomy-log-row')].some((r) => r.hidden), { ms: 100 });
   const visibleAfterFilter = await page.evaluate(() =>
     [...document.querySelectorAll('.anatomy-log-row')].filter((r) => !r.hidden).every((r) => r.dataset.type.includes('kernel.opened')));
   const anyVisible = await page.evaluate(() => [...document.querySelectorAll('.anatomy-log-row')].some((r) => !r.hidden));
@@ -153,20 +169,19 @@ async function freshPage(errors) {
   const page = await freshPage(errors);
   await gotoSafe(page, `${BASE}/index.html#/`, { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
-  await page.keyboard.down('Shift'); await page.keyboard.press('KeyA'); await page.keyboard.up('Shift');
-  await page.waitForSelector('.anatomy-overlay', { timeout: 8000 });
+  await openAnatomy(page);
 
   const initialJson = await page.$eval('.anatomy-layout-json', (ta) => ta.value);
   check('(5) layout inspector shows the current prefs as JSON', (() => { try { JSON.parse(initialJson); return true; } catch { return false; } })(), initialJson);
 
   await page.evaluate(() => { document.querySelector('.anatomy-layout-json').value = JSON.stringify({ anatomy_test_pref: 42 }); });
   await page.click('.anatomy-layout-actions .btn:not(.anatomy-reset)');
-  await sleep(150);
+  await settle(page, () => !!localStorage.getItem('sg.layout.v1'), { ms: 100 });
   const diff = await page.evaluate(() => localStorage.getItem('sg.layout.v1'));
   check('(5) Apply prefs persists a localStorage diff with the new key', !!diff && JSON.parse(diff).prefs.anatomy_test_pref === 42, 'diff=' + diff);
 
   await page.click('.anatomy-reset');
-  await sleep(300);
+  await settle(page, () => document.readyState === 'complete' && localStorage.getItem('sg.layout.v1') === null, { ms: 200 });
   const diffAfterReset = await page.evaluate(() => localStorage.getItem('sg.layout.v1'));
   check('(5) Reset layout clears the localStorage key (page reloads)', diffAfterReset === null, 'diff=' + diffAfterReset);
   check('(5) no console errors across the layout-inspector flow', errors.length === 0, errors.join(' | '));
@@ -193,7 +208,7 @@ async function freshPage(errors) {
     .catch((e) => errors.push('NAV: ' + e.message));
   await sleep(500);
   await page.keyboard.down('Shift'); await page.keyboard.press('KeyA'); await page.keyboard.up('Shift');
-  await sleep(500);
+  await slowSleep(500); // NEGATIVE claim — "never opens" is only as strong as this window
 
   check('(6) with the organs.json entry removed, Shift+A does nothing (overlay never opens)',
     await page.evaluate(() => document.getElementById('region-overlay').hidden === true));

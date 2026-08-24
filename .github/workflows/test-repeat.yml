@@ -1,0 +1,45 @@
+name: Test battery (repeat)
+
+# A 22-minute CI run samples every marginal timing budget in the battery
+# EXACTLY ONCE, and this repo's remaining failures are all marginal timing
+# budgets: 72 sites that sleep a guessed duration and then assert on what they
+# read. Each one fires only on a machine roughly ten times slower with no GPU,
+# so the blocking real-GPU pre-push gate — which passes 20/20 every time —
+# cannot see any of them, and a workstation cannot reproduce the regime at all
+# (bwrap with /dev/dri hidden, --use-angle=swiftshader, LIBGL_ALWAYS_SOFTWARE,
+# MESA_LOADER_DRIVER_OVERRIDE=swrast and friends each either land on the real
+# adapter or kill WebGL2 outright — never the slow-software middle).
+#
+# So CI is the only instrument, and one sample per push means one discovery per
+# 22 minutes. Deploy-tier runs on 340ab37, 58f096f and 66db332 each surfaced a
+# DIFFERENT blocker; five parallel samples would have surfaced all three at
+# once, in the same wall clock.
+#
+# Dispatch-only and deliberately not on the deploy path: this is a diagnostic
+# instrument for draining the tail, not a gate. deploy.yml still calls test.yml
+# exactly once.
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: 'which tier to sample repeatedly'
+        type: choice
+        options: [deploy, fast, full]
+        default: deploy
+
+jobs:
+  sample-1:
+    uses: ./.github/workflows/test.yml
+    with: { tier: "${{ inputs.tier }}" }
+  sample-2:
+    uses: ./.github/workflows/test.yml
+    with: { tier: "${{ inputs.tier }}" }
+  sample-3:
+    uses: ./.github/workflows/test.yml
+    with: { tier: "${{ inputs.tier }}" }
+  sample-4:
+    uses: ./.github/workflows/test.yml
+    with: { tier: "${{ inputs.tier }}" }
+  sample-5:
+    uses: ./.github/workflows/test.yml
+    with: { tier: "${{ inputs.tier }}" }

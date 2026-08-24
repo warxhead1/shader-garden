@@ -746,6 +746,49 @@ export async function launch({ software = false, viewport = DEFAULT_VIEWPORT, ar
   });
   const rawNewPage = browser.newPage.bind(browser);
   browser.newPage = async (opts = {}) => shimPage(await rawNewPage({ viewport, ...opts }));
+
+  // Playwright's browser.newPage() creates a WHOLE NEW BrowserContext per
+  // page — a fresh HTTP cache, a fresh V8 code cache and a fresh GPU program
+  // cache every single time. smoke.mjs opens 25 of them, and on a GPU-less
+  // runner each one re-parses the app and re-compiles the shader from cold:
+  // 488s of a 1301s battery, 37.5% of the whole deploy tier, in page mounts.
+  //
+  // pooledPage() hands out pages from ONE shared context instead, so those
+  // caches stay warm across a suite. The isolation that actually matters to
+  // these suites is preserved: separate pages still get separate DOM, JS
+  // realms, and event loops. The one thing a context genuinely shares is
+  // ORIGIN STORAGE, so every pooled page clears localStorage/sessionStorage
+  // before any app code runs — layout.js reads its prefs at mount and
+  // garden/index.js reads its quality preset there too, and a preset leaking
+  // from the previous section is exactly the kind of thing that turns a green
+  // check vacuous.
+  //
+  // Safe here because these suites open pages SEQUENTIALLY and close each one
+  // before the next; the clear cannot race a live sibling page. A suite that
+  // needs two pages up at once (mp-two-browsers) keeps browser.newPage().
+  //
+  // Context-level options (isMobile, hasTouch, a different viewport) cannot be
+  // applied to an existing context, and silently ignoring them is how coarse-
+  // pointer emulation got dropped once already: no error, no throw, the
+  // emulation just never took effect and the test passed against the wrong
+  // device. So anything with options gets its own context and opts out of the
+  // pool rather than quietly inheriting the first caller's.
+  let pool = null;
+  browser.pooledPage = async (opts = {}) => {
+    // SG_NO_PAGE_POOL=1 turns every pooled page back into its own context.
+    // Kept as a real switch, not a comment, because it is the only way to A/B
+    // the pool honestly: this box runs a sibling repo's CI, and a before/after
+    // measured minutes apart at load 24 vs load 76 says nothing at all.
+    if (process.env.SG_NO_PAGE_POOL || Object.keys(opts).length) return browser.newPage(opts);
+    if (!pool) pool = await browser.newContext({ viewport });
+    const page = shimPage(await pool.newPage());
+    await page.evaluateOnNewDocument(() => {
+      try { localStorage.clear(); sessionStorage.clear(); } catch { /* denied — already isolated */ }
+    });
+    return page;
+  };
+  const rawClose = browser.close.bind(browser);
+  browser.close = async () => { if (pool) await pool.close().catch(() => {}); return rawClose(); };
   return browser;
 }
 

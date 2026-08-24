@@ -34,7 +34,11 @@ let failed = false;
 // a green smoke suite must not be able to mean "we quietly ran on
 // SwiftShader" (migration brief). One check, on a throwaway page, up front.
 {
-  const gpuPage = await browser.newPage();
+  // pooledPage(), not newPage(): every page in this suite is opened, used and
+  // closed before the next one starts, so they can share one BrowserContext
+  // and keep its HTTP/V8/GPU caches warm instead of paying 25 cold mounts.
+  // See browser.mjs's pooledPage() for what that does and does not share.
+  const gpuPage = await browser.pooledPage();
   await gotoSafe(gpuPage, BASE + '/index.html#/', { waitUntil: 'networkidle2', timeout: 20000 });
   await assertRealGpu(gpuPage);
   await gpuPage.close();
@@ -50,7 +54,7 @@ function check(name, cond, detail) {
 /* ---------- 1) route regression ---------- */
 
 for (const route of (routes.length ? routes : DEFAULT_ROUTES)) {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   const errors = [];
   page.on('console', (m) => {
     // ED-2 fallback contract: with site/js/vendor/cm-editor.bundle.js
@@ -211,13 +215,13 @@ async function replaceAllAndType(page, text) {
 
 // (a) foreign share link containing "void main(" is gated
 {
-  const seed = await browser.newPage();
+  const seed = await browser.pooledPage();
   await gotoSafe(seed, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(seed);
   const vfLink = await shareLinkFor(seed, FORBIDDEN, 'glsl');
   await seed.close();
 
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, vfLink, { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   await sleep(600);
@@ -244,7 +248,7 @@ async function replaceAllAndType(page, text) {
 
 // (b) editor-self typing is never blocked
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   const kind = await replaceAllAndType(page, FORBIDDEN);
@@ -274,14 +278,14 @@ async function replaceAllAndType(page, text) {
 
 // (e) a clean share link still autoruns
 {
-  const seed = await browser.newPage();
+  const seed = await browser.pooledPage();
   await gotoSafe(seed, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(seed);
   const cleanSrc = (await editorInfo(seed)).value; // default GLSL starter
   const cleanLink = await shareLinkFor(seed, cleanSrc, 'glsl');
   await seed.close();
 
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, cleanLink, { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   await sleep(900);
@@ -300,7 +304,7 @@ async function replaceAllAndType(page, text) {
 // when the vendor chunk exists' going PASS→FAIL after moving the chunk aside
 // (that's the expected, not a bug) — see tools/editor-bundle/README.md.
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   const kind = (await editorInfo(page)).kind;
@@ -343,7 +347,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 // (f) hero pauses its render loop on visibilitychange, resumes when visible
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => {
     window.__raf = 0;
     const native = window.requestAnimationFrame.bind(window);
@@ -435,7 +439,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 // (g) gallery thumbnails settle to thumb-ready exactly once per card, no re-render on scroll
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/index.html#/', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => console.log('NAV', e.message));
   await page.waitForSelector('.card', { timeout: 8000 });
@@ -502,7 +506,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // only (GPURuntime.create() in runtime/webgpu.js already treats a missing
 // navigator.gpu as "no adapter" and returns null, same as it always has).
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   // Pinned WebGL2, so prove it's the real renderer, not a silent SwiftShader
   // downgrade (assertRealGpu only inspects the WebGPU adapter — no
   // protection for a suite that never touches it).
@@ -561,7 +565,7 @@ async function clickTransportButton(page, label) {
 
 // (i) pause -> step advances exactly one frame (iFrame proxy: row.dataset.frame)
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await page.waitForSelector('.transport-row', { timeout: 8000 });
   await sleep(500);
@@ -577,7 +581,7 @@ async function clickTransportButton(page, label) {
 
 // (j) &t=30&paused=1 restores state on load
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit?t=30&paused=1', { waitUntil: 'networkidle0' });
   await page.waitForSelector('.transport-row', { timeout: 8000 });
   await sleep(700);
@@ -593,7 +597,7 @@ async function clickTransportButton(page, label) {
 
 // (k) setRenderScale(0.5) halves canvas.width vs CSS size, and the badge tells the truth
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await page.waitForSelector('.transport-scale', { timeout: 8000 });
   await sleep(500);
@@ -621,7 +625,7 @@ async function clickTransportButton(page, label) {
 // <-> shader COMP_* id mapping staying in sync (scene.glsl's own header
 // warns this isn't otherwise enforced).
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   const errors = [];
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -818,7 +822,7 @@ async function clickTransportButton(page, label) {
 // label flip) — proven by moving the mouse before/after the toggle and
 // reading the panel's own live value back, not the runtime's internals.
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   await page.waitForSelector('.uniforms-panel', { timeout: 8000 });
@@ -893,7 +897,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // intercepted at the createObjectURL boundary since headless has no
 // download directory to inspect.
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => {
     window.__capturedBlobs = [];
     const orig = URL.createObjectURL.bind(URL);
@@ -929,7 +933,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // (o) record: feature-detect degrade — an engine with no MediaRecorder gets
 // a disabled button with an explanatory title, never a silent/broken control.
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => { delete window.MediaRecorder; });
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
@@ -951,7 +955,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // admission-gate.js's onRun forwarding and index.js's runAnyway() actually
 // work end-to-end (not just that report.js's button renders in isolation).
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await page.setRequestInterception(true);
   page.on('request', (req) => {
     if (req.url().endsWith('/js/organs/admission/index.js')) {
@@ -973,7 +977,7 @@ export async function admitComposition(passes, opts) {
     } else req.continue();
   });
 
-  const seed = await browser.newPage();
+  const seed = await browser.pooledPage();
   await gotoSafe(seed, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(seed);
   const cleanSrc = (await editorInfo(seed)).value;
@@ -1004,7 +1008,7 @@ export async function admitComposition(passes, opts) {
 // §4.5's event table names "editor, viewer" as co-emitters; the viewer side
 // already had it, this pins the editor side ED-4 adds).
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   await sleep(900); // boot compile
@@ -1046,7 +1050,7 @@ async function buttonState(page, text) {
 // produces a safe verdict and enables it; the user's own next edit
 // re-disables it (a stale verdict must not authorize a suggestion).
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => {
     window.__openedUrls = [];
     window.open = (url) => { window.__openedUrls.push(url); return null; };
@@ -1116,7 +1120,7 @@ async function buttonState(page, text) {
 // be typed freely, and an on-demand check on it reports VF/unsafe without
 // ever touching the GPU (rejected pre-sacrificial) — Suggest stays disabled.
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   await replaceAllAndType(page, FORBIDDEN);
@@ -1173,7 +1177,7 @@ async function buttonState(page, text) {
 // download plumbing needed) so the test reads the exact JSON that would be
 // written to disk.
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/index.html?operator=1#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
   // Generate at least one ring entry in THIS page's admission module instance.
@@ -1213,7 +1217,7 @@ async function buttonState(page, text) {
 
 // (v) without the operator flag, Anatomy shows no export control at all.
 {
-  const page = await browser.newPage();
+  const page = await browser.pooledPage();
   // domcontentloaded + a .card wait, NOT networkidle2: this section only
   // needs boot.js's hotkey listener live (proven by the gallery organ having
   // mounted), and the gallery's hero canvas + thumbs keep network activity

@@ -423,13 +423,12 @@ await sleep(1500);
 // but a frame still has to run for the integrator to advance at all, and CI
 // run 32654025156 recorded the garden at `0 fps · 0.56x`: A never moved, so
 // A never entered SG_LECTERN_XZ's ring, B received zero peer uniforms, and
-// every downstream lease/editor check inherited the failure. Hold until BOTH
-// ends have observed the move — A's own integrator ran, and B saw it over the
-// wire — with a ceiling. A move that never lands still fails below.
-await pageA.waitForFunction(
-  () => window.__uniformCalls.filter((c) => 'uCharPosX' in c).length >= 2,
-  undefined, { timeout: scaled(30000), polling: 200 },
-).catch(() => { /* fall through: (a)'s checks report what actually arrived */ });
+// every downstream lease/editor check inherited the failure. Hold until B has
+// SEEN the move over the wire, with a ceiling; the sleep above stays as the
+// minimum hold, so the distance claim (into SG_LECTERN_XZ's ring at 1.8 u/s)
+// is untouched and this only ever extends it. Asserted on B and not on A
+// because only B is armUniformSpy'd — the real-GPU gate caught a first cut of
+// this reading window.__uniformCalls on A, where it is undefined.
 await pageB.waitForFunction(
   () => window.__uniformCalls.filter((c) => 'uPeer0X' in c || 'uPeer0Z' in c).length >= 2,
   undefined, { timeout: scaled(30000), polling: 200 },

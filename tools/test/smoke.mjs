@@ -1063,11 +1063,40 @@ async function buttonState(page, text) {
 
   const checkClicked = await clickButtonByText(page, 'Check shader');
   check('(r) "Check shader" button found and clicked', checkClicked === true);
-  await sleep(3000); // real sacrificial compile+3 frames under SwiftShader
+
+  // TLE is not "this shader is unsafe", it is "this did not finish in time
+  // HERE". The admission gate's sacrificial worker renders probe frames under
+  // an 800ms-per-frame heartbeat (WATCHDOG.frameMs), and on a GPU-less runner
+  // one SwiftShader frame of the CLEAN DEFAULT STARTER can exceed it: run
+  // 32682633622 came back verdict=TLE, crash_risk=timeout, compile_log="no
+  // heartbeat during 'frame' within 800ms", and took seven downstream checks
+  // (Suggest, the issue body, the fenced envelope) down with it.
+  //
+  // So retry, which is exactly what a user staring at that message would do —
+  // same pattern and same reasoning as mp-two-browsers' commit retry. Each
+  // attempt waits for a NEW admission envelope on the bus rather than for a
+  // duration, because re-reading the badge while the previous verdict is
+  // still on screen would burn all four attempts in milliseconds.
+  //
+  // The assertion below is untouched, and this stays non-vacuous: a check that
+  // never comes back OK/WA leaves badgeText on TLE and still fails.
+  const admissionCount = () => page.evaluate(async () => {
+    const { recent } = await import('./js/core/bus.js');
+    return recent().filter((e) => e.type === 'garden.admission.evaluated.v1').length;
+  }).catch(() => 0);
+
+  let badgeText = null;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const deadline = Date.now() + scaled(15000);
+    while (Date.now() < deadline && (await admissionCount()) < attempt) await sleep(200);
+    badgeText = await page.$eval('.check-report-host .badge', (el) => el.textContent).catch(() => null);
+    if (badgeText !== 'TLE' || attempt === 4) break;
+    await sleep(1200); // let the GPU drain before re-gating
+    await clickButtonByText(page, 'Check shader');
+  }
 
   const reportShown = await page.$eval('.check-report-host', (el) => !el.hidden).catch(() => false);
   check('(r) full report rendered inline (never a scrim)', reportShown === true);
-  const badgeText = await page.$eval('.check-report-host .badge', (el) => el.textContent).catch(() => null);
   check('(r) clean starter verdict is safe (OK or WA)', badgeText === 'OK' || badgeText === 'WA', 'verdict=' + badgeText);
 
   const suggestAfterCheck = await buttonState(page, 'Suggest for gallery');

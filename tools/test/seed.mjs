@@ -568,15 +568,26 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
   // asserted about a seed that had not yet reached ANY settled state. Wait for
   // it to leave 'loading' (a ceiling, free when it boots promptly), then make
   // the real claim: whatever it settled ON must be 'poster'.
+  // Waiting for "not loading" was too early: the element settles through more
+  // than one step, and run 32682633622 sampled the gap — it reported
+  // `FAIL ... (state=poster)`, a message that contradicts its own verdict,
+  // because the boolean and the detail string were TWO separate evaluate()
+  // calls with the transition in between. Wait for the state this actually
+  // claims, then hold, then take ONE snapshot that answers both.
+  //
+  // Still non-vacuous, and still the same claim: an element that autoplays
+  // and STAYS playing never satisfies the poll, and the snapshot below then
+  // reads 'playing' and fails. The extra settle is the real teeth — an
+  // autoplay that fires late is still an autoplay.
   await page.waitForFunction(
-    () => document.getElementById('battery-seed')?.state !== 'loading',
+    () => document.getElementById('battery-seed')?.state === 'poster',
     undefined,
     { timeout: scaled(20000), polling: 200 },
-  ).catch(() => { /* fall through: the check below reports the state it is stuck in */ });
-  await sleep(600); // and then a would-be autoplay's own window, so 'poster' is settled, not in-flight
-  const settledPoster = await page.evaluate(() => document.getElementById('battery-seed').state === 'poster');
-  check('(j) with battery discharging <20%, default autoplay="visible" never leaves "poster"', settledPoster,
-    'state=' + (await page.evaluate(() => document.getElementById('battery-seed').state)));
+  ).catch(() => { /* fall through: the snapshot below reports where it actually is */ });
+  await sleep(600);
+  const batteryState = await page.evaluate(() => document.getElementById('battery-seed').state);
+  check('(j) with battery discharging <20%, default autoplay="visible" never leaves "poster"',
+    batteryState === 'poster', 'state=' + batteryState);
 
   await page.evaluate(() => document.getElementById('battery-seed').shadowRoot.querySelector('.poster').click());
   const played = await waitForState(page, 'playing', '#battery-seed');

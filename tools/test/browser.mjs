@@ -390,7 +390,14 @@ export const slowSleep = (ms) => new Promise((r) => setTimeout(r, scaled(ms)));
 export async function settle(page, until, opts = {}) {
   const { ms = 0, timeout = 15000, polling = 100, arg } = opts;
   if (ms) await sleep(ms);
-  await page.waitForFunction(until, arg, { timeout: scaled(timeout), polling })
+  // The ceiling is capped AFTER scaling, not lowered before it. Dropping the
+  // base to 8000 would have bought a shorter CI worst case (15000 x
+  // SG_TIME_SCALE=6 is 90s per unmet condition) at the price of an 8s ceiling
+  // on THIS box, which has spent this session between load 20 and load 127 —
+  // trading a CI cost paid only on checks that are already failing for local
+  // flakes on checks that are fine. Capping the product keeps 15s locally and
+  // still bounds CI at 45s.
+  await page.waitForFunction(until, arg, { timeout: Math.min(scaled(timeout), 45000), polling })
     .catch(() => { /* fall through: the caller's own check reports what is really there */ });
 }
 

@@ -22,12 +22,12 @@ const STEP = 0.75, FLOOR = 0.5, CEIL = 1;
 // to make WebGL2 context setup itself slow could turn "lose, rebuild, lose
 // again" into an effectively unbounded stall with nothing left to observe it
 // (no exception, no rejection — just an increasingly expensive retry loop).
-// MAX_LOSS_REBUILDS caps consecutive losses inside a LOSS_WINDOW_MS sliding
-// window; tripping it gives up with a stable failed state instead of
-// retrying forever. A loss window resets on its own once enough real time
-// passes without another loss, so sparse real-world context losses (an
-// occasional actual GPU driver hiccup) never approach the cap.
-const MAX_LOSS_REBUILDS = 5, LOSS_WINDOW_MS = 5000;
+// MAX_LOSS_REBUILDS caps losses arriving before the context managed
+// HEALTHY_UPTIME_MS of life; tripping it gives up with a stable failed state.
+// Measure UPTIME, not elapsed time. Elapsed time on a slow host is mostly the
+// REBUILD, so the old sliding window reset on every loss and could not trip on
+// the machines this exists for (CI 32691231440: 39 losses vs a bound of 6).
+const MAX_LOSS_REBUILDS = 5, HEALTHY_UPTIME_MS = 5000;
 
 // webgpu.js is dynamic-imported only on an actual WGSL attempt — idle-costs-zero for a webgl2-only caller (the hero).
 async function tryWebgpu(canvas, wgslSrc) {
@@ -66,7 +66,7 @@ export async function runtimeHost(host, opts) {
   // garden's "Edit here" WebGL2 pin evicted the very panel the editor was
   // mid-flight to mount into, silently rendering it into an orphaned subtree.
   let ownCanvas = null;
-  let lossCount = 0, lossWindowStart = 0; // PERF-3: onLost:'rebuild' circuit breaker — NOT reset by build() itself (see below), only by the window elapsing
+  let lossCount = 0, builtAt = 0; // PERF-3 breaker; builtAt is stamped on build completion so the reset measures how long the context LIVED.
 
   function emit(type, data) {
     if (opts.bus) opts.bus.emit(type, { organ: opts.organ, ...data });
@@ -164,7 +164,7 @@ export async function runtimeHost(host, opts) {
       // retries automatically, so only it needs bounding — 'release' and a
       // caller-supplied fn each run exactly once per loss regardless.
       const now = performance.now();
-      if (now - lossWindowStart > LOSS_WINDOW_MS) { lossWindowStart = now; lossCount = 0; }
+      if (now - builtAt > HEALTHY_UPTIME_MS) lossCount = 0; // survived the window = clean slate
       lossCount++;
       const autoRebuild = opts.onLost !== 'release' && typeof opts.onLost !== 'function';
       const tripped = autoRebuild && lossCount > MAX_LOSS_REBUILDS;
@@ -175,10 +175,11 @@ export async function runtimeHost(host, opts) {
       else {
         try { runtime.dispose(); } catch { /* gone */ }
         h.runtime = null; h.backend = null; h.ok = false;
-        h.log = `WebGL context lost ${lossCount} times within ${LOSS_WINDOW_MS}ms; giving up automatic rebuild.`;
+        h.log = `WebGL context lost ${lossCount} times without surviving ${HEALTHY_UPTIME_MS}ms; giving up automatic rebuild.`;
         opts.onChange?.();
       }
     };
+    builtAt = performance.now(); // starts the breaker's uptime clock
     emit('backend.selected.v1', { backend, reason });
     if (res.ok) runtime.start();
     opts.onChange?.();

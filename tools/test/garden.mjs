@@ -48,7 +48,7 @@
 //       other check in this file uses) can open a component's inline editor
 //       and recompile a change, when the vendor chunk is actually built.
 // Prints "all-PASS" and exits 0 only if every check passed.
-import { launch, serveSite, sleep, gotoSafe, assertRealGpu } from './browser.mjs';
+import { launch, serveSite, sleep, slowSleep, settle, gotoSafe, assertRealGpu } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -99,14 +99,24 @@ async function probe(page, x, y) {
     }
     return window.__probeN;
   }).catch(() => 0);
-  await page.mouse.click(x, y);
-  // 30s, raised from 10s. A GPU readback's latency is a function of how
-  // loaded the machine is, and this box runs a sibling repo's self-hosted CI
-  // runner: the blocking pre-push gate failed here at load average 43 with
-  // "(a) probing the character opens its panel (got null)". It is a ceiling,
-  // so a prompt run pays nothing, and a probe that never opens still fails.
-  await page.waitForFunction((n) => window.__probeN > n, before, { timeout: 30000 })
-    .catch(() => { /* fall through: the read below reports what is actually there */ });
+  // Three clicks of 10s, not one of 30s. The single-click form assumed the
+  // click LANDED and that only the readback was slow — but a probe is a
+  // raycast against what is currently DRAWN, so on a loaded box the first
+  // click can hit a scene that has not put the character on that pixel yet.
+  // Waiting longer cannot produce an event that was never going to fire.
+  // Same ceiling, so a prompt run still pays nothing, and a character that is
+  // never there misses on all three and still fails at the caller's check.
+  // The blocking pre-push gate hit exactly this at load average 58:
+  // "(a) probing the character opens its panel (got null)", and the undefined
+  // button that followed crashed the suite and took its other 40 checks with
+  // it (garden.mjs:299, TypeError reading 'click').
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.mouse.click(x, y);
+    const opened = await page.waitForFunction((n) => window.__probeN > n, before, { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    if (opened) break;
+  }
   return page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
 }
 
@@ -280,7 +290,12 @@ async function openCharacterEditor(page, errors) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.viewer-canvas', { timeout: 8000 }).catch(() => {});
-  await sleep(2500);
+  // Two claims ride this window and they pull opposite ways. "(a) idle load
+  // fetches zero js/editor/ bytes" is NEGATIVE — the window IS its evidence,
+  // so it scales. The probe below needs the opposite: proof the scene is
+  // actually DRAWING, which a fixed sleep never was.
+  await slowSleep(2500);
+  await settle(page, () => (window.__uniformCalls || []).length > 0);
 
   const editorHitsBeforeClick = requestedUrls.filter((u) => u.includes('/js/editor/'));
   check('(a) #/garden idle load fetches zero js/editor/ bytes', editorHitsBeforeClick.length === 0, JSON.stringify(editorHitsBeforeClick));
@@ -296,7 +311,12 @@ async function openCharacterEditor(page, errors) {
   check('(a) "Edit here" is present alongside the "Open in editor" secondary link',
     editBtns.length === 1 && (await page.$('.probe-edit-link')) !== null);
 
-  await editBtns[0].click();
+  // A missing button used to throw here (TypeError reading 'click'), which
+  // killed the process and deleted the evidence for every check after it —
+  // the same "no verdict at all" failure the cancelled CI run had. Report it
+  // and let the downstream checks report their own shortfall instead.
+  check('(a) the "Edit here" button is actually there to click', !!editBtns[0], 'editBtns=' + editBtns.length);
+  await editBtns[0]?.click();
   // REGRESSION WATCH: onEditHere() rebuilds a WebGPU-backed mount onto WebGL2
   // for GLSL live-editing. That rebuild used to wipe every child of the shared
   // `stage` element, detaching the open probe panel while the editor's dynamic
@@ -705,12 +725,23 @@ async function openCharacterEditor(page, errors) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await page.waitForSelector('.garden-tray-measure', { timeout: 8000 }).catch(() => {});
-  await sleep(2000);
+  // NEGATIVE claim below — "chips are empty before Measure is EVER clicked,
+  // never automatic". The window is the whole evidence that nothing measured
+  // itself, so it scales; a short one passes vacuously.
+  await slowSleep(2000);
 
   const chipsBefore = await page.$$eval('.garden-tray-chip', (n) => n.map((c) => c.textContent));
   check('(k) chips are empty before Measure is ever clicked (never automatic)', chipsBefore.every((t) => t === ''), JSON.stringify(chipsBefore));
 
-  await page.click('.garden-tray-measure');
+  // The click is not a preliminary here, it IS the long operation: onMeasure
+  // rebuilds the runtime and compiles six stubbed scenes serially on the main
+  // thread, so click() sits in "performing click action" until that returns.
+  // At load average ~34 that outran the 30s actionability default and threw,
+  // killing the suite after 61 passing checks. Give it the same budget the
+  // poll below already allows and let THAT poll be the single deadline — a
+  // Measure that never runs still leaves the chips empty and still fails.
+  await page.click('.garden-tray-measure', { timeout: 60000 })
+    .catch(() => { /* fall through: the busy-label poll below reports whether it ran */ });
   // Same root cause as (a)/(j) (see openCharacterEditor's header): onMeasure
   // ALSO carries the "same backend seam as editing and variants"
   // rh.rebuild({ prefer: 'webgl2' }) call, and this was the harshest case \u2014

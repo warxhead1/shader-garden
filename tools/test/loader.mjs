@@ -16,7 +16,7 @@
 // ids) so it passed unmodified before the extraction and stays green after
 // route()/navToken move into core/loader.js.
 // Prints "all-PASS" and exits 0 only if every check passed.
-import { launch, serveSite, sleep, gotoSafe } from './browser.mjs';
+import { launch, serveSite, sleep, scaled, gotoSafe } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -151,7 +151,13 @@ async function freshPage(errors) {
   // resumes right here, after registry.load(), and (pre-fix) went on to
   // build the runtime before the loader's post-mountFn() check ever ran.
   let sawCanvas = false;
-  const pollUntil = Date.now() + 3000;
+  // scaled(): this is a NEGATIVE assertion, so the window is the evidence.
+  // The race it watches is 6x longer in wall clock on a 6x slower machine, and
+  // a 3000ms poll that ends before the stale mount would have inserted its
+  // canvas passes VACUOUSLY. Widening it here makes the check stricter, not
+  // weaker — the opposite of the usual direction, which is why it is scaled
+  // rather than left alone.
+  const pollUntil = Date.now() + scaled(3000);
   while (Date.now() < pollUntil) {
     if (await page.$('.viewer-canvas')) { sawCanvas = true; break; }
     await sleep(10);

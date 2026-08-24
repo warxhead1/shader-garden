@@ -20,7 +20,7 @@
 // instead of retrying forever.
 //
 // Usage: node tools/test/runtime-host-loss.mjs   (first: npm ci in tools/test)
-import { launch, serveSite, gotoSafe, sleep, assertRealWebgl2 } from './browser.mjs';
+import { launch, serveSite, gotoSafe, sleep, scaled, assertRealWebgl2 } from './browser.mjs';
 
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
@@ -44,7 +44,7 @@ page.on('pageerror', (e) => errors.push(String(e)));
 // exercised directly via a scratch host div, not through an organ route.
 await gotoSafe(page, BASE + '/index.html#/', { waitUntil: 'networkidle2', timeout: 20000 });
 
-const result = await page.evaluate(async () => {
+const result = await page.evaluate(async (budgetMs) => {
   const { runtimeHost } = await import('./js/core/runtime-host.js');
 
   const host = document.createElement('div');
@@ -83,7 +83,15 @@ const result = await page.evaluate(async () => {
   // whatever state it's in — a stuck retry loop shows up here as "never hits
   // null before the deadline", not as this evaluate() call itself hanging
   // (each build() attempt still returns to the event loop between losses).
-  const deadline = Date.now() + 8000;
+  // budgetMs comes from Node as scaled(8000). It has to: this deadline lives
+  // INSIDE page.evaluate, so shimPage's TIME_SCALE scaling — which only
+  // reaches Playwright's own `timeout:` options — cannot see it. The breaker
+  // trips after a fixed COUNT of losses, and every retry in that count pays a
+  // SwiftShader compile, so on a GPU-less runner the count outlasts 8s of wall
+  // clock (run 32680404388: timedOut=true, finalBackend=webgl2 — still
+  // retrying, not stuck). The ASSERTION is untouched: the breaker must still
+  // trip rather than retry forever, which is the only thing this ever claimed.
+  const deadline = Date.now() + budgetMs;
   while (rh.backend !== null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
 
   observer.disconnect();
@@ -96,7 +104,7 @@ const result = await page.evaluate(async () => {
     lostEvents: events.filter((e) => e.type === 'runtime.lost.v1').length,
     timedOut: Date.now() >= deadline,
   };
-});
+}, scaled(8000));
 
 check('the initial build resolved before any loss was forced', result.initialBackend === 'webgl2', 'initialBackend=' + result.initialBackend);
 check('the circuit breaker tripped instead of retrying past the deadline', !result.timedOut && result.finalBackend === null,

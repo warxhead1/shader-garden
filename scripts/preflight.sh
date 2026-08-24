@@ -117,6 +117,20 @@ for n in $(sed -n '/^SUITES=(/,/^)/p' scripts/gpu-gate.sh | grep -v '^SUITES=(\|
   [ -f "tools/test/$n.mjs" ] || note "gpu-gate.sh lists a suite with no file: $n.mjs"
 done
 
+# Every suite must be able to SAY it passed, in the one wording CI reads.
+# test.yml's "Battery verdict" step derives each suite's result by grepping its
+# log for `all-PASS`, because every suite step carries continue-on-error and a
+# step's own exit code is therefore invisible. A suite that announces success
+# in its own words is reported FAIL with every check passing — which is exactly
+# what runtime-prepare-shader did in run 32678437991, and what blocked a deploy
+# on a battery that was in fact entirely green. Grepping for the sentinel here
+# is cheaper than discovering it 20 minutes into a run.
+for f in tools/test/*.mjs; do
+  n="$(basename "$f" .mjs)"
+  echo "$n" | grep -Eq "$excluded" && continue
+  grep -q "all-PASS" "$f" || note "tools/test/$n.mjs never prints 'all-PASS' — CI's Battery verdict cannot see it pass"
+done
+
 # --- 3. budgets -------------------------------------------------------------
 if ! python3 tools/check_budgets.py >/dev/null 2>&1; then
   python3 tools/check_budgets.py 2>&1 | grep -E '^FAIL' >&2

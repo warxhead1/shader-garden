@@ -169,4 +169,6 @@ for (const r of results) {
 console.log(`\n${results.length} kernels, median avg_ms=${medianAvg != null ? medianAvg.toFixed(2) : 'n/a'} -> ${path.relative(process.cwd(), path.join(OUT_DIR, 'perf.json'))}`);
 
 const harnessFailed = results.some((r) => r.avg_ms == null && /NAV:|no viewer-canvas/.test(r.error || ''));
+// See runtime-prepare-shader.mjs's note on the 'all-PASS' sentinel.
+console.log(harnessFailed ? 'FAIL perf (harness)' : 'all-PASS');
 process.exit(harnessFailed ? 1 : 0);

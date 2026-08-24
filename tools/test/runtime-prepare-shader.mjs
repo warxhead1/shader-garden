@@ -227,5 +227,10 @@ check('(WebGPU) prepareShader() surfaces a compile failure the same shape as GL2
 badPrep.commit();
 check('(WebGPU) a failed prepare\'s commit() is a no-op — live pipeline unchanged', rt._pipeline === afterB);
 
-console.log(failed ? 'FAIL runtime-prepare-shader' : 'PASS runtime-prepare-shader — all checks passed');
+// 'all-PASS' is the sentinel the CI Battery verdict step greps for, and it
+// is the ONLY thing that marks a suite green there — a step's own exit code
+// is invisible under continue-on-error. This suite used to print its own
+// wording and was reported FAIL in run 32678437991 with every single check
+// passing. scripts/preflight.sh now enforces the sentinel.
+console.log(failed ? 'FAIL runtime-prepare-shader' : 'all-PASS');
 process.exit(failed ? 1 : 0);

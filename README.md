@@ -83,3 +83,12 @@ See [DEPLOY.md](DEPLOY.md) for hosting, custom-domain, and PWA install notes.
 ## License
 
 [MIT](LICENSE).
+
+The shaders are the project's own — hand-authored, or discovered by this
+repo's own FunSearch runs. Three snippet-scale borrowings from the wider
+graphics community (Inigo Quilez's `sdBox`, The Art of Code's `hash21`, and
+the ubiquitous sine-hash) are credited in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), which also records how the
+corpus was audited and what that audit can and cannot establish. Nothing here
+is derived from a shader published on Shadertoy; that file explains why the
+metadata used to imply otherwise.

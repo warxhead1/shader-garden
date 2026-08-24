@@ -23,13 +23,17 @@ import { el, clear } from '../../dom.js';
 
 // Every origin kernels.json ships today (see ARCHITECTURE.md's schema) is
 // curated INTO this repo under its own MIT license (LICENSE) — vault,
-// handmade, and shadertoy_evolved are the only three that reach kernels.json
+// handmade, and funsearch_evolved are the only three that reach kernels.json
 // (bake_kernels.py's gate). Anything else reaching this panel is, by
 // construction, source the repo does not hold the rights to license itself
 // — a foreign/share-link feed (v2 blueprint §7.1 demand adjustment #8). The
 // panel names that honestly instead of implying a license it can't vouch
 // for.
-const GALLERY_ORIGINS = new Set(['vault', 'handmade', 'shadertoy_evolved']);
+// 'shadertoy_evolved' is the pre-rename spelling of 'funsearch_evolved',
+// accepted for reads only so a stale cached kernels.json still gets the
+// gallery's license line rather than silently degrading to "author's own".
+// Nothing writes it any more. See THIRD-PARTY-NOTICES.md.
+const GALLERY_ORIGINS = new Set(['vault', 'handmade', 'funsearch_evolved', 'shadertoy_evolved']);
 
 function licenseFor(kernel) {
   return kernel && GALLERY_ORIGINS.has(kernel.origin) ? 'MIT (Shader Garden gallery)' : "author's own";

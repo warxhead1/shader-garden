@@ -25,6 +25,12 @@ import { loadAttributionData } from '../garden/attribution.js';
 
 const ORIGIN_LABELS = {
   vault: 'Vault — curated evolutionary picks',
+  funsearch_evolved: 'FunSearch-evolved (this repo’s own runs)',
+  // Read-compat only, never written. The old name said "evolved FROM
+  // Shadertoy", which was never true — the upstream file was Shadertoy
+  // FORMAT ("paste this into shadertoy.com"), not Shadertoy source. A
+  // browser holding a cached kernels.json from before the rename still gets
+  // the right label instead of the raw string. See THIRD-PARTY-NOTICES.md.
   shadertoy_evolved: 'FunSearch-evolved (this repo’s own runs)',
   handmade: 'Hand-authored',
 };
@@ -50,10 +56,10 @@ function renderKernelSection(kernels) {
     if (!groups.has(origin)) groups.set(origin, []);
     groups.get(origin).push(k);
   }
-  // Deterministic group order: vault, shadertoy_evolved, handmade, then
+  // Deterministic group order: vault, funsearch_evolved, handmade, then
   // anything else alphabetically — matches the order GALLERY_ORIGINS is
   // declared in organs/provenance/index.js.
-  const order = ['vault', 'shadertoy_evolved', 'handmade'];
+  const order = ['vault', 'funsearch_evolved', 'handmade'];
   const keys = [...groups.keys()].sort((a, b) => {
     const ia = order.indexOf(a), ib = order.indexOf(b);
     if (ia === -1 && ib === -1) return a.localeCompare(b);

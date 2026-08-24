@@ -1,7 +1,7 @@
 {
   "id": "hills-into-icefield",
   "title": "Rolling Hills → Mountain Peaks (composition demo)",
-  "description": "COMP-1 demo composition, hand-authored from two existing evolved kernels. Pass 1 renders \"Rolling Hills\" (shadertoy_evolved) into an offscreen buffer; pass 2 renders \"Mountain Peaks\" (shadertoy_evolved) to the screen with that buffer bound as iChannel0. Neither kernel was authored with channels in mind, so the screen pass doesn't yet sample iChannel0 in its own body — this proves the DAG-validated multi-pass pipeline end to end (target allocation, per-pass compile, channel binding) ahead of COMP-2/3's channel-consuming kernels.",
+  "description": "COMP-1 demo composition, hand-authored from two existing evolved kernels. Pass 1 renders \"Rolling Hills\" (funsearch_evolved) into an offscreen buffer; pass 2 renders \"Mountain Peaks\" (funsearch_evolved) to the screen with that buffer bound as iChannel0. Neither kernel was authored with channels in mind, so the screen pass doesn't yet sample iChannel0 in its own body — this proves the DAG-validated multi-pass pipeline end to end (target allocation, per-pass compile, channel binding) ahead of COMP-2/3's channel-consuming kernels.",
   "domain": "composite",
   "passes": [
     { "kernel": "biome-rolling-hills", "target": "bufferA" },

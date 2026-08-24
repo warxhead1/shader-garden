@@ -1098,7 +1098,7 @@ solved, in the proposal document.
     "description": "one line",
     "domain": "sdf | noise | terrain | phase | latent | sph | demo",
     "fitness": 0.9994, "generation": 32, "run_id": null,
-    "author": "funsearch-autobench", "origin": "vault | shadertoy_evolved | handmade",
+    "author": "funsearch-autobench", "origin": "vault | funsearch_evolved | handmade",
     "language": "glsl", "glsl": "<mainImage source>",
     "tags": ["evolved", "terrain"], "featured": true,
     "cost": { "avg_ms": 3, "heavy": true },
@@ -1697,7 +1697,7 @@ can't drift out from under the docs page that reads it.
 {
   "v": 1, "id": "biome-rolling-hills", "title": "Rolling Hills — evolved biome",
   "language": "glsl", "glsl": "<mainImage source>",
-  "author": "funsearch-autobench", "origin": "shadertoy_evolved",
+  "author": "funsearch-autobench", "origin": "funsearch_evolved",
   "admitted": { "gate": "glslangValidator", "baked": "<RFC3339>" }
 }
 ```

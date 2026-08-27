@@ -54,7 +54,7 @@ SUITES=(
   comp0 comp1 comp2 comp3
   runtime-host-loss runtime-prepare-shader perf
   webgpu-live webgpu-fallback
-  mp-clock mp-solo-parity mp-compile-swap mp-two-browsers
+  mp-clock mp-solo-parity mp-compile-swap mp-two-browsers mp-dual-workspace
 )
 
 if [ -n "${SG_ALLOW_SOFTWARE:-}" ]; then

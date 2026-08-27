@@ -317,7 +317,14 @@ AGGREGATES = [
     # role-aware HUD, panel clearing on the round edge, tray.collapse()). The
     # aggregate moves WITH the per-file row so a single file cannot grow the
     # organ silently. Actual 2955/3010 at the time of writing.
-    ("site/js/organs/garden/*.js", 3010, None),
+    # 3010 -> 3360: MP-5's transport-independent shared-world semantics. The
+    # dual-workspace editor (edit.js, holder/non-holder swap without remount,
+    # transactional recompileWithBody), the §7.4 uniform set (uLecternOn/
+    # uSpongeOn/uSeekerBlind + bounded seeker-blind vignette), and the
+    # openEditors/mirrorBodies/localDrafts triple that keeps open editors in
+    # lockstep with the world across lease flips and phase edges. Actual
+    # 3265/3360 at the time of writing.
+    ("site/js/organs/garden/*.js", 3360, None),
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.
@@ -330,7 +337,13 @@ AGGREGATES = [
     # role-aware game line — it read "seek!" to hiders and seekers alike, and
     # is where Sculptor's Tag has to be taught — names on the scoreboard in
     # place of raw ids, and clearing the reading panels on the round edge.
-    ("site/js/organs/garden/index.js", 1135, None),
+    # 1135 -> 1290: MP-5 §5.2 dual-workspace plumbing. notifyEditorsAuthority()
+    # (pushes holder/non-holder role + holder-name to every open editor on
+    # lease/phase edges), the openEditors/mirrorBodies/localDrafts triple,
+    # handleRemoteCommit's setMirrorBody resync, and the §7.4 uniform
+    # truth (applyMpUniforms extended with uSpongeOn / uSeekerBlind). Actual
+    # 1287/1290 at the time of writing.
+    ("site/js/organs/garden/index.js", 1290, None),
     # net.js: connectRoom() + the frozen module surface in spec §8.1
     # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
     ("site/js/organs/garden/net.js", 480, None),
@@ -338,6 +351,11 @@ AGGREGATES = [
     ("site/js/organs/garden/timesync.js", 130, None),
     # roster.js: peer slot allocation for the flattened uniform bank. 80/100.
     ("site/js/organs/garden/roster.js", 100, None),
+    # edit.js: the GARDEN-IDE inline mini-editor. MP-5 §5.2 added the dual-
+    # workspace layout (Watching pane above My draft), setAuthority() +
+    # setMirrorBody() for in-place lease-flip swaps, and the transactional
+    # local-compile flow. 259/300 at the time of writing.
+    ("site/js/organs/garden/edit.js", 300, None),
     # The relay (spec §2). Dependency-free Node, not shipped to the site, but
     # budgeted for the same reason the site is: room.mjs is a PURE reducer and
     # stays that way — growth here is the signal that I/O or timers leaked in.

@@ -17,6 +17,7 @@
     "mp-relay": "node mp-relay.mjs",
     "mp-clock": "node mp-clock.mjs",
     "mp-two-browsers": "node mp-two-browsers.mjs",
+    "mp-dual-workspace": "node mp-dual-workspace.mjs",
     "mp-compile-swap": "node mp-compile-swap.mjs",
     "mp-solo-parity": "node mp-solo-parity.mjs",
     "comp0": "node comp0.mjs",

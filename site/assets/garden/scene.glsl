@@ -620,6 +620,15 @@ const float SG_SPONGE_HALF   = 2.2;
 
 uniform float uSpongeOn; // 0/1 — off in solo (I3); on for the room's hide-and-seek phase
 
+// MP-5 §7.4: 1 ONLY for the current seeker during `hiding` (the 30s before
+// the round opens). Defaults to 0 (I3) — unset floats read 0 in GLSL, and a
+// solo mount's `if (room) return;` applyMpUniforms guard never touches it,
+// so the vignette is OFF in solo and OFF for non-seekers/hiders at all
+// other times. The vignette itself is a bounded screen-space term added at
+// the END of mainImage (after tonemap) — it can't perturb solo defaults
+// because uSeekerBlind is uniformly 0 there.
+uniform float uSeekerBlind;
+
 float sg_box(vec3 p, vec3 b) {
   vec3 d = abs(p) - b;
   return length(max(d, 0.0)) + min(max(d.x, max(d.y, d.z)), 0.0);
@@ -1027,5 +1036,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   float vig = 1.0 - 0.30 * dot(vigUv - 0.5, vigUv - 0.5) * 4.0;
   col *= clamp(vig, 0.0, 1.0);
   col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));
+
+  // MP-5 §7.4: seeker-blind vignette. ONLY on for the current seeker during
+  // `hiding` (set JS-side as `uSeekerBlind=1`; cleared otherwise). A radial
+  // darkening gated on uSeekerBlind > 0.5 so unset-uniform / solo / non-
+  // seeker / non-hiding cases all read 0 here and pay ONE multiply + ONE
+  // branch — the math is identical to a no-op at uSeekerBlind == 0. The
+  // strength (0.55) is bounded: brightened edges of the vignette never push
+  // the rendered colour above 1.0 (we multiply, not add), and the central
+  // pixel reads 1.0 - 0.55 = 0.45 of the post-tonemap colour — enough to
+  // feel like the seeker can't see, not so dark the whole frame goes black.
+  // A smooth radial mask (1 at the centre, 0 near the edges) keeps the
+  // vignette screen-centre, where the seeker's gaze lives during the 30s
+  // hiding phase.
+  if (uSeekerBlind > 0.5) {
+    vec2 sbCenter = vigUv - 0.5;
+    float sbRadial = 1.0 - smoothstep(0.0, 0.45, length(sbCenter));
+    col *= 1.0 - 0.55 * sbRadial;
+  }
+
   fragColor = vec4(col, 1.0);
 }

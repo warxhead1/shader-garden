@@ -407,6 +407,18 @@ jobs:
         timeout-minutes: 22
         working-directory: tools/test
         run: node mp-two-browsers.mjs 2>&1 | tee out/logs/mp-two-browsers.log
+      # §5.2 / §6.2 / §7.4 acceptance for the dual-workspace editor and the
+      # phase uniform truth. Sits right next to mp-two-browsers because both
+      # drive two pages of one room — same relay-port offset pattern, same
+      # armUniformSpy/armSocketSpy idioms. Backend-agnostic on the same
+      # grounds as mp-two-browsers (SwiftShader on this runner covers both
+      # backends).
+      - name: mp-dual-workspace
+        if: env.TIER != 'deploy'
+        continue-on-error: true
+        timeout-minutes: 22
+        working-directory: tools/test
+        run: node mp-dual-workspace.mjs 2>&1 | tee out/logs/mp-dual-workspace.log
       # I4: a receiver must keep rendering when a peer commits broken source.
       - name: mp-compile-swap
         if: env.TIER != 'deploy'

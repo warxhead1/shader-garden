@@ -9,6 +9,17 @@
 // scene + setShader() + tune-reapply lives in organs/garden/index.js's
 // `recompile` callback, passed in — this module never touches the scene
 // source or the runtime directly.
+//
+// Two layouts share one widget (multiplayer §5.2):
+//   - Holder / solo: ONE editable pane (the historical behaviour).
+//   - Non-holder: TWO panes — "Watching <holder>" (read-only mirror updated
+//     by remote drafts, NEVER compiles, NEVER transmits) and "My draft"
+//     (editable local sandbox, locally compiled, never transmitted while
+//     non-holder). The local draft is preserved across tab switches (panel
+//     close/reopen) and lease changes (non-holder → holder promotes the
+//     draft to committable; holder → non-holder keeps the draft editable).
+//     index.js owns the source-of-truth localDraft Map; this widget just
+//     reads/writes it via the `onLocalDraftChange` callback.
 import { createDocAdapter } from '../../editor/doc-adapter.js';
 import { createDiagnosticsList } from '../../editor/diagnostics-list.js';
 import glslMode from '../../editor/modes/glsl.js';
@@ -20,26 +31,44 @@ const DEBOUNCE_MS = 300;
 /**
  * @param {{
  *   component: import('./parse.js').Component,
- *   initialBody: string,   // current body — edited if a prior session edited it
- *   originalBody: string,  // component.source, for Revert
+ *   initialBody: string,        // initial editable pane value (local draft, or pristine)
+ *   originalBody: string,       // pristine, for Revert
+ *   initialMirrorBody?: string, // initial Watching pane text (only when isHolder === false)
  *   recompile?: (body: string) => { ok: boolean, log: string, messages: object[] },
  *     // messages are in FULL-SCENE user-source coordinates (webgl2.js's own
  *     // remap) — this module subtracts component.startLine to land on
  *     // editor-local line numbers. Omit when readOnly is true — a mirror
  *     // never compiles anything itself (docs/multiplayer-spec.md §5.2).
- *   readOnly?: boolean,     // MP §5.2: non-holders get the SAME editor, live-
- *     // mirroring the holder's draft via the returned handle's setBody().
+ *   isHolder: boolean,          // true → single editable pane (holder OR solo).
+ *                               // false → dual workspace (non-holder in a room).
+ *   holderName?: string,        // shown in the Watching pane heading; required when isHolder === false.
+ *   onLocalDraftChange?: (body: string) => void,  // every keystroke on the local draft (non-holder)
+ *                               // and on holder-mode local edits, so index.js's
+ *                               // localDrafts map stays in sync.
  *   onCommit?: (body: string) => Promise<{ok: boolean, reason?: string}>,
  *     // MP §6.2: present only for the lease holder in a room — renders a
  *     // "Commit" button that validates locally (via `recompile`) before
  *     // ever sending.
  * }}
- * @returns {Promise<{ el: HTMLElement, destroy: () => void, setBody?: (body: string) => void }>}
+ * @returns {Promise<{
+ *   el: HTMLElement,
+ *   destroy: () => void,
+ *   setMirrorBody?: (body: string) => void,
+ *     // Update the Watching pane text without remounting — called from
+ *     // handleRemoteDraft / handleRemoteCommit whenever the holder's draft
+ *     // or the committed body changes. Only present in dual-workspace mode.
+ *   setAuthority?: (auth: { isHolder: boolean, holderName?: string }) => void,
+ *     // Swap between single-pane (holder) and dual-workspace (non-holder)
+ *     // layouts WITHOUT remounting — preserves the user's local draft text
+ *     // across the lease flip. Only present in a room.
+ *   getLocalDraft?: () => string,  // current editable pane text (for saves/reads)
+ * }>}
  */
-export async function mountComponentEditor({ component, initialBody, originalBody, recompile, readOnly = false, onCommit }) {
-  const wrap = el('div', 'component-editor' + (readOnly ? ' component-editor-readonly' : ''));
+export async function mountComponentEditor({ component, initialBody, originalBody, initialMirrorBody, recompile, isHolder, holderName, onLocalDraftChange, onCommit }) {
+  let isHolderLocal = !!isHolder;
+  const wrap = el('div', 'component-editor' + (isHolderLocal ? '' : ' component-editor-nonholder'));
   const statusRow = el('div', 'component-editor-status');
-  const statusPill = el('span', 'pill', readOnly ? 'mirroring' : 'unchanged');
+  const statusPill = el('span', 'pill', isHolderLocal ? 'unchanged' : 'local');
   const revertBtn = el('button', 'btn btn-small btn-ghost', 'Revert');
   revertBtn.type = 'button';
   const commitBtn = el('button', 'btn btn-small btn-primary', 'Commit');
@@ -49,39 +78,62 @@ export async function mountComponentEditor({ component, initialBody, originalBod
   // mount onto WebGL2 before this module ever mounts) — true regardless of
   // which backend was rendering a moment ago, so this is unconditional.
   const backendNote = el('span', 'muted component-editor-note',
-    readOnly ? 'read-only — live view of the holder’s draft' : 'editing runs on WebGL2');
+    isHolderLocal ? 'editing runs on WebGL2' : 'local draft — compiles locally, never sent');
   statusRow.append(statusPill, backendNote);
-  if (readOnly) {
-    // §5.2: a mirror has nothing of its own to revert or commit — watching
-    // is the whole feature, not a stripped-down editor.
-  } else {
+  if (isHolderLocal) {
     statusRow.append(revertBtn);
     if (onCommit) statusRow.append(commitBtn);
+  } else {
+    // Non-holders get NO Revert and NO Commit — Revert would discard the
+    // local sandbox the user is intentionally shaping, and a Commit would
+    // conflict with the holder. Only the editable pane's own diagnostic pill
+    // surfaces the local-compile state.
   }
 
+  // --- Editable pane (always present) — drives recompile/onLocalDraftChange.
+  const editableWrap = el('div', 'component-editor-editable');
   const { adapter, kind } = await createDocAdapter(
     initialBody,
-    readOnly ? () => {} : (body) => scheduleRecompile(body),
-    { readOnly },
+    (body) => {
+      if (onLocalDraftChange) onLocalDraftChange(body);
+      scheduleRecompile(body);
+    },
+    { readOnly: false },
   );
-  await adapter.setLanguage(glslMode); // no-op on the textarea fallback
+  await adapter.setLanguage(glslMode);
   const diagList = createDiagnosticsList(adapter);
+  editableWrap.append(adapter.el, diagList.el);
+  wrap.append(statusRow, editableWrap);
 
-  wrap.append(statusRow, adapter.el, diagList.el);
+  // --- Dual-workspace (non-holder) — Watching pane sits above the editable
+  // pane, mirrors the holder's draft. Built only when isHolder === false;
+  // on a later setAuthority({ isHolder: true }) the Watching pane hides and
+  // the editable pane's commit button / revert button appear, all without
+  // remounting the doc adapter.
+  let mirrorWrap = null, mirrorTextarea = null, mirrorHead = null;
+  if (!isHolderLocal) {
+    mirrorWrap = el('div', 'component-editor-mirror');
+    mirrorHead = el('div', 'component-editor-mirror-head muted', 'Watching ' + (holderName || 'the holder'));
+    mirrorTextarea = document.createElement('textarea');
+    mirrorTextarea.className = 'code-editor code-editor-readonly';
+    mirrorTextarea.readOnly = true;
+    mirrorTextarea.value = initialMirrorBody ?? originalBody;
+    mirrorTextarea.setAttribute('aria-label', "Holder's draft (read-only)");
+    mirrorWrap.append(mirrorHead, mirrorTextarea);
+    wrap.insertBefore(mirrorWrap, editableWrap);
+  }
 
   let debounce = null;
   let destroyed = false;
   let lastGoodBody = initialBody; // §6.2: only ever send/commit a body that PASSED recompile() locally
+  let diagState = { status: 'unchanged', label: isHolderLocal ? 'unchanged' : 'local' };
 
   function setStatus(kindCls, label) {
     statusPill.className = 'pill ' + kindCls;
     statusPill.textContent = label;
+    diagState = { status: kindCls, label };
   }
 
-  // webgl2.js's own out-of-range clamp convention, one level deeper: a
-  // message that lands outside this component's own body (a brace imbalance
-  // bleeding into the next component, or a wholeDoc link error at scene line
-  // 1) still shows *somewhere* the mini-editor's own line gutter has.
   function toLocalMessages(messages, bodyLineCount) {
     return (messages || []).map((m) => ({
       ...m,
@@ -102,6 +154,7 @@ export async function mountComponentEditor({ component, initialBody, originalBod
       if (kind === 'textarea') diagList.render(msg);
       return;
     }
+    if (!recompile) return; // no recompile in mirror-only contexts (kept for backward-compat with non-MP callers)
     const res = recompile(body);
     const msgs = toLocalMessages(res.messages, body.split('\n').length);
     adapter.setDiagnostics(msgs);
@@ -115,7 +168,11 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     debounce = setTimeout(() => runRecompile(body), DEBOUNCE_MS);
   }
 
-  if (!readOnly) {
+  // Holder-only Revert: rewinds the editable pane to the pristine source
+  // and forces an immediate (no-debounce) recompile. Non-holders have no
+  // Revert — the local draft IS the user's work in progress; an accidental
+  // click would lose it without a second confirmation surface.
+  if (isHolderLocal) {
     revertBtn.addEventListener('click', () => {
       clearTimeout(debounce);
       adapter.setValue(originalBody);
@@ -129,7 +186,7 @@ export async function mountComponentEditor({ component, initialBody, originalBod
   // exists when onCommit was passed (index.js only does that for the
   // in-room holder), and lastGoodBody only advances on res.ok above, so a
   // currently-broken buffer has nothing eligible to send.
-  if (onCommit) {
+  if (isHolderLocal && onCommit) {
     commitBtn.addEventListener('click', async () => {
       if (destroyed) return;
       commitBtn.disabled = true;
@@ -141,19 +198,63 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     });
   }
 
+  // setAuthority: called by index.js on every renderLease/renderGame. The
+  // editable pane (and its local draft) is NEVER remounted — setMirrorBody
+  // already keeps the Watching pane in lockstep with the holder, and the
+  // editable pane's text is its own source of truth (kept alive across the
+  // swap). Reverting to single-pane mode just hides the Watching wrapper.
+  function setAuthority(auth) {
+    if (destroyed) return;
+    const nowHolder = !!auth.isHolder;
+    const nextName = auth.holderName || 'the holder';
+    if (nowHolder && !isHolderLocal) {
+      // Non-holder → holder: build the holder-mode chrome (Revert + maybe
+      // Commit) and remove the dual-workspace class. The editable pane is
+      // already mounted; nothing in it moves.
+      isHolderLocal = true;
+      wrap.classList.remove('component-editor-nonholder');
+      wrap.classList.add('component-editor-holder');
+      if (!statusRow.contains(revertBtn)) statusRow.append(revertBtn);
+      if (onCommit && !statusRow.contains(commitBtn)) statusRow.append(commitBtn);
+      if (mirrorWrap) { mirrorWrap.hidden = true; }
+      backendNote.textContent = 'editing runs on WebGL2';
+      setStatus(diagState.status, diagState.label);
+      return;
+    }
+    if (!nowHolder && isHolderLocal) {
+      // Holder → non-holder: show the Watching pane again, drop Revert/Commit.
+      // The local draft (now editable but not committable) is the SAME body
+      // the user was just editing as holder — preserved across the flip.
+      isHolderLocal = false;
+      wrap.classList.add('component-editor-nonholder');
+      wrap.classList.remove('component-editor-holder');
+      if (statusRow.contains(revertBtn)) revertBtn.remove();
+      if (statusRow.contains(commitBtn)) commitBtn.remove();
+      if (mirrorWrap) {
+        mirrorWrap.hidden = false;
+        mirrorHead.textContent = 'Watching ' + nextName;
+      }
+      backendNote.textContent = 'local draft — compiles locally, never sent';
+      setStatus(diagState.status, diagState.label);
+    } else if (!nowHolder && mirrorWrap && mirrorHead) {
+      // Already non-holder: just update the holder name shown.
+      mirrorHead.textContent = 'Watching ' + nextName;
+    }
+  }
+
   return {
     el: wrap,
-    // §5.2: the ONLY way a read-only mirror's buffer changes — net.js's
-    // onDraft callback (via index.js) calls this as the holder types.
-    // Never wired to onChange/recompile: a mirror does not typecheck.
-    setBody(body) {
-      if (!readOnly || destroyed) return;
-      adapter.setValue(body);
-    },
     destroy() {
       destroyed = true;
       clearTimeout(debounce);
       adapter.destroy();
+    },
+    getLocalDraft() {
+      return adapter.getValue();
+    },
+    setAuthority,
+    setMirrorBody(body) {
+      if (mirrorTextarea && !destroyed) mirrorTextarea.value = body;
     },
   };
 }

@@ -226,7 +226,6 @@ export async function mount(ctx) {
       nameInput, members: [],
       selfId: null, holderId: null, phase: 'lobby',
     };
-  }
   topbar.append(backLink, attribLink, backendBadge, fpsBadge, perfBadge, qualitySelect, camSelect, uniformsToggle);
   if (mp) topbar.append(mp.statusPill, mp.roomBadge);
   topbar.append(el('div', 'toolbar-spacer'), hint);
@@ -305,16 +304,45 @@ export async function mount(ctx) {
   // belt-and-suspenders, matching onBuild()'s own reapply below for the
   // context-loss case). Returns setShader()'s result in FULL-SCENE user
   // coordinates; edit.js does the further component-local remap.
-  function recompileWithBody(component, body) {
-    if (body === component.source) editedBodies.delete(component.id);
-    else editedBodies.set(component.id, body);
-    // F2: the single choke point every hand-edit AND variant swap already
-    // goes through — editedBodies.has() is the truth, so this stays correct
-    // (including clearing on revert-to-pristine) with no separate code path.
-    tray.setEdited(component.id, editedBodies.has(component.id));
+  //
+  // TRANSACTIONAL: a failing body may render diagnostics to the caller, but
+  // it MUST NOT enter editedBodies and MUST NOT become the source the next
+  // (re)build recompiles from — that's what `revert` / `handleRemoteCommit`
+  // rely on for "the previous world still renders". The previous-good body
+  // stays in editedBodies (or stays absent) exactly as it was before the
+  // failed edit. The diagnostic surface (res.messages + the local pill in
+  // edit.js) is unchanged.
+  //
+  // `opts.dryRun` (used for a non-holder's local sandbox — see openProbe
+  // below): the trial build runs and the runtime shows the local draft
+  // rendering, but the commit-to-editedBodies step is skipped. A non-
+  // holder's body must never enter the world's source-of-truth map —
+  // they aren't the lease holder, so even a passing local compile has
+  // no claim on the world.
+  function recompileWithBody(component, body, opts = {}) {
     if (!rh.runtime) return { ok: false, log: '', messages: [] };
-    const res = rh.runtime.setShader(buildSceneSource());
-    if (res.ok) rh.runtime.setUniforms(tuneValues);
+    // Trial build: splice `body` into a throwaway copy of editedBodies so a
+    // failure can't perturb the real state. Only commit to editedBodies
+    // after setShader() confirms the trial compiles — the same two-sided
+    // discipline handleRemoteCommit uses (its `trialBodies` pattern below),
+    // applied uniformly here to the holder's own typing path.
+    const trialBodies = new Map(editedBodies);
+    if (body === component.source) trialBodies.delete(component.id);
+    else trialBodies.set(component.id, body);
+    const trialSrc = buildSceneSource(trialBodies);
+    const res = rh.runtime.setShader(trialSrc);
+    if (res.ok && !opts.dryRun) {
+      // Trial compiled — commit to the real state.
+      if (body === component.source) editedBodies.delete(component.id);
+      else editedBodies.set(component.id, body);
+      // F2: the single choke point every hand-edit AND variant swap already
+      // goes through — editedBodies.has() is the truth, so this stays correct
+      // (including clearing on revert-to-pristine) with no separate code path.
+      tray.setEdited(component.id, editedBodies.has(component.id));
+      rh.runtime.setUniforms(tuneValues);
+    }
+    // On !res.ok the real editedBodies is untouched; the next rebuild
+    // (context loss, mount, etc.) still recompiles the prior-good source.
     return res;
   }
 
@@ -332,15 +360,71 @@ export async function mount(ctx) {
   let leaseHeld = 0, leaseHue = 0; // uLeaseHeld/uLeaseHue mirror, reapplied every (re)build below
   let ring = false;                // lectern-radius membership, for transition-only `ring` sends (§5.1)
   let lastSeekerId = null;         // whose round it is, for probingAllowed() below
-  let readOnlyMirrors = new Map(); // componentId -> live { setBody } handle for an open non-holder editor (§5.2)
+  let phase = 'lobby';             // current room phase, drives uSpongeOn (mirror of mp.phase, kept locally for one-place reads)
+  // §5.2 / dual-workspace bookkeeping. Three maps all keyed by componentId:
+  //   - openEditors:   every currently mounted mountComponentEditor() handle
+  //                    (both holder and non-holder). Lets renderLease/
+  //                    renderGame push authority/mirror updates without
+  //                    remounting, and lets handleRemoteDraft /
+  //                    handleRemoteCommit keep an open editor's mirror in
+  //                    lockstep with the world.
+  //   - mirrorBodies:  last body we saw the holder broadcast for this
+  //                    component (either via handleRemoteDraft or via
+  //                    handleRemoteCommit's commit). Initial mirror text
+  //                    for a freshly-opened non-holder editor, and the
+  //                    fallback when no editor is currently open.
+  //   - localDrafts:   the non-holder's editable-pane body for this
+  //                    component, kept across close/reopen of the panel
+  //                    AND across lease flips. NEVER used as rebuild
+  //                    source (it's a local sandbox, not a commit) —
+  //                    recompileWithBody() runs it as a trial build
+  //                    locally so the user gets diagnostics on their
+  //                    draft, but editedBodies is never touched for
+  //                    a non-holder entry.
+  let openEditors = new Map();
+  let mirrorBodies = new Map();
+  let localDrafts = new Map();
 
-  // §5.1/§8.1: uSpongeOn + the lease uniforms are MP-only — NEVER set on the
+  // §5.1/§7.4/§8.1: uLecternOn=1 in any room (else 0; I3); uSpongeOn=1 only
+  // during hiding/seeking (else 0); uSeekerBlind=1 only for the current
+  // seeker during hiding (else 0). All three are MP-only — NEVER set on the
   // solo path (I3; mp-solo-parity.mjs asserts a solo mount never touches
   // them). Reapplied on every (re)build, same "fresh runtime starts with
   // nothing set" reasoning applyQualityUniform/applyCamUniforms document.
   function applyMpUniforms() {
     if (!room) return;
-    rh.runtime?.setUniforms({ uSpongeOn: 1, uLeaseHeld: leaseHeld, uLeaseHue: leaseHue });
+    const phaseOn = phase === 'hiding' || phase === 'seeking';
+    const isSeeker = phase === 'hiding' && lastSeekerId != null && lastSeekerId === mp?.selfId;
+    rh.runtime?.setUniforms({
+      uLecternOn: 1,
+      uSpongeOn: phaseOn ? 1 : 0,
+      uSeekerBlind: isSeeker ? 1 : 0,
+      uLeaseHeld: leaseHeld,
+      uLeaseHue: leaseHue,
+    });
+  }
+
+  // §5.2 dual-workspace: every open editor (holder or non-holder) needs
+  // to know whether THIS client currently holds the lease, and what
+  // name to show in the Watching pane if it doesn't. Pushed on every
+  // lease change AND every phase edge (the spec calls these out together:
+  // "renderLease/renderGame: Reapply uniforms and authority on every
+  // change/rebuild"). The editor itself owns the swap (showing/hiding
+  // the Watching pane, Revert/Commit buttons, the status pill label) —
+  // this just tells it the truth at the moment of the change. Holders
+  // also receive the call but only the holder-name update is meaningful
+  // (they never show a Watching pane); harmless no-op for the rest.
+  function notifyEditorsAuthority() {
+    if (!room) return;
+    const isSelfHolder = lastLease.isSelf;
+    const holderName = isSelfHolder ? undefined : (lastLease.holderName || 'the holder');
+    for (const [componentId, editor] of openEditors) {
+      editor.setAuthority?.({ isHolder: isSelfHolder, holderName });
+      // Resync the mirror too — by the time a lease flips, the previous
+      // holder's last broadcast might still be in the Watching pane.
+      const mirrorBody = mirrorBodies.get(componentId);
+      if (mirrorBody != null) editor.setMirrorBody?.(mirrorBody);
+    }
   }
 
   // PERF-2: pushes the current quality preset's SG_QUALITY level into the
@@ -553,21 +637,64 @@ export async function mount(ctx) {
           toast('Switched to WebGL2 for live editing');
         }
         const { mountComponentEditor } = await import('./edit.js');
-        // §5.2: one writer, N readers. Outside a room this is always the
-        // holder branch (isHolder === true) — solo behaviour is untouched.
+        // §5.2: dual-workspace. isHolder is true for solo (room=null)
+        // and for the current lease holder in a room; false for everyone
+        // else in the room. Holder = single editable pane (legacy/solo
+        // behaviour, preserved byte-identical). Non-holder = editable
+        // "My draft" pane + read-only "Watching <holder>" pane above it.
         const isHolder = !room || lastLease.isSelf;
         const editor = await mountComponentEditor({
           component,
-          initialBody: editedBodies.get(component.id) ?? component.source,
+          // Holders reopen on their last-committed body; non-holders
+          // reopen on their last LOCAL sandbox body — neither one
+          // clobbers the other, so re-opening the same component five
+          // minutes later still shows what the user had typed.
+          initialBody: isHolder
+            ? (editedBodies.get(component.id) ?? component.source)
+            : (localDrafts.get(component.id) ?? component.source),
           originalBody: component.source,
-          readOnly: room ? !isHolder : false,
-          recompile: !room || isHolder ? (body) => {
-            const res = recompileWithBody(component, body);
+          isHolder,
+          // The Watching pane header reads "Watching <name>"; non-holders
+          // always get one. Holders ignore the field (their pane header
+          // never shows it).
+          holderName: isHolder ? undefined : (lastLease.holderName || 'the holder'),
+          // The mirror starts at whatever the holder has last broadcast
+          // for this component — a late-join snapshot applied via
+          // applyEditsSnapshot, an earlier draft via handleRemoteDraft,
+          // or the pristine source as the absolute fallback.
+          initialMirrorBody: mirrorBodies.get(component.id) ?? component.source,
+          // Same recompile path for everyone — recompileWithBody is
+          // transactional (trial build; only the holder's success path
+          // commits into editedBodies), so a non-holder's local sandbox
+          // runs as a trial build that renders locally to give them
+          // their own diagnostics, never touches editedBodies, and is
+          // never sent anywhere. dryRun makes the "commit" half of
+          // recompileWithBody a no-op for non-holders, even on a passing
+          // local compile — their draft is a local sandbox, not a claim
+          // on the world.
+          recompile: (body) => {
+            const res = recompileWithBody(component, body, { dryRun: !isHolder });
             variantChoices.delete(component.id); // hand-edited — no named stage describes this body anymore
             onSourceChanged();
-            if (room && net && res.ok) net.sendDraft(component.id, body); // §5.2: mirrored to non-holders, never persisted
+            // Only the holder broadcasts their draft. A non-holder's
+            // local sandbox is local — §5.2 verbatim: "never transmitted
+            // while non-holder", which is exactly why a non-holder's
+            // recompile runs but their body never enters the net layer.
+            if (room && net && res.ok && isHolder) net.sendDraft(component.id, body);
             return res;
-          } : undefined,
+          },
+          // Keeps localDrafts in sync with the editable pane for EVERY mount,
+          // not just non-holders. Holders route their keystrokes into
+          // editedBodies through the recompile() above (the source of
+          // truth), but ALSO writing to localDrafts keeps the cached
+          // body honest across a later non-holder promotion: a player
+          // who types as the holder, loses the lease, and reopens the
+          // same component as a non-holder, would otherwise see a fresh
+          // empty sandbox instead of the body they had been typing.
+          // Negligible cost (one Map.set per keystroke).
+          onLocalDraftChange: (body) => {
+            localDrafts.set(component.id, body);
+          },
           // §6.2 step 1: local validation via prepareShader() BEFORE ever
           // sending — a body that fails never leaves this machine.
           onCommit: room && isHolder ? async (body) => {
@@ -575,11 +702,16 @@ export async function mount(ctx) {
             return net.commit(component.id, body);
           } : undefined,
         });
-        if (room && !isHolder) {
-          readOnlyMirrors.set(component.id, editor);
-          const rawDestroy = editor.destroy;
-          editor.destroy = (...args) => { readOnlyMirrors.delete(component.id); rawDestroy.apply(editor, args); };
-        }
+        // Track EVERY open editor (holder and non-holder) so renderLease
+        // / renderGame can push authority + mirror updates without
+        // remounting, and so handleRemoteCommit / handleRemoteDraft can
+        // keep an open editor's mirror pane in lockstep with the world.
+        // The destroy wrapper removes the entry so a fast-swap to another
+        // component (or panel close) never leaves a stale handle in the
+        // map for the next notifyEditorsAuthority() to call into.
+        openEditors.set(component.id, editor);
+        const rawDestroy = editor.destroy;
+        editor.destroy = (...args) => { openEditors.delete(component.id); rawDestroy.apply(editor, args); };
         return editor;
       },
       async getEditorHref() {
@@ -848,6 +980,13 @@ export async function mount(ctx) {
         : (lastLease.holderName || 'someone') + ' holds the lectern';
     updateLeaseBtn();
     manageKeepalive(lastLease.isSelf);
+    // §5.2: any open editor was mounted against the PREVIOUS lease state.
+    // The lease flipped (someone took / released / got it taken); every
+    // editor needs to know its new role (single pane vs. dual workspace)
+    // and, if it just became a non-holder, the new holder's name shown
+    // in its Watching pane header. Holders may also need to drop the
+    // Watching pane on the flip out — handled inside setAuthority.
+    notifyEditorsAuthority();
   }
 
   function renderGame(game) {
@@ -894,6 +1033,21 @@ export async function mount(ctx) {
         : 'stay hidden — the seeker can reshape the world around you';
       mp.startBtn.hidden = true;
     }
+    // §7.4: uSpongeOn (hiding/seeking) + uSeekerBlind (only the current
+    // seeker during hiding) — both live here so every phase edge reapplies
+    // them on the next render. Reapply after the mp.phase comparison above
+    // because isSeeker reads the OLD mp.phase; the local `phase` is what
+    // applyMpUniforms() actually consults.
+    phase = game.phase;
+    applyMpUniforms();
+    // §5.2: every open editor needs to know whether THIS client is
+    // currently the lease holder. A phase edge usually doesn't change
+    // the holder (the seeker holds throughout hiding+seeking), but the
+    // spec lumps "renderLease/renderGame: reapply ... on every change/
+    // rebuild" together — so a single function pushes both. Re-applying
+    // authority here is a no-op when lastLease.isSelf hasn't changed;
+    // re-applying the mirror body is idempotent.
+    notifyEditorsAuthority();
     mp.phase = game.phase; // last: the edge test above compares against the previous phase
   }
 
@@ -911,8 +1065,23 @@ export async function mount(ctx) {
     for (const [componentId, body] of edits) {
       const component = components.find((c) => c.id === componentId);
       if (!component) continue;
-      if (body == null) editedBodies.delete(componentId); else editedBodies.set(componentId, body);
+      if (body == null) {
+        editedBodies.delete(componentId);
+        mirrorBodies.delete(componentId);
+      } else {
+        editedBodies.set(componentId, body);
+        // The mirror pane should start at the freshly-snapshotted body
+        // too — late-join means mirrorBodies was empty for this
+        // component, and the next non-holder to open "Edit here" would
+        // otherwise see pristine text in their Watching pane.
+        mirrorBodies.set(componentId, body);
+      }
       tray.setEdited(componentId, editedBodies.has(componentId));
+      // If an editor is currently OPEN for this component (someone hit
+      // "Edit here" before the snapshot arrived), keep its mirror in
+      // lockstep — the holder's editor ignores the call, the non-
+      // holder's pane re-renders to the newly-snapshotted body.
+      openEditors.get(componentId)?.setMirrorBody?.(body ?? component.source);
     }
     const res = rh.runtime.setShader(buildSceneSource());
     if (res.ok) rh.runtime.setUniforms(tuneValues);
@@ -987,17 +1156,24 @@ export async function mount(ctx) {
     tray.setEdited(componentId, editedBodies.has(componentId));
     rh.runtime.setUniforms(tuneValues);
     mpEpoch = epoch;
-    const mirror = readOnlyMirrors.get(componentId);
-    mirror?.setBody?.(body ?? component.source);
+    // Update every open editor's Watching pane (holder has no mirror, so
+    // the call is a no-op for them — see setMirrorBody in edit.js). Also
+    // keep mirrorBodies fresh so the NEXT non-holder to open "Edit here"
+    // for this component starts at the right text instead of the pristine
+    // fallback.
+    mirrorBodies.set(componentId, body ?? component.source);
+    const editor = openEditors.get(componentId);
+    editor?.setMirrorBody?.(body ?? component.source);
     return true;
   }
 
-  // §5.2 — the draft mirror. Only routes to an OPEN read-only editor
-  // instance for this component; if the non-holder never opened "Edit here"
-  // for it, there's nothing to update (the probe panel's static body only
-  // resolves on open, matching solo behaviour).
+  // §5.2 — the live draft mirror. Routes to an OPEN editor's Watching
+  // pane (no-op on a holder's editor — they don't have one); updates
+  // mirrorBodies either way so a later "Edit here" on this component
+  // starts at the latest seen holder body.
   function handleRemoteDraft({ componentId, body }) {
-    readOnlyMirrors.get(componentId)?.setBody?.(body);
+    mirrorBodies.set(componentId, body);
+    openEditors.get(componentId)?.setMirrorBody?.(body);
   }
 
   if (room) {

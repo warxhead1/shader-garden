@@ -26,7 +26,7 @@
 // borrows its noise from: terrain height ~0-2 units, camera orbit radius
 // ~3.6 units.
 
-// @sg-uniforms uProbe uProbeSel SG_QUALITY uCharPosX uCharPosZ uCharYaw uCharGaitDist uCharSpeed01 uCamMode uPrevCamMode uCamBlend TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS uPeerCount uPeer0Act uPeer0X uPeer0Z uPeer0Yaw uPeer0Gait uPeer0Speed uPeer0Hue uPeer1Act uPeer1X uPeer1Z uPeer1Yaw uPeer1Gait uPeer1Speed uPeer1Hue uPeer2Act uPeer2X uPeer2Z uPeer2Yaw uPeer2Gait uPeer2Speed uPeer2Hue uPeer3Act uPeer3X uPeer3Z uPeer3Yaw uPeer3Gait uPeer3Speed uPeer3Hue uPeer4Act uPeer4X uPeer4Z uPeer4Yaw uPeer4Gait uPeer4Speed uPeer4Hue uPeer5Act uPeer5X uPeer5Z uPeer5Yaw uPeer5Gait uPeer5Speed uPeer5Hue uPeer6Act uPeer6X uPeer6Z uPeer6Yaw uPeer6Gait uPeer6Speed uPeer6Hue uLeaseHeld uLeaseHue uSpongeOn uLecternOn
+// @sg-uniforms uProbe uProbeSel SG_QUALITY uCharPosX uCharPosZ uCharYaw uCharGaitDist uCharSpeed01 uCamMode uPrevCamMode uCamBlend TERRAIN_ROUGHNESS TERRAIN_SCALE BOUNCE_HEIGHT BOUNCE_SPEED SHADOW_SOFTNESS POND_RIPPLE POND_TINT_MIX GRASS_SWAY_SPEED CLOUD_COVERAGE ROCK_ROUNDNESS uPeerCount uPeer0Act uPeer0X uPeer0Z uPeer0Yaw uPeer0Gait uPeer0Speed uPeer0Hue uPeer1Act uPeer1X uPeer1Z uPeer1Yaw uPeer1Gait uPeer1Speed uPeer1Hue uPeer2Act uPeer2X uPeer2Z uPeer2Yaw uPeer2Gait uPeer2Speed uPeer2Hue uPeer3Act uPeer3X uPeer3Z uPeer3Yaw uPeer3Gait uPeer3Speed uPeer3Hue uPeer4Act uPeer4X uPeer4Z uPeer4Yaw uPeer4Gait uPeer4Speed uPeer4Hue uPeer5Act uPeer5X uPeer5Z uPeer5Yaw uPeer5Gait uPeer5Speed uPeer5Hue uPeer6Act uPeer6X uPeer6Z uPeer6Yaw uPeer6Gait uPeer6Speed uPeer6Hue uLeaseHeld uLeaseHue uSpongeOn uLecternOn uSeekerBlind
 //
 // MP-2/3/5 (docs/multiplayer-spec.md §4.1/§5.1/§7.1): the peer scalars are
 // declared here in full, on the WebGPU path, deliberately. They were briefly
@@ -536,6 +536,13 @@ fn sg_lectern_base() -> vec3f {
 // @end
 
 // @component sponge "The Sponge" "A 4-iteration Menger sponge — the thing worth hiding in, and the origin of this whole idea (docs/multiplayer-spec.md §7.1). Box-fold IFS, not a mesh: each iteration folds space into eighths and carves the cross-shaped middle third, the standard recursive construction unrolled to a fixed loop since neither shader language has recursion. Gated on uSpongeOn so solo pays nothing beyond one comparison (I3), same trick peers uses above."
+// MP-5 §7.4 (seeker-blind vignette) — a screen-space term added at the END of
+// mainImage (after tonemap, see below). uSeekerBlind is 1 ONLY for the current
+// seeker during `hiding` and 0 otherwise — defaults to 0 (I3), so unset floats
+// / solo / non-seeker / non-hiding phases all read 0 here and pay ONE multiply
+// + ONE branch. The vignette is bounded: the rendered colour is multiplied, not
+// added, so even with full vig it can't push above 1.0; the central pixel reads
+// 1.0 - 0.55 = 0.45 of the post-tonemap colour.
 const SG_SPONGE_CENTER: vec3f = vec3f(0.0, 1.9, 0.0);
 const SG_SPONGE_HALF: f32     = 2.2;
 
@@ -929,5 +936,20 @@ fn mainImage(fragCoord: vec2f) -> vec4f {
   let vig = 1.0 - 0.30 * dot(vigUv - 0.5, vigUv - 0.5) * 4.0;
   col = col * clamp(vig, 0.0, 1.0);
   col = pow(clamp(col, vec3f(0.0), vec3f(1.0)), vec3f(0.4545));
+
+  // MP-5 §7.4: seeker-blind vignette. ONLY on for the current seeker during
+  // `hiding` (set JS-side as `uSeekerBlind=1`; cleared otherwise). A radial
+  // darkening gated on uSeekerBlind() > 0.5 so unset-uniform / solo / non-
+  // seeker / non-hiding cases all read 0 here and pay ONE multiply + ONE
+  // branch — the math is identical to a no-op at uSeekerBlind() == 0. The
+  // strength (0.55) is bounded: brightened edges of the vignette never push
+  // the rendered colour above 1.0 (we multiply, not add), and the central
+  // pixel reads 1.0 - 0.55 = 0.45 of the post-tonemap colour.
+  if (uSeekerBlind() > 0.5) {
+    let sbCenter = vigUv - vec2f(0.5);
+    let sbRadial = 1.0 - smoothstep(0.0, 0.45, length(sbCenter));
+    col = col * (1.0 - 0.55 * sbRadial);
+  }
+
   return vec4f(col, 1.0);
 }

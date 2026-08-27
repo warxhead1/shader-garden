@@ -253,9 +253,12 @@ async function openEditHere(page) {
 
 // Same Ctrl+A/Backspace/type technique garden.mjs's replaceAllAndType uses
 // (a plain textarea's triple-click only selects one paragraph, not the
-// whole multi-paragraph body).
+// whole multi-paragraph body). Targets the editable pane specifically — a
+// holder/nonholder .component-editor now contains TWO .code-editor nodes
+// (the editable pane + the read-only mirror for non-holders), and focus on
+// the mirror would silently type into nowhere.
 async function replaceAllAndType(page, text) {
-  await page.focus('.component-editor .code-editor');
+  await page.focus('.component-editor-editable .code-editor');
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyA');
   await page.keyboard.up('Control');
@@ -475,16 +478,28 @@ check('(c) B\'s lease.request was denied — the reply still names A as holder, 
 check('(setup) B opened the sky probe panel', await clickTrayItem(pageB, skyComponent.name));
 await sleep(200);
 check('(setup) B\'s "Edit here" mounted', await openEditHere(pageB));
-const bReadOnly = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);
-check('(d) B\'s editor mounted read-only (B is not the holder)', bReadOnly === true, 'got ' + bReadOnly);
-const bBodyPristine = await pageB.$eval('.component-editor .code-editor', (el) => el.value).catch(() => null);
-check('(setup) B\'s editor starts on the pristine sky body', bBodyPristine === skyComponent.source);
+// §5.2 dual-workspace: B's editor now exposes TWO panes — a read-only
+// "Watching" mirror above an editable "My draft". The (old) "the whole
+// editor is read-only" predicate became "the mirror is read-only AND the
+// editable pane is editable AND there's no Commit button". We assert on
+// the wrap class instead, which is the test surface the dual-workspace
+// design exposes for "this client is not the holder".
+const bNonHolder = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-nonholder')).catch(() => null);
+check('(d) B\'s editor mounted in dual-workspace mode (B is not the holder)', bNonHolder === true, 'got ' + bNonHolder);
+const bMirrorReadOnly = await pageB.$eval('.component-editor-mirror textarea', (el) => el.readOnly).catch(() => null);
+check('(d) B\'s "Watching" mirror textarea is read-only', bMirrorReadOnly === true, 'got ' + bMirrorReadOnly);
+const bNoCommit = !(await pageB.$('.component-editor .btn-primary'));
+check('(d) B\'s editor has NO Commit button (cannot broadcast)', bNoCommit);
+const bMirrorBodyPristine = await pageB.$eval('.component-editor-mirror textarea', (el) => el.value).catch(() => null);
+check('(setup) B\'s mirror starts on the pristine sky body (no holder broadcast yet)', bMirrorBodyPristine === skyComponent.source);
 
 check('(setup) A opened the sky probe panel', await clickTrayItem(pageA, skyComponent.name));
 await sleep(200);
 check('(setup) A\'s "Edit here" mounted', await openEditHere(pageA));
-const aReadOnly = await pageA.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);
-check('(setup) A\'s editor mounted EDITABLE (A is the holder)', aReadOnly === false, 'got ' + aReadOnly);
+const aHolder = await pageA.$eval('.component-editor', (el) => el.classList.contains('component-editor-holder') && !el.classList.contains('component-editor-nonholder')).catch(() => null);
+check('(setup) A\'s editor mounted in single-pane holder mode (A IS the holder)', aHolder === true, 'got ' + aHolder);
+const aNoMirror = !(await pageA.$('.component-editor-mirror'));
+check('(setup) A\'s holder editor mounts NO mirror pane (single workspace)', aNoMirror);
 
 const skyPixelBaseline = await readSkyPixels(pageB);
 check('(setup) got B\'s baseline sky pixels', skyPixelBaseline.some(Array.isArray), JSON.stringify(skyPixelBaseline));
@@ -512,10 +527,13 @@ if (editorsAvailable) {
   // wire send at another 150ms on top of that (DRAFT_DEBOUNCE_MS) — both only
   // fire after a PASSING local recompile (§6.2 step 1), so this also proves
   // the draft mirrors something that actually compiled, not raw keystrokes.
+  // The selector below targets the MIRROR textarea specifically, not "any
+  // .code-editor" — B's editor now has two of them (mirror + editable),
+  // and the editable pane is, by design, NOT updated by a remote draft.
   // Playwright's waitForFunction(pageFunction, arg, options) puts arg BEFORE
   // options (opposite of puppeteer's (fn, options, ...args)).
   const draftMirrored = await pageB.waitForFunction(
-    (expected) => document.querySelector('.component-editor .code-editor')?.value === expected,
+    (expected) => document.querySelector('.component-editor-mirror textarea')?.value === expected,
     // A draft is NOT gated (the check above proves a draft never reaches
     // prepareShader), so this path is only relay round-trip plus a DOM write —
     // nothing like the 14400ms retry ceiling the commit path carries. 6000ms is
@@ -526,8 +544,8 @@ if (editorsAvailable) {
     GOOD_BODY, { timeout: 20000 },
   ).then(() => true).catch(() => false);
   check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', draftMirrored);
-  const bStillReadOnly = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null);
-  check('(d) B\'s editor is still read-only after the draft landed (never becomes editable)', bStillReadOnly === true);
+  const bStillNonHolder = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-nonholder')).catch(() => null);
+  check('(d) B\'s editor stays in dual-workspace mode after the draft landed (never becomes committable)', bStillNonHolder === true);
 
   // NOT a pixel diff — see armPrepareSpy's header note on why a fixed sky
   // pixel is the wrong oracle for "did a draft alone recompile B's scene"

@@ -871,6 +871,57 @@ a:hover { text-decoration: underline; }
   flex: none;
 }
 
+/* GARDEN-MP §5.2: dual-workspace layout for non-holders in a room. The
+   host gets .component-editor-nonholder added (or removed) by edit.js's
+   setAuthority() without remounting the doc adapter — the Watching pane
+   above the editable pane just toggles its hidden state. Holder / solo
+   keeps the original single-column flow and gets .component-editor-holder
+   when (and only when) a non-holder was just promoted. */
+.component-editor.component-editor-nonholder {
+  /* The host is 16rem tall in solo/holder mode. With a Watching pane on
+     top, the editable pane gets squeezed — bumping the whole host to
+     24rem keeps the editor actually usable without the Watching pane
+     dominating. The Watching pane gets its own scroll inside its own
+     flex item below. */
+  height: 24rem;
+}
+.component-editor-mirror {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 50%;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raise);
+}
+.component-editor-mirror-head {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.component-editor-mirror textarea {
+  /* .code-editor already supplies flex/min-height/font; we just tighten
+     the padding so the read-only mirror (which is half-height in the
+     dual-workspace layout, see .component-editor-nonholder above) reads
+     at a glance instead of as a wall of text. The .code-editor-readonly
+     opacity pass through main.css's existing rule (line ~1243). */
+  padding: 0.4rem 0.6rem;
+}
+.component-editor-editable {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 50%;
+  min-height: 0;
+}
+/* When the editor is in non-holder mode, the editable pane gets half the
+   height instead of the full 16rem — its inner doc adapter and diagnostic
+   list keep their own internal scroll, so a half-height pane is still
+   usable. */
+.component-editor-nonholder .component-editor-editable {
+  border-top: 1px solid var(--border);
+}
+
 .probe-tunes { display: flex; flex-direction: column; gap: 0.7rem; margin-bottom: 0.9rem; }
 .probe-tune-label {
   display: flex;

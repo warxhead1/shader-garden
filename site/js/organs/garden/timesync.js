@@ -88,12 +88,28 @@ export function createTimeSync({ send, now = () => Date.now() }) {
       pending.clear();
     },
 
-    /** Feed a `time{serverNowMs, echo:{id, clientSendMs}}` reply in. */
+    /** Feed a `time{serverNowMs, echo:{id}}` reply in. Strangers, duplicates,
+     *  malformed packets, and stale-from-a-prior-connection pings must all be
+     *  ignored silently — a single bad reply from the server (or a relay that
+     *  replayed something, or our own out-of-order send) must never throw or
+     *  poison the ring. The stored clientSendMs in `pending` is the ONLY
+     *  source of truth: echo.clientSendMs is wire noise we deliberately
+     *  don't trust, because a malicious or replayed `time` could otherwise
+     *  claim any send-time it wanted. */
     onPong(serverNowMs, echo) {
-      const sent = pending.get(echo.id);
-      pending.delete(echo.id);
-      const clientSendMs = sent != null ? sent : echo.clientSendMs;
-      const { rtt, offset } = sampleFromPong(clientSendMs, serverNowMs, now());
+      if (!echo || typeof echo !== 'object') return;
+      const id = echo.id;
+      if (typeof id !== 'string' && typeof id !== 'number') return;
+      if (typeof serverNowMs !== 'number' || !Number.isFinite(serverNowMs)) return;
+      const sent = pending.get(id);
+      if (sent === undefined) return; // unknown / stale / duplicate — never trust echo.clientSendMs
+      pending.delete(id);
+      if (typeof sent !== 'number' || !Number.isFinite(sent)) return;
+      const received = now();
+      if (typeof received !== 'number' || !Number.isFinite(received)) return;
+      const { rtt, offset } = sampleFromPong(sent, serverNowMs, received);
+      if (!Number.isFinite(rtt) || rtt < 0) return;
+      if (!Number.isFinite(offset)) return;
       samples.push({ rtt, offset });
       if (samples.length > OFFSET_RING) samples.shift();
     },

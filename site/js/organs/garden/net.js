@@ -367,6 +367,7 @@ export function connectRoom(opts) {
     socket.addEventListener('message', (ev) => handleMessage(ev.data));
     socket.addEventListener('close', () => {
       ws = null;
+      drainPendingCommits('disconnected');
       timeSync.stop();
       stopPoseLoop();
       // A reconnect gets a fresh `welcome` with the room's current epoch and
@@ -423,8 +424,23 @@ export function connectRoom(opts) {
     });
   }
 
+  /** Settle every queued commit resolver EXACTLY once with the given
+   *  failure shape, and empty the queue. Called on WebSocket close (so an
+   *  in-flight commit never strands its caller) and on destroy() (so a
+   *  tear-down is symmetric with a tear-down-by-disconnect). Reconnect gets
+   *  a fresh `welcome` with a new epoch — stale resolvers from a prior
+   *  connection that survived here would either double-resolve or, worse,
+   *  attribute a reply from the new connection to a request the caller
+   *  already gave up on. Hence "settle once, then drop". */
+  function drainPendingCommits(reason) {
+    while (pendingCommits.length) {
+      pendingCommits.shift()({ ok: false, reason });
+    }
+  }
+
   function destroy() {
     destroyed = true;
+    drainPendingCommits('disconnected');
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (clockRaf != null) { cancelAnimationFrame(clockRaf); clockRaf = null; }
     stopPoseLoop();

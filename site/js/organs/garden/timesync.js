@@ -1,14 +1,14 @@
 // Shader Garden — organs/garden/timesync.js
-// Multiplayer spec §3.1/§3.2: NTP-style min-RTT offset estimation, kept as a
-// standalone module so net.js's socket plumbing never has to be spun up to
-// test the actual math (mp-netclient.mjs imports selectOffset() directly).
+// Multiplayer spec §3.1/§3.2: NTP-style min-RTT offset estimation. Standalone
+// so net.js's socket plumbing never has to be spun up to test the math
+// (mp-netclient.mjs imports selectOffset() directly).
 //
 // Ring of the last OFFSET_RING samples; the estimate is the offset that
-// belongs to the sample with the MINIMUM rtt, never the mean. Averaging
-// drags the estimate toward whatever the single worst (most jittered) packet
-// said — one bad Wi-Fi frame corrupts every future frame's iTime. Minimum-RTT
-// selection instead assumes the best-observed round trip is the closest any
-// sample got to the true one-way latency, and throws the rest away.
+// belongs to the sample with the MINIMUM rtt, never the mean. Averaging drags
+// the estimate toward whatever the single worst (most jittered) packet said
+// — one bad Wi-Fi frame corrupts every future frame's iTime. Minimum-RTT
+// selection assumes the best-observed round trip is the closest any sample
+// got to the true one-way latency, and throws the rest away.
 
 export const OFFSET_RING = 8;
 // First 5 samples come in fast (2s) so a freshly joined client converges
@@ -19,8 +19,8 @@ const FAST_PING_COUNT = 5;
 const SLOW_PING_MS = 15000;
 
 /** Pure: pick the offset of the min-rtt sample. `samples` is [{rtt, offset}].
- *  Null on an empty ring (no time sample has landed yet). Exported so it is
- *  testable without a ring, a socket, or a clock. */
+ *  Null on an empty ring. Exported so it is testable without a ring, socket,
+ *  or clock. */
 export function selectOffset(samples) {
   if (!samples || samples.length === 0) return null;
   let best = samples[0];
@@ -30,24 +30,22 @@ export function selectOffset(samples) {
   return best.offset;
 }
 
-/** Pure: derive {rtt, offset} from a `time` reply and the local send/receive
+/** Pure: derive {rtt, offset} from a `time` reply and local send/receive
  *  clock readings, per §3.1's formulas exactly. Exported alongside
- *  selectOffset so the whole estimator is testable end-to-end without a
- *  socket: feed it synthetic (clientSendMs, serverNowMs, nowMs) triples. */
+ *  selectOffset so the estimator is testable end-to-end: feed synthetic
+ *  (clientSendMs, serverNowMs, nowMs) triples. */
 export function sampleFromPong(clientSendMs, serverNowMs, nowMs) {
   const rtt = nowMs - clientSendMs;
   const offset = serverNowMs + rtt / 2 - nowMs;
   return { rtt, offset };
 }
 
-/**
- * Stateful ring + ping scheduler. `send(msg)` is the caller's socket-send;
- * `now()` defaults to Date.now and is overridable for tests. This owns
- * nothing about the socket's lifecycle — net.js calls onPong() whenever a
- * `time` message arrives and start()/stop() around the socket's own
- * open/close, so a reconnect gets a clean ping cadence instead of inheriting
- * a stale timer pointed at a dead connection.
- */
+/** Stateful ring + ping scheduler. `send(msg)` is the caller's socket-send;
+ *  `now()` defaults to Date.now and is overridable for tests. Owns nothing
+ *  about the socket's lifecycle — net.js calls onPong() when a `time`
+ *  message arrives and start()/stop() around the socket's open/close, so a
+ *  reconnect gets a clean ping cadence instead of inheriting a stale timer
+ *  pointed at a dead connection. */
 export function createTimeSync({ send, now = () => Date.now() }) {
   const samples = [];
   let t0Ms = 0;
@@ -80,9 +78,9 @@ export function createTimeSync({ send, now = () => Date.now() }) {
       sendPing();
     },
 
-    /** Stop pinging and drop in-flight ping bookkeeping — call on
-     *  disconnect so a pong that arrives after the socket is already dead
-     *  (or belongs to a since-superseded reconnect) can't corrupt the ring. */
+    /** Stop pinging and drop in-flight ping bookkeeping — call on disconnect
+     *  so a pong that arrives after the socket is dead (or belongs to a
+     *  since-superseded reconnect) can't corrupt the ring. */
     stop() {
       if (timer) { clearTimeout(timer); timer = null; }
       pending.clear();
@@ -90,12 +88,11 @@ export function createTimeSync({ send, now = () => Date.now() }) {
 
     /** Feed a `time{serverNowMs, echo:{id}}` reply in. Strangers, duplicates,
      *  malformed packets, and stale-from-a-prior-connection pings must all be
-     *  ignored silently — a single bad reply from the server (or a relay that
-     *  replayed something, or our own out-of-order send) must never throw or
-     *  poison the ring. The stored clientSendMs in `pending` is the ONLY
-     *  source of truth: echo.clientSendMs is wire noise we deliberately
-     *  don't trust, because a malicious or replayed `time` could otherwise
-     *  claim any send-time it wanted. */
+     *  ignored silently — a single bad reply (or a replayed one, or our own
+     *  out-of-order send) must never throw or poison the ring. The stored
+     *  clientSendMs in `pending` is the ONLY source of truth: echo.clientSendMs
+     *  is wire noise we deliberately don't trust, because a malicious or
+     *  replayed `time` could otherwise claim any send-time it wanted. */
     onPong(serverNowMs, echo) {
       if (!echo || typeof echo !== 'object') return;
       const id = echo.id;

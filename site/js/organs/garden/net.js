@@ -1,30 +1,23 @@
 // Shader Garden — organs/garden/net.js
 // Multiplayer spec §8.1: the one frozen export, `connectRoom(opts)`. L5 codes
-// against this factory's opts/return shape ONLY — it must never reach past
-// it into timesync.js or roster.js, and this file must never import from
-// site/js/runtime/ (armClock takes the runtime as a plain argument instead,
-// so ownership of "what a runtime is" stays entirely on L4/L5's side of the
-// boundary and this file only ever calls the five methods §3.2/§4 name).
+// against this factory's opts/return shape ONLY — it never reaches past it
+// into timesync.js or roster.js, and this file never imports from
+// site/js/runtime/ (armClock takes the runtime as a plain argument, so
+// ownership of "what a runtime is" stays entirely on L4/L5's side of the
+// boundary; this file calls only the five methods §3.2/§4 name).
 //
-// Two design calls the spec's message table (§2.3) leaves implicit, made
-// explicit here so a reader isn't left guessing:
-//   - `commit`/`reject` carry no client-chosen request id, so there is no
-//     wire-level way to match a `commit()` promise to the reply that settles
-//     it. Only the lease holder ever has a commit in flight (server-enforced,
-//     "holder only"), so a single FIFO queue of pending resolvers is
-//     sufficient in practice: settle the oldest pending resolver on the next
-//     `commit` echoing our own id, or the next `reject`. Two commits in
-//     flight at once would misattribute results to each other, but the
-//     protocol structurally never produces that (edit.js only calls
-//     commit() once the previous one has settled).
-//   - §7.4 describes a lobby "Start" action but §2.3's client->server table
-//     has no message for it. `game.start` (no fields) is the obvious name
-//     next to `lease.request`/`lease.release`; server.mjs (L1) needs to
-//     agree with this — see the wave-B handoff note.
-//
+// Two design calls the spec's message table (§2.3) leaves implicit:
+//   - `commit`/`reject` carry no client-chosen request id. Only the lease
+//     holder ever has a commit in flight (server-enforced), so a single
+//     FIFO of pending resolvers is enough: settle the oldest on the next
+//     `commit` echoing our own id, or the next `reject`. edit.js only calls
+//     commit() once the previous one has settled, so two-in-flight never
+//     happens on the wire.
+//   - §7.4's lobby "Start" action has no §2.3 client->server entry.
+//     `game.start` (no fields) is the obvious name; L1 server.mjs agrees.
 // `poses` batches are assumed to carry the array under a `poses` key
-// (`{t:'poses', poses:[...]}`), matching how every other multi-field type in
-// §2.3 keys its payload by name rather than overloading `t`.
+// (`{t:'poses', poses:[...]}`), matching how every other multi-field type
+// in §2.3 keys its payload by name rather than overloading `t`.
 
 import { createTimeSync } from './timesync.js';
 import { createRoster } from './roster.js';
@@ -38,21 +31,18 @@ const RESYNC_EPS = 0.05; // §3.2 — the deadband IS the design, see armClock()
 const MAX_PEERS = 7; // §4.1 — slots 0..6
 const LOCAL_RELAY_PORT = 8787;
 
-/* ---------------------------------------------------------------------- */
-/* Pure: peer slot allocator (§4.1). Exported so join/leave/re-join        */
-/* stability is testable without a socket (mp-netclient.mjs).              */
-/* ---------------------------------------------------------------------- */
+/** Pure: peer slot allocator (§4.1). Exported so join/leave/re-join stability
+ *  is testable without a socket (mp-netclient.mjs). */
 
-/** A fresh allocator: no member has a slot, all MAX_PEERS slots free. */
 export function createSlotAllocator() {
   const free = [];
   for (let i = MAX_PEERS - 1; i >= 0; i--) free.push(i); // pop() yields lowest first
   return { slotOf: new Map(), free };
 }
 
-/** Assigns `id` a slot (idempotent — a second call for the same id returns
- *  its existing slot). -1 if the room is already full of slots (should not
- *  happen: MAX_MEMBERS=8 on the relay side caps membership at MAX_PEERS+1). */
+/** Assigns `id` a slot (idempotent — a second call returns its existing slot).
+ *  -1 if the room is already full of slots (should not happen: MAX_MEMBERS=8
+ *  on the relay side caps membership at MAX_PEERS+1). */
 export function allocateSlot(state, id) {
   if (state.slotOf.has(id)) return state.slotOf.get(id);
   if (state.free.length === 0) return -1;
@@ -62,9 +52,8 @@ export function allocateSlot(state, id) {
 }
 
 /** Frees `id`'s slot back into the pool for a FUTURE member — deliberately
- *  does not touch any other member's assignment. Re-packing (shifting
- *  everyone else down to fill the gap) would teleport an unrelated peer's
- *  body into the departed member's old position in the uniform bank. */
+ *  does not touch any other member's assignment. Re-packing would teleport
+ *  an unrelated peer's body into the departed member's old slot. */
 export function freeSlot(state, id) {
   const slot = state.slotOf.get(id);
   if (slot === undefined) return;
@@ -73,18 +62,16 @@ export function freeSlot(state, id) {
   state.free.sort((a, b) => b - a); // keep pop() = lowest free slot, stable order
 }
 
-/* ---------------------------------------------------------------------- */
-/* Pure: relay discovery (§2.5). Exported with plain string/bool inputs    */
-/* (no `window`/`location` reach) so all four cases are unit-testable.     */
-/* ---------------------------------------------------------------------- */
+/** Pure: relay discovery (§2.5). Plain string/bool inputs (no
+ *  `window`/`location` reach) so all four cases are unit-testable. */
 
 export async function resolveRelayUrl({ queryRelay, hostname, isHttps, fetchRelayJson }) {
   if (queryRelay) return { url: queryRelay, source: 'query' };
   const jsonUrl = await fetchRelayJson();
   if (jsonUrl) return { url: jsonUrl, source: 'relay.json' };
   const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1';
-  // Mixed content: a ws:// dial from an https:// page is blocked silently by
-  // the browser, not reported — so this branch must never fire on https.
+  // ws:// from an https:// page is blocked silently by the browser, so this
+  // branch must never fire on https.
   if (isLocalHost && !isHttps) {
     return { url: `ws://${hostname}:${LOCAL_RELAY_PORT}`, source: 'localhost' };
   }
@@ -92,18 +79,13 @@ export async function resolveRelayUrl({ queryRelay, hostname, isHttps, fetchRela
 }
 
 function fetchRelayJsonDefault() {
-  // Best-effort-empty, exactly like registry.js's compositions loader and
-  // attribution.js's loadAttribution(): a missing/unparseable file resolves
-  // to "nothing configured", not an error.
+  // Best-effort-empty, exactly like registry.js's compositions loader: a
+  // missing/unparseable file resolves to "nothing configured", not an error.
   return fetch('assets/relay.json')
     .then((r) => (r.ok ? r.json() : { url: null }))
     .then((j) => (j && j.url) || null)
     .catch(() => null);
 }
-
-/* ---------------------------------------------------------------------- */
-/* The factory.                                                            */
-/* ---------------------------------------------------------------------- */
 
 export function connectRoom(opts) {
   const {
@@ -152,9 +134,8 @@ export function connectRoom(opts) {
   }
 
   /** Rebuilds the full 49+1 scalar bank from slots+peerState and pushes it
-   *  in one setUniforms() call — cheaper and simpler than diffing, and the
-   *  runtime contract (§0.2) is scalar-only so there is no bulk-array path
-   *  to prefer instead. */
+   *  in one setUniforms() call — cheaper than diffing, and the runtime
+   *  contract (§0.2) is scalar-only so there is no bulk-array path. */
   function pushPeerUniforms() {
     if (!setPeerUniforms) return;
     const out = {};
@@ -370,9 +351,8 @@ export function connectRoom(opts) {
       drainPendingCommits('disconnected');
       timeSync.stop();
       stopPoseLoop();
-      // A reconnect gets a fresh `welcome` with the room's current epoch and
-      // edits — local state is never assumed to have survived the gap, so
-      // nothing here tries to preserve members/peerState/slots across it.
+      // A reconnect gets a fresh `welcome` with a new epoch and edits; nothing
+      // here tries to preserve members/peerState/slots across the gap.
       if (!destroyed) {
         onStatus && onStatus({ state: 'retrying' });
         scheduleReconnect();
@@ -424,14 +404,13 @@ export function connectRoom(opts) {
     });
   }
 
-  /** Settle every queued commit resolver EXACTLY once with the given
-   *  failure shape, and empty the queue. Called on WebSocket close (so an
-   *  in-flight commit never strands its caller) and on destroy() (so a
-   *  tear-down is symmetric with a tear-down-by-disconnect). Reconnect gets
-   *  a fresh `welcome` with a new epoch — stale resolvers from a prior
-   *  connection that survived here would either double-resolve or, worse,
-   *  attribute a reply from the new connection to a request the caller
-   *  already gave up on. Hence "settle once, then drop". */
+  /** Settle every queued commit resolver EXACTLY once with the given failure
+   *  shape, then drop the FIFO. Called on WebSocket close (so an in-flight
+   *  commit never strands its caller) and on destroy() (tear-down symmetric
+   *  with tear-down-by-disconnect). Reconnect gets a fresh `welcome` with a
+   *  new epoch; resolvers from a prior connection that survived here would
+   *  double-resolve or attribute a reply from the new connection to a request
+   *  the caller already gave up on. Hence "settle once, then drop". */
   function drainPendingCommits(reason) {
     while (pendingCommits.length) {
       pendingCommits.shift()({ ok: false, reason });

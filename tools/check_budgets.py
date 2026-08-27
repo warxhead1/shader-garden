@@ -368,6 +368,20 @@ AGGREGATES = [
     # lease flip un-hides it), and the new isRoom / isHolder doc trail
     # grew the file. Actual 314/320 at the time of writing.
     ("site/js/organs/garden/edit.js", 320, None),
+    # room-core.js: the single shared sg.mp.v1 reducer used by both the
+    # Node relay and the browser transport. Pure, no I/O, no timers.
+    # 470/520. room-core's authority stays in one file — the browser
+    # transport (p2p-socket.js) and the relay (room.mjs) both delegate
+    # to it; the room reducer is the only place a state transition
+    # lives, so growth here is the signal that gameplay logic leaked
+    # into the wrong layer.
+    ("site/js/multiplayer/room-core.js", 520, None),
+    # p2p-socket.js: the frozen browser WebRTC transport (signaling wire,
+    # host election, host/guest RTCPeerConnection, control + pose data
+    # channels, backpressure, host-loss close). 782/850. The transport
+    # is a WebSocket-shaped facade, so growth here should be slow —
+    # every public surface is frozen by the multiplayer spec §10.
+    ("site/js/multiplayer/p2p-socket.js", 850, None),
     # The relay (spec §2). Dependency-free Node, not shipped to the site, but
     # budgeted for the same reason the site is: room.mjs is a PURE reducer and
     # stays that way — growth here is the signal that I/O or timers leaked in.

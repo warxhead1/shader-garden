@@ -230,6 +230,13 @@ jobs:
         timeout-minutes: 10
         working-directory: tools/test
         run: node mp-relay.mjs 2>&1 | tee out/logs/mp-relay.log
+      - name: mp-p2p-unit
+        # Pure-Node unit suite for site/js/multiplayer/p2p-socket.js — the
+        # frozen browser WebRTC transport. Uses fake RTC + fake signaling,
+        # so no GPU / browser; safe in the same tier as mp-netclient.
+        timeout-minutes: 5
+        working-directory: tools/test
+        run: node mp-p2p-unit.mjs 2>&1 | tee out/logs/mp-p2p-unit.log
       - name: smoke
         continue-on-error: true
         timeout-minutes: 10

@@ -91,5 +91,72 @@ function edgeSet(edges) {
     JSON.stringify(terrainUsedBy) === JSON.stringify(['character', 'clouds', 'grass', 'lectern', 'peers', 'pond', 'rocks']), JSON.stringify(terrainUsedBy));
 }
 
+/* ---------- (3) comment-only mentions: NO definitions, NO edges ---------- */
+{
+  // 'a' declares real symbols; 'b' only MENTIONS them inside // line
+  // comments and /* block comments */. The graph must read 'b' as if those
+  // mentions did not exist — 'a' still owns its defs, 'b' picks up no new
+  // ones, and neither kind of cross-component edge (call/const) is emitted.
+  const synthetic = [
+    '// @component a "A" "owns the helper and constant"',
+    'float a_helper(float x) { return x * 2.0; }',
+    'const float A_K = 1.5;',
+    '// @end',
+    '// @component b "B" "mentions a\'s symbols ONLY in comments"',
+    '// line comment: a_helper(A_K) looks like a call but is not',
+    '/* block comment: a_helper(A_K) also looks like a call but is not */',
+    'float b_real(float x) { return x + 1.0; }',
+    '// @end',
+  ].join('\n');
+  const { components } = parseScene(synthetic);
+  const { nodes, edges } = analyzeConnections(components);
+  const a = nodes.find((n) => n.id === 'a');
+  const b = nodes.find((n) => n.id === 'b');
+
+  // Definitions: 'a' still owns exactly what it actually declares; 'b'
+  // picks up no fns/consts from the commented mentions.
+  check('(3) a still defines a_helper', a.fns.includes('a_helper'), JSON.stringify(a.fns));
+  check('(3) a still defines A_K', a.consts.includes('A_K'), JSON.stringify(a.consts));
+  check('(3) b defines only its real fn (no //-leaked defs)', JSON.stringify(b.fns) === JSON.stringify(['b_real']), JSON.stringify(b.fns));
+  check('(3) b defines no consts (no /* */-leaked defs)', b.consts.length === 0, JSON.stringify(b.consts));
+
+  // Edges: the comment-only mentions create neither a call nor a const
+  // edge from b to a, and there is no edge at all from b.
+  const bToA = edges.filter((e) => e.from === 'b' && e.to === 'a');
+  check('(3) no comment-mention edges b -> a', bToA.length === 0, JSON.stringify(bToA));
+  check('(3) no edges of any kind originate in b', edges.every((e) => e.from !== 'b'), JSON.stringify(edges));
+
+  // And the summary view agrees — 'a' is not usedBy b.
+  const summary = summarizeConnections(components);
+  check('(3) summarizeConnections: a is not usedBy b',
+    !summary.get('a').usedBy.some((u) => u.id === 'b'),
+    JSON.stringify(summary.get('a').usedBy));
+}
+
+/* ---------- (4) comment-only DEFINITIONS are also ignored ----------------- */
+{
+  // A function-shaped and const-shaped token that only ever appear inside
+  // comments must not be picked up as defs by extractDefs — the grammar is
+  // for executable GLSL, not for prose that names a symbol.
+  const synthetic = [
+    '// @component a "A" "no executable defs, only commented ones"',
+    '// float ghost_helper(float x) { return x; }',
+    '/* const float GHOST_K = 9.0; */',
+    'float real_only(float x) { return x + 0.0; }',
+    '// @end',
+  ].join('\n');
+  const { components } = parseScene(synthetic);
+  const { nodes, edges } = analyzeConnections(components);
+  const a = nodes.find((n) => n.id === 'a');
+  check('(4) commented float-decl does not register as a fn def',
+    !a.fns.includes('ghost_helper'), JSON.stringify(a.fns));
+  check('(4) commented const-decl does not register as a const def',
+    !a.consts.includes('GHOST_K'), JSON.stringify(a.consts));
+  check('(4) real executable def survives comment-stripping',
+    a.fns.includes('real_only'), JSON.stringify(a.fns));
+  check('(4) no edges at all (nothing else in the scene to connect to)',
+    edges.length === 0, JSON.stringify(edges));
+}
+
 console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');
 process.exit(failed ? 1 : 0);

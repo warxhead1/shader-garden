@@ -377,9 +377,12 @@ jobs:
         run: node perf.mjs 2>&1 | tee out/logs/perf.log
 
       # Multiplayer browser suites — BLOCKING, unlike the two webgpu-* steps
-      # below. These need only WebGL2, which SwiftShader provides on this
-      # runner class; multiplayer pins to WebGL2 by design (spec §0.5 C1),
-      # so there is no GPU excuse for these to be advisory.
+      # below. The contract is backend-agnostic after docs/multiplayer-spec.md
+      # §0.5 C1 was superseded; what still binds them here is that they
+      # exercise whatever backend a fresh room mount lands on
+      # (runtime-host.js prefer:'auto' → WebGPU by default, WebGL2 otherwise),
+      # and SwiftShader on this runner class covers both — so there is no GPU
+      # excuse for these to be advisory.
       # Each starts its own relay in-process on a pid-derived port and dials
       # it with ?relay=ws://... — site/assets/relay.json stays {"url": null}.
       - name: mp-clock (timing quality — non-blocking, see comment)

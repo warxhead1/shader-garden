@@ -16,10 +16,36 @@
 //             real cross-component coupling in this scene).
 // First-declaration wins ties (two components never declare the same name
 // in this scene, but the rule is deterministic either way).
+//
+// Comments are stripped BEFORE both the definition scan AND the reference
+// scan. A `// sg_foo()` line comment or a `/* sg_foo */` block comment
+// mentions a symbol to a reader, not to the compiler, so it neither defines
+// the symbol nor counts as a cross-component call/const reference. Block
+// comments have their non-newline characters replaced with spaces so the
+// surviving tokens keep their line numbers; line comments are dropped from
+// `//` to the next newline.
 
 const DEF_FN_RE = /\b(?:float|double|int|uint|bool|vec[234]|ivec[234]|bvec[234]|mat[234]|void)\s+([A-Za-z_]\w*)\s*\(/g;
 const DEF_CONST_RE = /\b(?:const\s+\w+|uniform\s+float)\s+([A-Z][A-Z0-9_]*)\b/g;
 const IDENT_RE = /\b[A-Za-z_]\w*\b/g;
+const BLOCK_COMMENT_RE = /\/\*[\s\S]*?\*\//g;
+const LINE_COMMENT_RE = /\/\/[^\n]*/g;
+
+/**
+ * Strip GLSL comments (both line `//` form and `slash-star ... star-slash`
+ * block form) from a chunk of source so the symbol scan only ever sees
+ * executable mentions.
+ * @param {string} source
+ * @returns {string}
+ */
+function stripComments(source) {
+  // Block comments: replace each non-newline character with a space, keep
+  // the newlines so the surviving tokens stay on the same line numbers.
+  // Line comments: drop everything from `//` to the next newline.
+  return source
+    .replace(BLOCK_COMMENT_RE, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(LINE_COMMENT_RE, '');
+}
 
 function extractDefs(source) {
   const fns = new Set();
@@ -37,7 +63,8 @@ function extractDefs(source) {
  * }}
  */
 export function analyzeConnections(components) {
-  const defsById = new Map(components.map((c) => [c.id, extractDefs(c.source)]));
+  const strippedById = new Map(components.map((c) => [c.id, stripComments(c.source)]));
+  const defsById = new Map(components.map((c) => [c.id, extractDefs(strippedById.get(c.id))]));
   const ownerOf = new Map(); // symbol -> owning component id
   for (const c of components) {
     const { fns, consts } = defsById.get(c.id);
@@ -49,7 +76,7 @@ export function analyzeConnections(components) {
   const seen = new Set();
   for (const c of components) {
     const own = defsById.get(c.id);
-    const idents = new Set(Array.from(c.source.matchAll(IDENT_RE), (m) => m[0]));
+    const idents = new Set(Array.from(strippedById.get(c.id).matchAll(IDENT_RE), (m) => m[0]));
     for (const ident of idents) {
       if (own.fns.has(ident) || own.consts.has(ident)) continue; // self-reference, not a connection
       const owner = ownerOf.get(ident);

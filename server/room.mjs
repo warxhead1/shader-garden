@@ -1,7 +1,7 @@
 // server/room.mjs — thin re-export of the shared browser-safe reducer.
 //
 // The single source of truth for the `sg.mp.v1` reducer is
-// `site/js/organs/garden/room-core.js` (Wave-5 §1, frozen contract: the SAME
+// `site/js/multiplayer/room-core.js` (Wave-5 §1, frozen contract: the SAME
 // file is loaded by this Node relay and by the elected browser host, byte-
 // identical, no shimmed duplicate to drift). This file exists only as the
 // module path every existing import in server/ already uses
@@ -26,4 +26,4 @@ export {
   reduce,
   tick,
   removeMember,
-} from '../site/js/organs/garden/room-core.js';
+} from '../site/js/multiplayer/room-core.js';

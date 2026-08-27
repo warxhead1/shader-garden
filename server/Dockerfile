@@ -9,19 +9,19 @@
 #
 # Build context is the repo ROOT (not server/), so the relay and the shared
 # browser-safe reducer can be copied together. The reducer lives at
-# site/js/organs/garden/room-core.js (Wave-5 §1 frozen contract) and is the
+# site/js/multiplayer/room-core.js (Wave-5 §1 frozen contract) and is the
 # same file the elected browser host loads; server/room.mjs is a thin
 # re-export of it. Both paths must be present at runtime so the
-# `from '../site/js/organs/garden/room-core.js'` import resolves.
+# `from '../site/js/multiplayer/room-core.js'` import resolves.
 FROM node:22-bookworm-slim
 
 WORKDIR /app
 
 # Relay + codec go under server/ (matching the CMD's path); the shared
-# reducer lives under site/js/organs/garden/ at its source-tree location
+# reducer lives under site/js/multiplayer/ at its source-tree location
 # so server/room.mjs's relative import resolves unchanged.
 COPY relay.mjs room.mjs ws.mjs ./server/
-COPY site/js/organs/garden/room-core.js ./site/js/organs/garden/room-core.js
+COPY site/js/multiplayer/room-core.js ./site/js/multiplayer/room-core.js
 
 # Fly/Render/Railway all inject PORT. 8787 matches net.js's LOCAL_RELAY_PORT so
 # a local `node server/relay.mjs` needs no flags at all.

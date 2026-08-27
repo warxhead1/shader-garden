@@ -1,4 +1,4 @@
-// site/js/organs/garden/room-core.js — single authoritative sg.mp.v1 reducer
+// site/js/multiplayer/room-core.js — single authoritative sg.mp.v1 reducer
 // (Wave-5 §1 frozen contract). Loaded by server/room.mjs (Node relay) AND by
 // the elected browser host; one source, byte-identical behavior, no shim.
 // Pure reducer (invariant I8): no sockets, no timers, no Date.now — every

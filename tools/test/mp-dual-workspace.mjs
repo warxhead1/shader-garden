@@ -229,8 +229,14 @@ check('(setup) B\'s "Edit here" mounted', await openEditHere(pageB));
 
 const bClasses = await pageB.$eval('.component-editor', (el) => [...el.classList]).catch(() => null);
 check('(a) B\'s editor has the nonholder class (dual-workspace layout)', Array.isArray(bClasses) && bClasses.includes('component-editor-nonholder'), JSON.stringify(bClasses));
-const bHasMirror = !!(await pageB.$('.component-editor-mirror'));
-check('(a) B\'s editor mounts a "Watching" pane (mirror)', bHasMirror);
+// The mirror DOM is built for every room editor (so handleRemoteDraft /
+// handleRemoteCommit have somewhere to land), so "has a Watching pane"
+// is a visibility assertion, not a presence assertion.
+const bMirrorVisible = await pageB.$eval('.component-editor-mirror', (el) => {
+  const cs = getComputedStyle(el);
+  return cs.display !== 'none' && el.offsetParent !== null;
+}).catch(() => null);
+check('(a) B\'s "Watching" mirror pane is CSS-visible', bMirrorVisible === true);
 const bMirrorReadOnly = await pageB.$eval('.component-editor-mirror textarea', (el) => el.readOnly).catch(() => null);
 check('(a) B\'s mirror textarea is read-only', bMirrorReadOnly === true);
 const bHasEditable = !!(await pageB.$('.component-editor-editable .code-editor'));
@@ -251,8 +257,13 @@ check('(setup) A\'s "Edit here" mounted', await openEditHere(pageA));
 
 const aClasses = await pageA.$eval('.component-editor', (el) => [...el.classList]).catch(() => null);
 check('(b) A\'s editor has the holder class (no dual-workspace)', Array.isArray(aClasses) && aClasses.includes('component-editor-holder') && !aClasses.includes('component-editor-nonholder'), JSON.stringify(aClasses));
-const aHasMirror = !!(await pageA.$('.component-editor-mirror'));
-check('(b) A\'s editor mounts NO mirror pane (single workspace)', !aHasMirror);
+// Holder's mirror DOM exists (so handleRemoteDraft / handleRemoteCommit
+// always have a target) but is CSS-hidden via .component-editor-holder.
+const aMirrorVisible = await pageA.$eval('.component-editor-mirror', (el) => {
+  const cs = getComputedStyle(el);
+  return cs.display !== 'none' && el.offsetParent !== null;
+}).catch(() => null);
+check('(b) A\'s holder mirror is CSS-hidden (single-pane UX)', aMirrorVisible === false);
 const aHasCommit = !!(await pageA.$('.component-editor .btn-primary'));
 check('(b) A\'s editor HAS a Commit button (can broadcast)', aHasCommit);
 const aHasRevert = !!(await pageA.$('.component-editor .btn-ghost'));
@@ -307,11 +318,16 @@ check('(c) B\'s editable pane survived the lease flip (no remount)', bEditableSa
 const bEditableAfterFlip = await pageB.$eval('.component-editor-editable .code-editor', (el) => el.value).catch(() => null);
 check('(c) B\'s local draft becomes the editable body on the lease flip (preserved, now committable)',
   bEditableAfterFlip === bDraftText, JSON.stringify(bEditableAfterFlip));
-// After the flip B is the holder — Commit button appears, mirror disappears.
+// After the flip B is the holder — Commit button appears, mirror is
+// CSS-hidden via .component-editor-holder (the DOM stays in place so
+// handleRemoteDraft / handleRemoteCommit still have a target).
 const bHasCommitNow = !!(await pageB.$('.component-editor .btn-primary'));
 check('(c) B\'s editor now HAS a Commit button (promoted to holder)', bHasCommitNow);
-const bHasMirrorNow = !!(await pageB.$('.component-editor-mirror'));
-check('(c) B\'s editor no longer shows a mirror (promoted to holder)', !bHasMirrorNow);
+const bMirrorNowVisible = await pageB.$eval('.component-editor-mirror', (el) => {
+  const cs = getComputedStyle(el);
+  return cs.display !== 'none' && el.offsetParent !== null;
+}).catch(() => null);
+check('(c) B\'s mirror is CSS-hidden after promotion to holder', bMirrorNowVisible === false);
 const bClassesAfterFlip = await pageB.$eval('.component-editor', (el) => [...el.classList]).catch(() => null);
 check('(c) B\'s editor class flipped from nonholder to holder', Array.isArray(bClassesAfterFlip) && bClassesAfterFlip.includes('component-editor-holder') && !bClassesAfterFlip.includes('component-editor-nonholder'), JSON.stringify(bClassesAfterFlip));
 
@@ -415,8 +431,14 @@ check('(e) B\'s open editor did NOT remount the editable pane (same DOM, no flas
   editableNodeBefore === editableNodeAfter && editableNodeBefore != null, 'before=' + editableNodeBefore + ' after=' + editableNodeAfter);
 const bCommitAfterLoss = !!(await pageB.$('.component-editor .btn-primary'));
 check('(e) B\'s editor dropped its Commit button on losing the lease', !bCommitAfterLoss);
-const bMirrorAfterLoss = !!(await pageB.$('.component-editor-mirror'));
-check('(e) B\'s editor re-shows the mirror on losing the lease', bMirrorAfterLoss);
+// The mirror DOM was always present (built at mount time); the lease
+// flip just removes the .component-editor-holder class so its CSS no
+// longer hides it. "Re-shows" is a visibility assertion.
+const bMirrorAfterLoss = await pageB.$eval('.component-editor-mirror', (el) => {
+  const cs = getComputedStyle(el);
+  return cs.display !== 'none' && el.offsetParent !== null;
+}).catch(() => null);
+check('(e) B\'s mirror is CSS-visible again on losing the lease', bMirrorAfterLoss === true);
 
 /* ---------------- (f) phase uniform truth ---------------- */
 

@@ -498,8 +498,17 @@ await sleep(200);
 check('(setup) A\'s "Edit here" mounted', await openEditHere(pageA));
 const aHolder = await pageA.$eval('.component-editor', (el) => el.classList.contains('component-editor-holder') && !el.classList.contains('component-editor-nonholder')).catch(() => null);
 check('(setup) A\'s editor mounted in single-pane holder mode (A IS the holder)', aHolder === true, 'got ' + aHolder);
-const aNoMirror = !(await pageA.$('.component-editor-mirror'));
-check('(setup) A\'s holder editor mounts NO mirror pane (single workspace)', aNoMirror);
+// The mirror DOM IS built for every room editor (so handleRemoteDraft /
+// handleRemoteCommit always have somewhere to land) — it's the holder's
+// UX that hides it via .component-editor-holder's CSS. "Holder sees no
+// mirror" is a visibility assertion, not a presence assertion.
+const aMirrorVisible = await pageA.$eval('.component-editor-mirror', (el) => {
+  // offsetParent is null when display:none; getComputedStyle covers the
+  // case where a future ancestor sets display:none instead.
+  const cs = getComputedStyle(el);
+  return cs.display !== 'none' && el.offsetParent !== null;
+}).catch(() => null);
+check('(setup) A\'s holder mirror is CSS-hidden (holder sees single-pane UX)', aMirrorVisible === false);
 
 const skyPixelBaseline = await readSkyPixels(pageB);
 check('(setup) got B\'s baseline sky pixels', skyPixelBaseline.some(Array.isArray), JSON.stringify(skyPixelBaseline));
@@ -546,6 +555,13 @@ if (editorsAvailable) {
   check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', draftMirrored);
   const bStillNonHolder = await pageB.$eval('.component-editor', (el) => el.classList.contains('component-editor-nonholder')).catch(() => null);
   check('(d) B\'s editor stays in dual-workspace mode after the draft landed (never becomes committable)', bStillNonHolder === true);
+  // Belt-and-braces: the mirror MUST be VISIBLE for a non-holder (the holder
+  // case above checks it's hidden; this confirms the symmetric case works).
+  const bMirrorVisible = await pageB.$eval('.component-editor-mirror', (el) => {
+    const cs = getComputedStyle(el);
+    return cs.display !== 'none' && el.offsetParent !== null;
+  }).catch(() => null);
+  check('(d) B\'s mirror is CSS-visible (the Watching pane actually shows)', bMirrorVisible === true);
 
   // NOT a pixel diff — see armPrepareSpy's header note on why a fixed sky
   // pixel is the wrong oracle for "did a draft alone recompile B's scene"

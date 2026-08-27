@@ -226,6 +226,7 @@ export async function mount(ctx) {
       nameInput, members: [],
       selfId: null, holderId: null, phase: 'lobby',
     };
+  }
   topbar.append(backLink, attribLink, backendBadge, fpsBadge, perfBadge, qualitySelect, camSelect, uniformsToggle);
   if (mp) topbar.append(mp.statusPill, mp.roomBadge);
   topbar.append(el('div', 'toolbar-spacer'), hint);
@@ -654,6 +655,7 @@ export async function mount(ctx) {
             : (localDrafts.get(component.id) ?? component.source),
           originalBody: component.source,
           isHolder,
+          isRoom: !!room,
           // The Watching pane header reads "Watching <name>"; non-holders
           // always get one. Holders ignore the field (their pane header
           // never shows it).

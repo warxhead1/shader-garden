@@ -90,6 +90,33 @@ async function clickTrayItem(page, name) {
     .catch((e) => errors.push('NAV: ' + e.message));
   await awaitGardenCanvas(page, errors); // shared ceiling + state dump; see browser.mjs
 
+  // Regression guard for the index.js `if (room)` brace bug: a solo
+  // mount (no room param) must still build the stage, runtime host, and
+  // topbar — the entire mount body is gated on the canvas + topbar
+  // DOM existing, NOT on `room`. The previous regression shipped a
+  // missing brace that pushed every line below `if (room) { ... mp = {...};`
+  // into the room branch, so a solo mount would never even reach
+  // runtimeHost() — no canvas, no topbar, no probe. assertRealGpu()
+  // alone wouldn't catch it (it only proves a GPU adapter exists);
+  // the stage / topbar presence checks below are the actual mount-
+  // stage assertion.
+  const mountStage = await page.evaluate(() => ({
+    hasCanvas: !!document.querySelector('canvas.garden-canvas'),
+    hasTopbar: !!document.querySelector('.viewer-topbar'),
+    hasStage: !!document.querySelector('.viewer-stage'),
+    hasQualitySelect: !!document.querySelector('.garden-quality-select'),
+    hasCamSelect: !!document.querySelector('.garden-cam-select'),
+    hasTray: !!document.querySelector('.garden-tray'),
+  }));
+  check('(a) solo mount built the stage (no missing-brace regression)',
+    mountStage.hasStage, JSON.stringify(mountStage));
+  check('(a) solo mount built the topbar (no missing-brace regression)',
+    mountStage.hasTopbar, JSON.stringify(mountStage));
+  check('(a) solo mount produced a canvas (runtimeHost ran, not skipped)',
+    mountStage.hasCanvas, JSON.stringify(mountStage));
+  check('(a) solo mount has quality + camera + tray controls (mount body reached its tail)',
+    mountStage.hasQualitySelect && mountStage.hasCamSelect && mountStage.hasTray, JSON.stringify(mountStage));
+
   // Exercise every other surface that would ALSO push uniforms, so this
   // isn't just "solo never happened to render a frame": open + edit a
   // component, move the character, switch camera modes, change quality.

@@ -885,6 +885,15 @@ a:hover { text-decoration: underline; }
      flex item below. */
   height: 24rem;
 }
+/* Holders in a room build the mirror DOM up front (so handleRemoteDraft /
+   handleRemoteCommit always have somewhere to land), but the user sees a
+   single-pane editor — the mirror is hidden via display:none until a
+   later setAuthority({isHolder: false}) flips it back to non-holder.
+   Solo mounts never build the mirror DOM at all, so this rule doesn't
+   match them. */
+.component-editor.component-editor-holder .component-editor-mirror {
+  display: none;
+}
 .component-editor-mirror {
   display: flex;
   flex-direction: column;

@@ -343,7 +343,12 @@ AGGREGATES = [
     # handleRemoteCommit's setMirrorBody resync, and the §7.4 uniform
     # truth (applyMpUniforms extended with uSpongeOn / uSeekerBlind). Actual
     # 1287/1290 at the time of writing.
-    ("site/js/organs/garden/index.js", 1290, None),
+    # 1290 -> 1310: brace-fix patch. A review caught a missing `}` that
+    # pulled the entire mount body into the `if (room)` branch; the fix
+    # is just a brace, but the JSDoc + comment trail explaining WHY it
+    # must live outside the room gate grew the file by another 17 lines.
+    # Actual 1304/1310 at the time of writing.
+    ("site/js/organs/garden/index.js", 1310, None),
     # net.js: connectRoom() + the frozen module surface in spec §8.1
     # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
     ("site/js/organs/garden/net.js", 480, None),
@@ -355,7 +360,14 @@ AGGREGATES = [
     # workspace layout (Watching pane above My draft), setAuthority() +
     # setMirrorBody() for in-place lease-flip swaps, and the transactional
     # local-compile flow. 259/300 at the time of writing.
-    ("site/js/organs/garden/edit.js", 300, None),
+    # 300 -> 320: the mirror-chrome-for-every-room-editor fix. A review
+    # caught that an editor opened as the lease holder would build NO
+    # mirror DOM, so a later lease loss left it with nowhere to land the
+    # holder's draft — the fix constructs the mirror pane for every
+    # room editor (CSS-hidden via .component-editor-holder until a
+    # lease flip un-hides it), and the new isRoom / isHolder doc trail
+    # grew the file. Actual 314/320 at the time of writing.
+    ("site/js/organs/garden/edit.js", 320, None),
     # The relay (spec §2). Dependency-free Node, not shipped to the site, but
     # budgeted for the same reason the site is: room.mjs is a PURE reducer and
     # stays that way — growth here is the signal that I/O or timers leaked in.

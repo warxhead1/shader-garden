@@ -10,16 +10,27 @@
 // `recompile` callback, passed in — this module never touches the scene
 // source or the runtime directly.
 //
-// Two layouts share one widget (multiplayer §5.2):
-//   - Holder / solo: ONE editable pane (the historical behaviour).
-//   - Non-holder: TWO panes — "Watching <holder>" (read-only mirror updated
-//     by remote drafts, NEVER compiles, NEVER transmits) and "My draft"
-//     (editable local sandbox, locally compiled, never transmitted while
-//     non-holder). The local draft is preserved across tab switches (panel
-//     close/reopen) and lease changes (non-holder → holder promotes the
-//     draft to committable; holder → non-holder keeps the draft editable).
-//     index.js owns the source-of-truth localDraft Map; this widget just
-//     reads/writes it via the `onLocalDraftChange` callback.
+// Three layouts share one widget (multiplayer §5.2):
+//   - Solo:       ONE editable pane (the historical behaviour, no mirror).
+//   - Holder in a room: ONE editable pane AND a mirror DOM node, but the
+//                       mirror is CSS-hidden via .component-editor-holder
+//                       so the holder's view is still single-pane. The
+//                       mirror DOM exists so handleRemoteDraft /
+//                       handleRemoteCommit (which fire regardless of who
+//                       is currently looking at the component) always have
+//                       somewhere to land; on a later setAuthority({isHolder:
+//                       false}) the same DOM flips to visible without
+//                       remounting the editable pane.
+//   - Non-holder: TWO panes — "Watching <holder>" (read-only mirror
+//                 updated by remote drafts, NEVER compiles, NEVER
+//                 transmits) above "My draft" (editable local sandbox,
+//                 locally compiled, never transmitted while non-holder).
+//
+// The local draft is preserved across tab switches (panel close/reopen) and
+// lease changes (non-holder → holder promotes the draft to committable;
+// holder → non-holder keeps the draft editable). index.js owns the source-
+// of-truth localDraft Map; this widget just reads/writes it via the
+// `onLocalDraftChange` callback.
 import { createDocAdapter } from '../../editor/doc-adapter.js';
 import { createDiagnosticsList } from '../../editor/diagnostics-list.js';
 import glslMode from '../../editor/modes/glsl.js';
@@ -33,18 +44,24 @@ const DEBOUNCE_MS = 300;
  *   component: import('./parse.js').Component,
  *   initialBody: string,        // initial editable pane value (local draft, or pristine)
  *   originalBody: string,       // pristine, for Revert
- *   initialMirrorBody?: string, // initial Watching pane text (only when isHolder === false)
+ *   initialMirrorBody?: string, // initial Watching pane text (only when isRoom === true)
  *   recompile?: (body: string) => { ok: boolean, log: string, messages: object[] },
  *     // messages are in FULL-SCENE user-source coordinates (webgl2.js's own
  *     // remap) — this module subtracts component.startLine to land on
  *     // editor-local line numbers. Omit when readOnly is true — a mirror
  *     // never compiles anything itself (docs/multiplayer-spec.md §5.2).
- *   isHolder: boolean,          // true → single editable pane (holder OR solo).
- *                               // false → dual workspace (non-holder in a room).
- *   holderName?: string,        // shown in the Watching pane heading; required when isHolder === false.
- *   onLocalDraftChange?: (body: string) => void,  // every keystroke on the local draft (non-holder)
- *                               // and on holder-mode local edits, so index.js's
- *                               // localDrafts map stays in sync.
+ *   isHolder: boolean,          // current lease state at mount time. true for
+ *                               // solo and for the lease holder in a room;
+ *                               // false for non-holders in a room. Authoritative
+ *                               // role can change later via setAuthority().
+ *   isRoom: boolean,            // true when this editor is mounted inside a
+ *                               // room. Controls whether the mirror DOM is
+ *                               // built (regardless of isHolder — see header
+ *                               // note about handleRemoteDraft landing on a
+ *                               // holder's still-present mirror DOM).
+ *   holderName?: string,        // shown in the Watching pane heading; required when isRoom === true.
+ *   onLocalDraftChange?: (body: string) => void,  // every keystroke on the local draft,
+ *                               // so index.js's localDrafts map stays in sync.
  *   onCommit?: (body: string) => Promise<{ok: boolean, reason?: string}>,
  *     // MP §6.2: present only for the lease holder in a room — renders a
  *     // "Commit" button that validates locally (via `recompile`) before
@@ -56,7 +73,9 @@ const DEBOUNCE_MS = 300;
  *   setMirrorBody?: (body: string) => void,
  *     // Update the Watching pane text without remounting — called from
  *     // handleRemoteDraft / handleRemoteCommit whenever the holder's draft
- *     // or the committed body changes. Only present in dual-workspace mode.
+ *     // or the committed body changes. Always present in a room, so the
+ *     // draft has somewhere to land even on a holder's editor (which has
+ *     // the mirror DOM CSS-hidden until a later lease flip).
  *   setAuthority?: (auth: { isHolder: boolean, holderName?: string }) => void,
  *     // Swap between single-pane (holder) and dual-workspace (non-holder)
  *     // layouts WITHOUT remounting — preserves the user's local draft text
@@ -64,7 +83,7 @@ const DEBOUNCE_MS = 300;
  *   getLocalDraft?: () => string,  // current editable pane text (for saves/reads)
  * }>}
  */
-export async function mountComponentEditor({ component, initialBody, originalBody, initialMirrorBody, recompile, isHolder, holderName, onLocalDraftChange, onCommit }) {
+export async function mountComponentEditor({ component, initialBody, originalBody, initialMirrorBody, recompile, isHolder, isRoom, holderName, onLocalDraftChange, onCommit }) {
   let isHolderLocal = !!isHolder;
   const wrap = el('div', 'component-editor' + (isHolderLocal ? '' : ' component-editor-nonholder'));
   const statusRow = el('div', 'component-editor-status');
@@ -105,13 +124,17 @@ export async function mountComponentEditor({ component, initialBody, originalBod
   editableWrap.append(adapter.el, diagList.el);
   wrap.append(statusRow, editableWrap);
 
-  // --- Dual-workspace (non-holder) — Watching pane sits above the editable
-  // pane, mirrors the holder's draft. Built only when isHolder === false;
-  // on a later setAuthority({ isHolder: true }) the Watching pane hides and
-  // the editable pane's commit button / revert button appear, all without
-  // remounting the doc adapter.
+  // --- Mirror pane (Watching <holder>) — present for EVERY room editor,
+  // regardless of whether THIS client currently holds the lease. The
+  // holder's view hides it via .component-editor-holder's CSS so the
+  // single-pane UX is preserved, but the DOM stays live: handleRemoteDraft
+  // and handleRemoteCommit (called on every peer message, independent of
+  // who's looking) always have somewhere to land, so a holder's editor
+  // that loses the lease mid-round has the latest holder body already
+  // rendered in its mirror pane when setAuthority({isHolder: false})
+  // un-hides it. A solo mount (isRoom === false) builds nothing here.
   let mirrorWrap = null, mirrorTextarea = null, mirrorHead = null;
-  if (!isHolderLocal) {
+  if (isRoom) {
     mirrorWrap = el('div', 'component-editor-mirror');
     mirrorHead = el('div', 'component-editor-mirror-head muted', 'Watching ' + (holderName || 'the holder'));
     mirrorTextarea = document.createElement('textarea');
@@ -120,6 +143,10 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     mirrorTextarea.value = initialMirrorBody ?? originalBody;
     mirrorTextarea.setAttribute('aria-label', "Holder's draft (read-only)");
     mirrorWrap.append(mirrorHead, mirrorTextarea);
+    // Mirror is the FIRST visible pane for non-holders; for holders the
+    // wrap is hidden via CSS until a lease flip. The DOM ordering stays
+    // "mirror above editable" either way, so a later un-hide is just
+    // a class swap.
     wrap.insertBefore(mirrorWrap, editableWrap);
   }
 
@@ -202,7 +229,11 @@ export async function mountComponentEditor({ component, initialBody, originalBod
   // editable pane (and its local draft) is NEVER remounted — setMirrorBody
   // already keeps the Watching pane in lockstep with the holder, and the
   // editable pane's text is its own source of truth (kept alive across the
-  // swap). Reverting to single-pane mode just hides the Watching wrapper.
+  // swap). Reverting to single-pane mode just toggles .component-editor-
+  // holder's CSS, which hides the always-present mirror DOM node — the
+  // mirror DOM is built for every room editor up front, so a holder's
+  // mirror pane is already populated with the latest peer body by the
+  // time a lease flip makes it visible.
   function setAuthority(auth) {
     if (destroyed) return;
     const nowHolder = !!auth.isHolder;
@@ -210,21 +241,26 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     if (nowHolder && !isHolderLocal) {
       // Non-holder → holder: build the holder-mode chrome (Revert + maybe
       // Commit) and remove the dual-workspace class. The editable pane is
-      // already mounted; nothing in it moves.
+      // already mounted; nothing in it moves. The mirror DOM stays in the
+      // tree (CSS-hidden via .component-editor-holder) so the next lease
+      // loss flips back to non-holder in a single class swap.
       isHolderLocal = true;
       wrap.classList.remove('component-editor-nonholder');
       wrap.classList.add('component-editor-holder');
       if (!statusRow.contains(revertBtn)) statusRow.append(revertBtn);
       if (onCommit && !statusRow.contains(commitBtn)) statusRow.append(commitBtn);
-      if (mirrorWrap) { mirrorWrap.hidden = true; }
+      if (mirrorWrap) mirrorWrap.hidden = true;
       backendNote.textContent = 'editing runs on WebGL2';
       setStatus(diagState.status, diagState.label);
       return;
     }
     if (!nowHolder && isHolderLocal) {
-      // Holder → non-holder: show the Watching pane again, drop Revert/Commit.
-      // The local draft (now editable but not committable) is the SAME body
-      // the user was just editing as holder — preserved across the flip.
+      // Holder → non-holder: show the Watching pane again (it was always
+      // there, just hidden via CSS), drop Revert/Commit. The local draft
+      // (now editable but not committable) is the SAME body the user was
+      // just editing as holder — preserved across the flip. setMirrorBody
+      // has been keeping the mirror body current throughout, so the user
+      // sees the holder's latest draft the moment the CSS un-hides it.
       isHolderLocal = false;
       wrap.classList.add('component-editor-nonholder');
       wrap.classList.remove('component-editor-holder');
@@ -242,6 +278,29 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     }
   }
 
+  // Solo mounts never build the mirror DOM (isRoom === false), so the
+  // authority/mirror handle methods would be no-ops even if returned —
+  // keeping them off the returned object is the "this is a non-MP editor"
+  // test surface. Room editors return them so notifyEditorsAuthority() /
+  // handleRemoteDraft / handleRemoteCommit always have a target, even on
+  // a holder's editor (whose mirror DOM is CSS-hidden until a lease flip).
+  if (isRoom) {
+    return {
+      el: wrap,
+      destroy() {
+        destroyed = true;
+        clearTimeout(debounce);
+        adapter.destroy();
+      },
+      getLocalDraft() {
+        return adapter.getValue();
+      },
+      setAuthority,
+      setMirrorBody(body) {
+        if (mirrorTextarea && !destroyed) mirrorTextarea.value = body;
+      },
+    };
+  }
   return {
     el: wrap,
     destroy() {
@@ -251,10 +310,6 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     },
     getLocalDraft() {
       return adapter.getValue();
-    },
-    setAuthority,
-    setMirrorBody(body) {
-      if (mirrorTextarea && !destroyed) mirrorTextarea.value = body;
     },
   };
 }

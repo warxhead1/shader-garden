@@ -89,6 +89,13 @@ async function clickTrayItem(page, name) {
   await gotoSafe(page, BASE + '/index.html#/garden', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => errors.push('NAV: ' + e.message));
   await awaitGardenCanvas(page, errors); // shared ceiling + state dump; see browser.mjs
+  // Wait for the tray to populate too — it's appended asynchronously
+  // (the component list lands once scene.glsl is parsed + the layout
+  // pass runs), and a sample taken the moment the canvas paints sees
+  // hasTray=false even though section (b) below finds every tray item
+  // a few hundred ms later. awaitGardenCanvas only waits on the
+  // runtime, not on the layout pipeline.
+  await page.waitForSelector('.garden-tray', { timeout: 10000 }).catch((e) => errors.push('TRAY: ' + e.message));
 
   // Regression guard for the index.js `if (room)` brace bug: a solo
   // mount (no room param) must still build the stage, runtime host, and

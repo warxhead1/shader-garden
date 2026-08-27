@@ -367,7 +367,11 @@ AGGREGATES = [
     # room editor (CSS-hidden via .component-editor-holder until a
     # lease flip un-hides it), and the new isRoom / isHolder doc trail
     # grew the file. Actual 314/320 at the time of writing.
-    ("site/js/organs/garden/edit.js", 320, None),
+    # 320 -> 340: the initial-holder correction stamps the holder class and
+    # hidden mirror state at construction, closing the first-paint gap before
+    # setAuthority() ever runs. The accompanying invariant comment documents
+    # why solo mounts remain unchanged. Actual 334/340.
+    ("site/js/organs/garden/edit.js", 340, None),
     # room-core.js: the single shared sg.mp.v1 reducer used by both the
     # Node relay and the browser transport. Pure, no I/O, no timers.
     # 470/520. room-core's authority stays in one file — the browser

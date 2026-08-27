@@ -87,29 +87,151 @@ async function clickTrayItem(page, name) {
   return false;
 }
 
+const EDITABLE = '.component-editor-editable';
+const EDITABLE_CM = `${EDITABLE} .cm-content`;
+const EDITABLE_TA = `${EDITABLE} .code-editor`;
+
 async function openEditHere(page) {
   await page.click('.probe-panel .btn:not(.probe-edit-link)').catch(() => {});
-  return page.waitForSelector('.component-editor .code-editor', { timeout: 8000 }).then(() => true).catch(() => false);
+  // Wait on the EDITABLE pane's own surface, never on `.component-editor
+  // .code-editor` — that selector also matches the mirror's read-only
+  // textarea (see the EDITABLE_* note below), so it could report "mounted"
+  // off a pane the user cannot type into.
+  return page.waitForSelector(`${EDITABLE_CM}, ${EDITABLE_TA}`, { timeout: 8000 }).then(() => true).catch(() => false);
+}
+
+/* ---------- editable-pane helpers: CodeMirror OR textarea ----------
+ *
+ * The editable pane's doc adapter is whichever one doc-adapter.js picked:
+ * CodeMirror when site/js/vendor/cm-editor.bundle.js built, the plain
+ * <textarea> fallback otherwise (design doc §3, "Fallback is a contract").
+ * Both mount under `.component-editor-editable`, and BOTH answer to
+ * `.code-editor` — doc-adapter-codemirror.js stamps that class onto CM's
+ * `view.dom` as a layout/theme hook. That shared class is the trap this
+ * suite fell into on a real-GPU run:
+ *
+ *   - `.component-editor-editable .code-editor` under CM is the CM WRAPPER
+ *     <div>. It has no `.value` (so every `$eval(el => el.value)` returned
+ *     undefined and the draft assertions failed for the wrong reason) and no
+ *     tabindex (so `page.focus()` on it does nothing — the subsequent
+ *     keystrokes went to <body>, i.e. straight into index.js's window-level
+ *     onKeyDown, where WASD walks the character instead of typing).
+ *   - The real CM surfaces are `.cm-content` (the contenteditable the
+ *     keyboard talks to) and its `.cm-line` children (the rendered doc).
+ *
+ * Every helper below is scoped to `.component-editor-editable` for the
+ * ORIGINAL reason this suite scoped its selectors: the non-holder's panel
+ * has the read-only "Watching" mirror inserted BEFORE the editable pane
+ * (edit.js), and the mirror is always a real `<textarea class="code-editor
+ * code-editor-readonly">`, so the unscoped `.component-editor .code-editor`
+ * resolves to the mirror first in document order. Reading it would assert
+ * against the holder's body instead of the user's draft; typing at it would
+ * put a no-op Ctrl+A on a read-only textarea and land the Backspace
+ * elsewhere. Nothing here can match the mirror. The EDITABLE / EDITABLE_CM /
+ * EDITABLE_TA selectors these helpers share are declared above openEditHere,
+ * which waits on the same pair.
+ */
+
+// 'cm' | 'textarea' | null — which adapter actually mounted in the editable pane.
+async function editableKind(page) {
+  return page.evaluate((sel) => {
+    const pane = document.querySelector(sel);
+    if (!pane) return null;
+    if (pane.querySelector('.cm-content')) return 'cm';
+    return pane.querySelector('.code-editor') ? 'textarea' : null;
+  }, EDITABLE).catch(() => null);
+}
+
+// Put the keyboard INSIDE the editable document. Under CM a bare
+// contentDOM.focus() is not enough on its own: EditorView.focus() also
+// re-projects the editor's selection into the DOM, and without that the
+// browser holds a focused contenteditable with no range, so keystrokes can
+// vanish. A click is what garden.mjs (l) and smoke.mjs already do on this
+// exact panel-hosted editor — it places a real cursor through CM's own
+// mouse handling. `.focus()` stays as the fallback for a pane the click
+// cannot reach, and the activeElement probe reports the truth either way so
+// a silent miss shows up in the log instead of as a mystery FAIL downstream.
+// Both selector calls carry an explicit timeout: Playwright's click waits on
+// actionability against the 30s default, and a pane that never becomes
+// clickable should cost one scaled 8s, not half a minute per attempt.
+async function focusEditable(page, label = '') {
+  const kind = await editableKind(page);
+  if (kind === 'cm') {
+    await page.click(EDITABLE_CM, { timeout: scaled(8000) }).catch(() => {});
+  } else if (kind === 'textarea') {
+    await page.focus(EDITABLE_TA, { timeout: scaled(8000) }).catch(() => {});
+  }
+  const focusedIn = (sel) => page.evaluate((s) => {
+    const ae = document.activeElement;
+    return !!(ae && ae.closest && ae.closest(s));
+  }, sel).catch(() => false);
+  if (!(await focusedIn(EDITABLE))) {
+    await page.evaluate((sel) => {
+      const pane = document.querySelector(sel);
+      const target = pane && (pane.querySelector('.cm-content') || pane.querySelector('.code-editor'));
+      if (!target) return;
+      target.focus();
+      // A contenteditable that is focused with NO DOM selection swallows
+      // typing. Park a collapsed range at the end of the doc — CM's own
+      // DOMObserver reads that back into view.state.selection, which is what
+      // the click path gets for free from CM's mouse handling.
+      if (target.isContentEditable) {
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        range.collapse(false);
+        const sel2 = window.getSelection();
+        sel2.removeAllRanges();
+        sel2.addRange(range);
+      }
+    }, EDITABLE).catch(() => {});
+    if (!(await focusedIn(EDITABLE))) console.log(`  [${label || 'editor'}] could not focus the editable pane (kind=${kind})`);
+  }
+  return kind;
+}
+
+// The EXACT editable document, read from whichever adapter mounted. CM
+// renders one `.cm-line` per document line and the line's textContent is
+// that line's exact text (highlight <span>s concatenate back to it; an
+// empty line is a lone <br>, i.e. ''), which is the same read smoke.mjs
+// uses. The zero-width space CM parks in a line to keep a cursor position
+// paintable is a rendering artifact, never part of the doc, so it is
+// stripped — no expected body in this suite contains one, so this can only
+// remove noise, never mask a mismatch. Returns null when no editable pane
+// is mounted, so a missing pane still fails its check rather than
+// accidentally comparing equal.
+async function readEditableBody(page) {
+  return page.evaluate((sel) => {
+    const pane = document.querySelector(sel);
+    if (!pane) return null;
+    if (pane.querySelector('.cm-content')) {
+      return [...pane.querySelectorAll('.cm-content > .cm-line')]
+        .map((l) => l.textContent.replace(/\u200B/g, ''))
+        .join('\n');
+    }
+    const ta = pane.querySelector('textarea.code-editor') || pane.querySelector('.code-editor');
+    return ta && typeof ta.value === 'string' ? ta.value : null;
+  }, EDITABLE).catch(() => null);
 }
 
 // Same Ctrl+A/Backspace/type as mp-two-browsers.mjs's replaceAllAndType, but
-// scoped to the EDITABLE pane. The non-holder's panel has TWO `.code-editor`
-// nodes — the read-only mirror above (inserted before the editable pane in
-// edit.js) and the editable one — and `.component-editor .code-editor`
-// resolves to the first match in document order, i.e. the mirror. Ctrl+A on
-// a read-only textarea is a no-op (good) but the Backspace that follows
-// would land on the editable pane with the mirror's text "selected" in the
-// host's head and the editable pane's text untouched in its value — so the
-// keystrokes would type into the editable pane while the harness thought it
-// was typing into the mirror. `.component-editor-editable .code-editor` is the
-// only selector that uniquely picks the user's actual edit target.
-async function replaceAllAndType(page, text) {
-  await page.focus('.component-editor-editable .code-editor');
+// aimed at the editable pane's real keyboard surface. CM binds Mod-a to
+// selectAll via defaultKeymap and a focused <textarea> gets the browser's
+// own select-all, so one keystroke sequence covers both adapters. The
+// facade (tools/editor-bundle/facade.js) deliberately ships no
+// autocomplete and no bracket-closing, so typed text round-trips byte-exact
+// under CM — the strict equality assertions below stay strict.
+async function replaceAllAndType(page, text, label = '') {
+  await clearEditable(page, label);
+  await page.keyboard.type(text, { delay: 2 });
+}
+
+async function clearEditable(page, label = '') {
+  const kind = await focusEditable(page, label);
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyA');
   await page.keyboard.up('Control');
   await page.keyboard.press('Backspace');
-  await page.keyboard.type(text, { delay: 2 });
+  return kind;
 }
 
 // index.js's checkRing() drives the `ring` wire-send off charX/charZ vs
@@ -146,10 +268,12 @@ async function moveIntoLecternRing(page, observerPage, label) {
     return;
   }
   // index.js's onKeyDown ignores keys while focus is on a textarea / content-
-  // editable (inEditableChrome guard). The holder editor's textarea is
-  // focused after a replaceAllAndType round, so a re-take must blur it
-  // first — otherwise the d+w press is silently swallowed and the lease
-  // request below is denied for a reason nothing in the harness surfaces.
+  // editable (inEditableChrome guard). The editable pane's keyboard surface is
+  // focused after a replaceAllAndType round — CM's contenteditable `.cm-content`
+  // when the vendor chunk built, the fallback <textarea> otherwise — so a
+  // re-take must blur it first; otherwise the d+w press is silently swallowed
+  // and the lease request below is denied for a reason nothing in the harness
+  // surfaces. The blur below covers both adapters (isContentEditable catches CM).
   // We deliberately do NOT click the canvas here: index.js's onPointerUp
   // fires probeAt() (an async GPU readback on WebGPU) and then synchronously
   // calls openProbe() on whatever's under the cursor, which REPLACES the
@@ -343,8 +467,9 @@ const bMirrorVisible = await pageB.$eval('.component-editor-mirror', (el) => {
 check('(a) B\'s "Watching" mirror pane is CSS-visible', bMirrorVisible === true);
 const bMirrorReadOnly = await pageB.$eval('.component-editor-mirror textarea', (el) => el.readOnly).catch(() => null);
 check('(a) B\'s mirror textarea is read-only', bMirrorReadOnly === true);
-const bHasEditable = !!(await pageB.$('.component-editor-editable .code-editor'));
-check('(a) B\'s editor mounts an editable "My draft" pane', bHasEditable);
+const bEditableKind = await editableKind(pageB);
+console.log(`  [B] editable doc adapter on this run: ${bEditableKind}`);
+check('(a) B\'s editor mounts an editable "My draft" pane', bEditableKind === 'cm' || bEditableKind === 'textarea', 'kind=' + bEditableKind);
 const bHasCommit = !!(await pageB.$('.component-editor .btn-primary'));
 check('(a) B\'s editor has NO Commit button (cannot broadcast)', !bHasCommit);
 const bHasRevert = !!(await pageB.$('.component-editor .btn-ghost'));
@@ -379,15 +504,16 @@ check('(b) A\'s editor HAS a Revert button (can rewind to pristine)', aHasRevert
 // local draft must NEVER appear in any draft/commit/anycast message.
 await pageB.evaluate(() => { window.__wsReceived.length = 0; });
 const bDraftText = '// B-LOCAL-DRAFT-MARKER\nvec3 sg_sky_color(vec3 rd, float t) { return vec3(0.1, 0.2, 0.3); }';
-await replaceAllAndType(pageB, bDraftText);
+await replaceAllAndType(pageB, bDraftText, 'B-draft');
 // Assert the draft lands in the editable pane IMMEDIATELY, before the
 // edit.js 300ms debounce even fires — proves the keystroke reached the
 // editable pane (not the read-only mirror above it) and that no lazy
-// re-render defers the value the user can already see. Reading via
-// `.component-editor-editable .code-editor` rules out the mirror textarea,
-// which the broader `.component-editor .code-editor` selector would have
-// matched first in document order.
-const bDraftImmediate = await pageB.$eval('.component-editor-editable .code-editor', (el) => el.value).catch(() => null);
+// re-render defers the value the user can already see. readEditableBody()
+// reads the CM document (or the fallback textarea's value) scoped to
+// `.component-editor-editable`, so the mirror textarea — which the broader
+// `.component-editor .code-editor` selector would have matched first in
+// document order — can never answer this read.
+const bDraftImmediate = await readEditableBody(pageB);
 check('(c) B\'s editable pane holds the typed draft immediately (no debounce defer)', bDraftImmediate === bDraftText, JSON.stringify(bDraftImmediate));
 await sleep(scaled(800)); // plenty for the 300ms edit.js debounce + 150ms net draft debounce
 const wireSeenBLocalDraft = await pageB.evaluate((txt) => {
@@ -417,15 +543,21 @@ await sleep(200);
 await clickTrayItem(pageB, skyComponent.name); // reopen the same one
 await sleep(200);
 check('(setup) B reopened the sky editor (after a different-component detour)', await openEditHere(pageB));
-const bLocalAfterReopen = await pageB.$eval('.component-editor-editable .code-editor', (el) => el.value).catch(() => null);
+const bLocalAfterReopen = await readEditableBody(pageB);
 check('(c) B\'s local draft is preserved across panel close+reopen', bLocalAfterReopen === bDraftText, JSON.stringify(bLocalAfterReopen));
 
 // Now release A's lease, take it on B (over the wire), and verify the
 // SAME text becomes the editable body on B's editor — without remount.
-// B's editable textarea is focused from the typing round above — blur it
+// B's editable pane is focused from the typing round above (CM's
+// `.cm-content` or the fallback textarea) — blur it
 // so the movement keys reach index.js's window-level onKeyDown (it gates
 // on inEditableChrome(activeElement) and would otherwise swallow d+w).
 const aReleaseIdx = aIdx;
+// Handle to the live editable pane, captured AFTER the close/reopen detour
+// (which legitimately remounts) and BEFORE the lease flip (which must not).
+// Compared by identity below — the old presence-only check would have gone
+// green on a freshly remounted pane.
+const bEditableNodeBeforeFlip = await pageB.$(EDITABLE);
 await sendOnLiveSocket(pageA, { t: 'lease.release' });
 await sleep(200);
 await moveIntoLecternRing(pageB, pageA, 'B-takes-lease');
@@ -437,9 +569,13 @@ check('(c) B took the lease over its own real socket', !!bTakesLease && bTakesLe
 // setAuthority must NOT remount: the same .component-editor-editable node
 // should still be present, AND its value should still be B's local draft.
 await sleep(200);
-const bEditableSameNode = await pageB.evaluate(() => !!document.querySelector('.component-editor-editable'));
-check('(c) B\'s editable pane survived the lease flip (no remount)', bEditableSameNode);
-const bEditableAfterFlip = await pageB.$eval('.component-editor-editable .code-editor', (el) => el.value).catch(() => null);
+const bEditableSameNode = bEditableNodeBeforeFlip
+  ? await pageB.evaluate(({ el, sel }) => el === document.querySelector(sel),
+    { el: bEditableNodeBeforeFlip, sel: EDITABLE }).catch(() => false)
+  : false;
+check('(c) B\'s editable pane survived the lease flip (no remount)', bEditableSameNode,
+  'hadNodeBefore=' + !!bEditableNodeBeforeFlip + ' sameNodeAfter=' + bEditableSameNode);
+const bEditableAfterFlip = await readEditableBody(pageB);
 check('(c) B\'s local draft becomes the editable body on the lease flip (preserved, now committable)',
   bEditableAfterFlip === bDraftText, JSON.stringify(bEditableAfterFlip));
 // After the flip B is the holder — Commit button appears, mirror is
@@ -467,14 +603,22 @@ check('(c) B\'s editor class flipped from nonholder to holder', Array.isArray(bC
 const bPrepareBefore = await pageB.evaluate(() => window.__prepareCalls);
 const BROKEN = 'this is not valid glsl at all --- vec3 sg_sky_color(vec3 rd, float t) { return';
 await pageB.evaluate(() => { window.__wsReceived.length = 0; });
-await pageB.evaluate(() => {
-  const el = document.querySelector('.component-editor-editable .code-editor');
-  el.focus();
-  el.value = '';
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-});
-await pageB.keyboard.type(BROKEN, { delay: 2 });
+// Clear + retype through the real keyboard. The previous programmatic clear
+// (`el.value = ''` + a synthetic 'input' on `.component-editor-editable
+// .code-editor`) is a no-op under CodeMirror: that node is CM's wrapper
+// <div>, so the assignment just parks a stray property on a div and the
+// event never reaches the contentDOM CM listens on. Worse, the `el.focus()`
+// beside it did nothing either (the wrapper takes no focus), so the
+// keyboard.type() that followed went to <body> and index.js's window-level
+// onKeyDown walked the character around the garden instead of typing BROKEN
+// — (d) would then be asserting against a still-passing draft.
+await replaceAllAndType(pageB, BROKEN, 'B-broken');
 await sleep(scaled(800));
+
+// The broken body really is what the editable pane now holds — without this
+// the pill/wire assertions below could pass vacuously off a stale draft.
+const bBrokenInPane = await readEditableBody(pageB);
+check('(d) B\'s editable pane holds the broken draft the harness typed', bBrokenInPane === BROKEN, JSON.stringify(bBrokenInPane));
 
 // The pill should report an error (the local compile failed). Reading the
 // pill text is more honest than reading res.ok: a slow compile might still
@@ -518,8 +662,12 @@ check('(d) A\'s uLeaseHeld still says A is/was the holder OR cleared (NOT replac
 // Recovery: revert B to its last good state (the local draft we had typed
 // before going broken — same text, recompiles clean). This proves the
 // transactional path doesn't strand a failed buffer in editedBodies either.
-await replaceAllAndType(pageB, bDraftText);
+await replaceAllAndType(pageB, bDraftText, 'B-retype');
 await sleep(scaled(800));
+// Same read-back guard as the broken round: the pill can only be trusted to
+// mean "this body recompiled" if the pane actually holds that body.
+const bGoodInPane = await readEditableBody(pageB);
+check('(d) B\'s editable pane holds the re-typed passing draft', bGoodInPane === bDraftText, JSON.stringify(bGoodInPane));
 const bPillAfterGood = await pageB.$eval('.component-editor .pill', (el) => el.textContent.trim()).catch(() => null);
 check('(d) B\'s editor recovers cleanly on a passing re-type (pill returns to ok)', /ok/i.test(bPillAfterGood || ''), JSON.stringify(bPillAfterGood));
 
@@ -536,10 +684,18 @@ check('(d) B\'s editor recovers cleanly on a passing re-type (pill returns to ok
 // B is the holder and its editor is open. Release B's lease and have A
 // take it back. B's open editor must drop Commit + gain mirror, again
 // without remounting the editable pane.
-const editableNodeBefore = await pageB.evaluate(() => {
-  const el = document.querySelector('.component-editor-editable');
-  return el ? el.outerHTML.slice(0, 200) : null;
-});
+//
+// "No remount" is asserted on NODE IDENTITY (a handle to the live element,
+// compared against whatever `.component-editor-editable` resolves to after
+// the flip), not on an outerHTML prefix. Under CodeMirror the pane's
+// serialised HTML churns for reasons that have nothing to do with a
+// remount — CM toggles `cm-focused` on its wrapper, retitles its
+// `cm-announced` aria-live region on doc/selection changes, and writes
+// measured inline styles — so a prefix compare would report a phantom
+// remount. Identity is also the stricter oracle: a torn-down-and-rebuilt
+// pane that happened to serialise identically would have slipped past the
+// old check and cannot slip past this one.
+const editableNodeBefore = await pageB.$(EDITABLE);
 await sendOnLiveSocket(pageB, { t: 'lease.release' });
 await sleep(200);
 // Re-take: A is still inside the ring from the original (setup) move — the
@@ -552,12 +708,16 @@ const aTakesBack = await waitForNextOnPage(pageA, 'lease', aIdx, scaled(10000));
 aIdx = aTakesBack ? aTakesBack.index : aIdx;
 check('(e) A took the lease back over its own real socket', !!aTakesBack && aTakesBack.msg.holder === aSelfId, JSON.stringify(aTakesBack));
 await sleep(scaled(600));
-const editableNodeAfter = await pageB.evaluate(() => {
-  const el = document.querySelector('.component-editor-editable');
-  return el ? el.outerHTML.slice(0, 200) : null;
-});
+const editableSameNode = editableNodeBefore
+  ? await pageB.evaluate(({ el, sel }) => el === document.querySelector(sel),
+    { el: editableNodeBefore, sel: EDITABLE }).catch(() => false)
+  : false;
 check('(e) B\'s open editor did NOT remount the editable pane (same DOM, no flash)',
-  editableNodeBefore === editableNodeAfter && editableNodeBefore != null, 'before=' + editableNodeBefore + ' after=' + editableNodeAfter);
+  editableSameNode, 'hadNodeBefore=' + !!editableNodeBefore + ' sameNodeAfter=' + editableSameNode);
+// The draft the user was holding is still in that same pane after losing
+// the lease — the flip is a class/button swap, never a content reset.
+const bDraftAfterLoss = await readEditableBody(pageB);
+check('(e) B\'s local draft survived the lease loss intact', bDraftAfterLoss === bDraftText, JSON.stringify(bDraftAfterLoss));
 const bCommitAfterLoss = !!(await pageB.$('.component-editor .btn-primary'));
 check('(e) B\'s editor dropped its Commit button on losing the lease', !bCommitAfterLoss);
 // The mirror DOM was always present (built at mount time); the lease

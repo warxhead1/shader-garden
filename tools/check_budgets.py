@@ -342,16 +342,20 @@ AGGREGATES = [
     # budgeted for the same reason the site is: room.mjs is a PURE reducer and
     # stays that way — growth here is the signal that I/O or timers leaked in.
     # Actuals at the MP merge: 305 / 376 / 246.
-    # 350 -> 500: SIGNAL-1 (v2 blueprint §11 item 28). Adding sg.signal.v1
-    # alongside sg.mp.v1 — a second protocol family sharing the WS upgrade,
-    # ws.mjs codec, heartbeat, and origin gate but using disjoint room state.
-    # Growth is bound up in: a parallel `signalRooms` Map + reaper, a
-    # bindSignalHello/handleSignalMessage/handleSignalClose triplet (the
-    # SDP/ICE non-inspection invariant has to be visible in code), the
-    # kind/signalId pair on the connection struct, and the dispatch branches
-    # in handleData/handleClose/healthz. The mp path is byte-for-byte
-    # unchanged. Actual 488/500.
-    ("server/relay.mjs", 500, None),
+    # 350 -> 500 was SIGNAL-1's first cut, which grew relay.mjs in place. That
+    # was the wrong shape: this file's charter is "the only file that touches a
+    # socket, a clock, or `process`", not "every protocol". sg.signal.v1 now
+    # lives in server/signal.mjs (its own row below) and relay.mjs keeps only
+    # protocol selection on hello plus three dispatch calls. 500 -> 360, the
+    # smallest honest cap over the actual: 355/360. The mp path is byte-for-byte
+    # what it was before signaling landed.
+    ("server/relay.mjs", 360, None),
+    # SIGNAL-1, extracted: room membership, immutable host assignment, opaque
+    # forwarding, guest leave, host-loss teardown, its own limits and /healthz
+    # counters. Budgeted for the same reason room.mjs is — this module must
+    # stay a dumb pipe, and growth here is the signal that it started inspecting
+    # SDP/ICE or managing sessions. Actual 151/160.
+    ("server/signal.mjs", 160, None),
     # 420 -> 450: MP-6. Sculptor's Tag (docs/the-commons-design.md §0) needs
     # grantRoleLease/releaseRoleLease plus the seeking-phase guards in
     # lease.request and tick(); ending the round on the last tag needs the

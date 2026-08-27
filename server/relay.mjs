@@ -20,15 +20,12 @@ import {
   encodePong,
 } from './ws.mjs';
 import { createRoom, reduce, tick, removeMember, PROTOCOL, MAX_ROOMS, HEARTBEAT_MS } from './room.mjs';
+// sg.signal.v1 lives entirely in signal.mjs: room membership, host assignment,
+// opaque forwarding, leave/host-loss teardown, its own limits and counters.
+// This file only picks the protocol on hello and dispatches into that module.
+import { createSignalHub, SIGNAL_PROTOCOL } from './signal.mjs';
 
 const TICK_HZ = 30;
-// Signaling protocol — shares transport with sg.mp.v1 (same WS upgrade,
-// ws.mjs codec, heartbeat, origin gate) but uses disjoint room state.
-// `data` is forwarded exactly as the sender wrote it; the relay never
-// inspects SDP/ICE.
-const SIGNAL_PROTOCOL = 'sg.signal.v1';
-const SIGNAL_MAX_MEMBERS = 8;
-const SIGNAL_MAX_ROOMS = 64;
 
 function parseArgs(argv) {
   const args = { port: 8787, host: '0.0.0.0', origins: null };
@@ -41,13 +38,6 @@ function parseArgs(argv) {
     }
   }
   return args;
-}
-
-// Mirror of room.mjs's reducer-side name sanitizer: trim, slice to 24, default
-// to 'wanderer'. Kept inline because the reducer does not export it.
-function sanitizeName(name) {
-  const s = typeof name === 'string' ? name.trim().slice(0, 24) : '';
-  return s || 'wanderer';
 }
 
 /** Per-socket state. `roomId` is bound on the first valid hello.room; pre-hello,
@@ -91,124 +81,9 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
     }
   }
 
-  // Signal rooms live in a separate Map so /healthz's `rooms` count does not
-  // move when a signaling connection joins, and a host close in one mode
-  // cannot affect the other.
-  const signalRooms = new Map(); // id -> { id, hostId, members: Map<id, { id, name, conn }> }
-
-  function getOrCreateSignalRoom(id) {
-    let sigRoom = signalRooms.get(id);
-    if (sigRoom) return sigRoom;
-    if (signalRooms.size >= SIGNAL_MAX_ROOMS) return null;
-    sigRoom = { id, hostId: null, members: new Map() };
-    signalRooms.set(id, sigRoom);
-    return sigRoom;
-  }
-
-  function reapEmptySignalRooms() {
-    for (const [id, sigRoom] of signalRooms) {
-      if (sigRoom.members.size === 0) signalRooms.delete(id);
-    }
-  }
-
-  // First-message binding for sg.signal.v1. Returns false on a fatal close so
-  // the caller can `return` out of handleData immediately.
-  function bindSignalHello(conn, msg) {
-    const sigRoom = getOrCreateSignalRoom(msg.room);
-    if (!sigRoom) { closeConn(conn, 1013, 'server full'); return false; }
-    if (sigRoom.members.size >= SIGNAL_MAX_MEMBERS) {
-      // 9th-member refusal: close only, no in-band error (no client state
-      // machine to reconcile against — onclose code is the only signal).
-      closeConn(conn, 1013, 'room full');
-      return false;
-    }
-    const id = socketKey(conn);
-    const name = sanitizeName(msg.name);
-    conn.roomId = msg.room;
-    conn.signalId = id;
-    conn.kind = 'signal';
-    // First member is the immutable host. hostId is set exactly once at
-    // room creation; only a host close + room delete can clear it.
-    if (sigRoom.hostId === null) sigRoom.hostId = id;
-    sigRoom.members.set(id, { id, name, conn });
-
-    // Welcome to the joiner. peers is the snapshot a late joiner uses to
-    // learn who to send its initial offer to — must exclude self even
-    // though selfId is delivered separately.
-    const peers = [];
-    for (const m of sigRoom.members.values()) {
-      if (m.id !== id) peers.push({ id: m.id, name: m.name });
-    }
-    const welcome = { t: 'signal.welcome', selfId: id, hostId: sigRoom.hostId, peers };
-    if (conn.socket.writable) {
-      try { conn.socket.write(encodeText(JSON.stringify(welcome))); } catch { /* gone */ }
-    }
-    if (peers.length > 0) {
-      const joinMsg = { t: 'signal.peer.join', id, name };
-      for (const m of sigRoom.members.values()) {
-        if (m.id === id) continue;
-        if (m.conn.socket.writable) {
-          try { m.conn.socket.write(encodeText(JSON.stringify(joinMsg))); } catch { /* gone */ }
-        }
-      }
-    }
-    return true;
-  }
-
-  // Post-hello signal forwarding — the relay is a dumb pipe. Only
-  // `{t:'signal', to, data}` is recognized; `data` round-trips verbatim.
-  // Anything else (renamed `t`, missing `to`, extra fields) is silently
-  // ignored so an extension layered on the same socket is not torn down.
-  function handleSignalMessage(conn, msg) {
-    if (msg.t !== 'signal') return;
-    if (typeof msg.to !== 'string') return;
-    const sigRoom = signalRooms.get(conn.roomId);
-    if (!sigRoom) return;
-    const target = sigRoom.members.get(msg.to);
-    if (!target) return; // unknown id, or peer already left
-    if (target.id === conn.signalId) return; // never echo to self
-    const out = { t: 'signal', from: conn.signalId, data: msg.data };
-    if (target.conn.socket.writable) {
-      try { target.conn.socket.write(encodeText(JSON.stringify(out))); } catch { /* gone */ }
-    }
-  }
-
-  // Tear-down for a signal connection. A guest close is a normal leave
-  // notification; a host close evacuates the room entirely (no migration —
-  // electing a new host is a WebRTC concern the relay is NOT taking on).
-  function handleSignalClose(conn) {
-    if (!conn.signalId) return; // never joined
-    const sigRoom = signalRooms.get(conn.roomId);
-    if (!sigRoom || !sigRoom.members.has(conn.signalId)) return; // already cleaned by a prior step
-    const wasHost = sigRoom.hostId === conn.signalId;
-    sigRoom.members.delete(conn.signalId);
-
-    if (wasHost) {
-      // host-lost first, then close frame 1012, on every remaining socket,
-      // before destroying them. The clients receive the app message AND
-      // the WS close — only both together mean "host is gone, reconnect".
-      const hostLost = { t: 'signal.host-lost' };
-      for (const m of sigRoom.members.values()) {
-        if (m.conn.socket.writable) {
-          try {
-            m.conn.socket.write(encodeText(JSON.stringify(hostLost)));
-            m.conn.socket.write(encodeClose(1012, 'host lost'));
-          } catch { /* gone */ }
-        }
-        m.conn.socket.destroy();
-      }
-      signalRooms.delete(conn.roomId);
-      return;
-    }
-
-    const leave = { t: 'signal.peer.leave', id: conn.signalId };
-    for (const m of sigRoom.members.values()) {
-      if (m.conn.socket.writable) {
-        try { m.conn.socket.write(encodeText(JSON.stringify(leave))); } catch { /* gone */ }
-      }
-    }
-    if (sigRoom.members.size === 0) signalRooms.delete(conn.roomId);
-  }
+  // The signal-protocol half of this relay. It gets sockets only through the
+  // connections handed to its three entry points, plus these two callbacks.
+  const signal = createSignalHub({ closeConn, idFor: socketKey });
 
   function deliver(roomId, sends, exceptFrom) {
     if (!sends || sends.length === 0) return;
@@ -250,7 +125,7 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
 
   function handleClose(conn) {
     conns.delete(conn.socket);
-    if (conn.kind === 'signal') { handleSignalClose(conn); return; }
+    if (conn.kind === 'signal') { signal.handleClose(conn); return; }
     if (!conn.memberId) return;
     const room = rooms.get(conn.roomId);
     if (!room) return;
@@ -305,7 +180,7 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
           return;
         }
         if (msg.protocol === SIGNAL_PROTOCOL) {
-          if (!bindSignalHello(conn, msg)) return;
+          if (!signal.bindHello(conn, msg)) return;
         } else {
           const room = getOrCreateRoom(msg.room, nowMs);
           if (!room) {
@@ -325,7 +200,7 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
         // Signal mode never touches the reducer; data is forwarded exactly,
         // framed only by relay-supplied `t` and `from`. Other shapes are
         // silent no-ops (the relay is a dumb pipe, not a session manager).
-        handleSignalMessage(conn, msg);
+        signal.handleMessage(conn, msg);
         continue;
       }
 
@@ -372,16 +247,8 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
     if (req.method === 'GET' && req.url === '/healthz') {
       let members = 0;
       for (const room of rooms.values()) members += room.members.size;
-      let signalMembers = 0;
-      for (const sigRoom of signalRooms.values()) signalMembers += sigRoom.members.size;
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        ok: true,
-        rooms: rooms.size,
-        members,
-        signalRooms: signalRooms.size,
-        signalMembers,
-      }));
+      res.end(JSON.stringify({ ok: true, rooms: rooms.size, members, ...signal.stats() }));
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });

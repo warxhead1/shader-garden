@@ -20,7 +20,7 @@ WORKDIR /app
 # Relay + codec go under server/ (matching the CMD's path); the shared
 # reducer lives under site/js/multiplayer/ at its source-tree location
 # so server/room.mjs's relative import resolves unchanged.
-COPY relay.mjs room.mjs ws.mjs ./server/
+COPY relay.mjs signal.mjs room.mjs ws.mjs ./server/
 COPY site/js/multiplayer/room-core.js ./site/js/multiplayer/room-core.js
 
 # Fly/Render/Railway all inject PORT. 8787 matches net.js's LOCAL_RELAY_PORT so

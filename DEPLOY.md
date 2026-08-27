@@ -104,7 +104,106 @@ touched — other apps on the same Pages origin are left alone.
   from cache; `assets/kernels.json` and WGSL ports refresh in the background
   (stale-while-revalidate) on each visit.
 
-## 5. Sanity checklist after first deploy
+## 5. Production multiplayer relay (The Commons)
+
+Out of the box a public Pages deploy is single-player. Multiplayer is an
+operator switch: you stand up a WebSocket relay somewhere on the public
+internet and tell the deploy workflow about it. This section is the
+end-to-end wiring; `server/README.md` is the relay itself.
+
+### 5.1 Why this isn't just a checkbox
+
+GitHub Pages is HTTPS. Every browser refuses a plain `ws://` socket from an
+HTTPS page — same rule that blocks `http://` images on an HTTPS page, just
+for WebSockets instead. That means:
+
+- **The relay itself speaks plain `ws://`** (`server/relay.mjs` is a Node
+  `http` server that does its own RFC6455 framing — invariant I6, zero npm
+  dependencies). You terminate TLS in front of it (reverse proxy, fly.io,
+  Cloudflare Tunnel, whatever you already operate).
+- **The endpoint the site dials MUST be `wss://`** — anything else and the
+  browser drops the connection before a single byte leaves the tab. There is
+  no client-side fallback; this is mixed content, not a config error.
+- On `localhost`/`127.0.0.1` the site is allowed to use plain `ws://` and
+  does so automatically — that's what lets you run `node server/relay.mjs`
+  and open the site locally with zero extra setup (see
+  `docs/multiplayer-spec.md` §2.5 and `site/js/organs/garden/net.js`'s
+  `resolveRelayUrl`).
+
+### 5.2 Stand the relay up
+
+The image is just `server/Dockerfile` plus three files:
+
+```sh
+docker build -t sg-relay server/
+docker run -p 8787:8787 \
+  -e SG_ALLOWED_ORIGINS=https://<user>.github.io \
+  sg-relay
+```
+
+Two non-obvious knobs that matter in production:
+
+- **`SG_ALLOWED_ORIGINS`** is the origin allowlist (the relay's
+  `--origin` flag). Without it the relay accepts WebSocket upgrades from
+  any origin and prints a one-line warning on every boot — fine in dev,
+  wrong on the open internet. With it set, a matching origin gets the
+  `101` upgrade and any other origin gets a bare `403` before the
+  handshake.
+- **`GET /healthz`** returns `{"ok":true,"rooms":<n>,"members":<n>}` —
+  point your uptime check at it. State is in memory: a room exists while
+  someone is in it, so restarting the relay costs an in-progress round
+  and nothing else.
+
+Any host that runs a container and terminates TLS in front of it works.
+The relay has no npm dependencies, so there is no install step to break
+the image.
+
+### 5.3 Tell the deploy workflow about it — `SG_RELAY_URL`
+
+This is the actual stamping mechanism, taken straight from
+`.github/workflows/deploy.yml`:
+
+```yaml
+- name: Point the deployed site at the relay
+  env:
+    RELAY_URL: ${{ vars.SG_RELAY_URL }}
+  run: |
+    if [ -z "$RELAY_URL" ]; then
+      echo "SG_RELAY_URL unset — deploying a single-player site."
+      exit 0
+    fi
+    case "$RELAY_URL" in
+      wss://*) ;;
+      *) echo "::error::SG_RELAY_URL must be wss:// (got '$RELAY_URL'); ws:// is blocked as mixed content on Pages." ; exit 1 ;;
+    esac
+    printf '{"url": "%s"}\n' "$RELAY_URL" > site/assets/relay.json
+    echo "Relay configured: $RELAY_URL"
+```
+
+What that means for you:
+
+1. **Set the repository VARIABLE `SG_RELAY_URL`** (Settings → Secrets and
+   variables → Actions → Variables) to your public `wss://` endpoint. It
+   is a **variable**, not a secret: this value ships inside a public
+   Pages artifact and is trivially readable from the deployed page, so
+   marking it secret would hide it from the people maintaining it
+   without hiding it from anyone else.
+2. **Unset = single-player deploy.** `site/assets/relay.json` ships
+   `{"url": null}` and the deploy step leaves it that way. A Pages
+   deploy with no `relay.json` resolves to `no-relay` and shows a clean
+   single-player garden — not a broken multiplayer one.
+3. **Set but not `wss://` = loud deploy failure.** A non-`wss://` value
+   fails the deploy with a clear error rather than shipping multiplayer
+   that looks broken for no visible reason. The mixed-content block is
+   silent in the browser, so a permissive client would otherwise be the
+   only signal anyone ever saw.
+
+There is no hosted endpoint. This repository does not run a relay for
+you; the URL you set has to point at infrastructure you operate, with
+TLS termination you control, in front of a container you built from
+`server/Dockerfile`.
+
+## 6. Sanity checklist after first deploy
 
 - [ ] `https://<domain>/manifest.webmanifest` loads (correct MIME, not 404).
 - [ ] DevTools → Application → Service Workers shows `sw.js` activated.
@@ -112,3 +211,6 @@ touched — other apps on the same Pages origin are left alone.
 - [ ] Lighthouse PWA audit passes installability.
 - [ ] After a second deploy, Application → Cache Storage shows only one
       `shader-garden-v1-<sha>` cache — the previous deploy's cache is gone.
+- [ ] If multiplayer is on, opening `#/garden/<room>` on two devices shows
+      both peers in the roster panel and the relay's `GET /healthz` reports
+      `members: 2`.

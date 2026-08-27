@@ -80,6 +80,40 @@ The module contracts (uniform conventions, runtime interfaces, the kernel
 schema, service-worker rules) live in [ARCHITECTURE.md](ARCHITECTURE.md).
 See [DEPLOY.md](DEPLOY.md) for hosting, custom-domain, and PWA install notes.
 
+## The Commons — multiplayer
+
+Shader Garden has an optional multiplayer layer called **The Commons**: load
+the same room in two browser tabs (or two laptops on the same LAN, or two
+friends across the internet) and the world becomes one shared GLSL source
+that one of you edits at a time. When the holder commits, every connected
+player's garden recompiles into the new world. The first game played inside
+it is hide-and-seek.
+
+- **Route:** `#/garden/:room` — same `#/garden` organ, with a room segment.
+  **Solo `#/garden` is unchanged** — no relay, no net code, same single-player
+  garden as before. This is invariant I1 of the multiplayer spec and is
+  covered by the solo parity suite.
+- **Architecture:** browser clients connect to a single central,
+  dependency-free Node WebSocket relay (`server/relay.mjs`). The relay hands
+  out a shared clock, relays player poses and committed shader edits between
+  the people in a room, and referees the game. There is **no
+  browser-to-browser WebRTC / P2P** — every byte of game traffic flows
+  through the relay, which has zero npm dependencies.
+- **Spec and design:** [docs/multiplayer-spec.md](docs/multiplayer-spec.md)
+  is the frozen implementation spec (the authoritative "what we are
+  building"); [docs/the-commons-design.md](docs/the-commons-design.md) is the
+  design-rationale companion (prior art, the shipped-vs-exploratory split).
+- **Running it:** [server/README.md](server/README.md) covers `node
+  server/relay.mjs`, the origin allowlist, and `GET /healthz`. Turning
+  multiplayer on for a public Pages deploy — Pages is HTTPS, so the relay
+  must be reachable as `wss://` — is in
+  [DEPLOY.md](DEPLOY.md); it boils down to setting one repository variable
+  and the deploy workflow stamps it into the published artifact.
+
+The shipped garden is a single-player static PWA; The Commons is additive
+and off by default (public Pages without a configured relay is a clean
+single-player site, not a broken multiplayer one).
+
 ## License
 
 [MIT](LICENSE).

@@ -7,6 +7,42 @@ source, listed at the bottom.
 Nothing in this document invalidates the frozen spec. It is all additive —
 Wave 1 builds the machine, this is what we hang on it.
 
+## Status — what here is shipped vs exploratory
+
+This document is **design rationale, not a spec.** When in doubt, the
+frozen spec at [`multiplayer-spec.md`](multiplayer-spec.md) wins. The split
+as of writing:
+
+**Shipped (matches the running code and the spec):**
+
+- **Sculptor's Tag** (§0) — the seeker is the commit-lease holder during
+  `seeking` by role, not by standing at the lectern. The lectern stays the
+  lobby-mode baton. `server/room.mjs`'s `grantRoleLease` /
+  `releaseRoleLease` and the `seeking` branch of `advanceGame` are the
+  shipped implementation; the design doc asked for nothing else.
+
+**Exploratory — written here as prior art and intent, NOT the shipped
+behavior. Do not infer behavior from these sections:**
+
+- **§1 "The baton is a commit lock, not an edit lock"** as written there
+  proposes that non-holders are not read-only: every non-holder gets two
+  editor tabs, **Watching \<name\>** (read-only mirror of the holder's
+  buffer) **and** **My draft** (a sandbox they can freely edit and
+  locally compile). **That proposal is NOT what shipped.** The shipped
+  behavior per spec §5.2 — and what `site/js/organs/garden/edit.js`'s
+  `mountComponentEditor({ readOnly: true })` and the
+  `mp-two-browsers.mjs` browser test prove — is a **single read-only
+  non-holder mirror** of the holder's draft. Non-holders cannot edit
+  locally and there is no per-client draft tab in the UI. The reason
+  the change narrowed is recorded in the spec, not here; this doc keeps
+  the wider proposal so the prior-art reasoning is preserved.
+
+Sections 2–6 are downstream of those two and should be read with the
+above in mind: they describe the game-feel, legibility, collision, and
+demoscene references the design was reaching toward. None of them is
+contradicted by the shipped behavior above; the only one whose proposal
+diverges from what shipped is §1.
+
 ---
 
 ## 0. The finding that changes the design

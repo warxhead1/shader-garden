@@ -41,11 +41,16 @@ function parseArgs(argv) {
  *  buffer, the in-progress fragmented-message state ws.mjs threads back to
  *  us, and heartbeat bookkeeping. Kept OUT of room.mjs's Member because
  *  Member must stay serializable/comparable in tests with no socket in it.
+ *
+ *  `roomId` is null until the first VALID hello lands: the upgrade URL path
+ *  is transport addressing only, and the room identity comes from
+ *  `hello.room` per the sg.mp.v1 contract (spec §2.3 + this file's binding
+ *  step in handleData). Pre-hello, the connection belongs to no room.
  */
-function makeConnection(socket, roomId) {
+function makeConnection(socket) {
   return {
     socket,
-    roomId,
+    roomId: null, // bound on the first valid hello.room; null until then
     memberId: null, // assigned on hello via reduce(); null until then
     buf: Buffer.alloc(0),
     frag: null,
@@ -150,11 +155,39 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
         continue; // malformed JSON: ignore rather than tear down the whole connection
       }
       const nowMs = Date.now();
-      const room = getOrCreateRoom(conn.roomId, nowMs);
-      if (!room) {
-        closeConn(conn, 1013, 'server full');
-        return;
+
+      // Bind the connection to a room on the first valid hello. Per spec
+      // §2.3 and this file's contract: the upgrade URL path is transport
+      // addressing only — it does NOT choose room membership. Until that
+      // hello arrives this connection is not a member of any room, and any
+      // other message is a protocol violation.
+      if (conn.roomId === null) {
+        if (msg.t !== 'hello') {
+          closeConn(conn, 1002, 'hello must be first');
+          return;
+        }
+        // `hello.room` is the authoritative room identity. Spec contract:
+        // a non-string, empty, or > 128-char value closes 1002 and creates
+        // no room/member. The 128-char cap is the only server-side room-id
+        // length gate — the reducer doesn't validate this on its own.
+        if (typeof msg.room !== 'string' || msg.room.length === 0 || msg.room.length > 128) {
+          closeConn(conn, 1002, 'invalid room');
+          return;
+        }
+        const room = getOrCreateRoom(msg.room, nowMs);
+        if (!room) {
+          // MAX_ROOMS is enforced HERE — once a hello names a never-before-
+          // seen room, we either create it or refuse the connection. Doing
+          // this at hello time (not on every message) means a single room
+          // can't be created twice by two distinct hellos once the cap is
+          // hit; the second hello sees the existing room and joins it.
+          closeConn(conn, 1013, 'server full');
+          return;
+        }
+        conn.roomId = msg.room;
       }
+
+      const room = rooms.get(conn.roomId);
       const from = conn.memberId || socketKey(conn);
       const result = reduce(room, { from, msg, nowMs });
       rooms.set(conn.roomId, result.room);
@@ -227,12 +260,6 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
       socket.destroy();
       return;
     }
-    const url = new URL(req.url, 'http://placeholder');
-    // Room id is the last path segment: /room/<id> or /<id>. Kept liberal
-    // about the exact path shape here because net.js (lane L2) owns the
-    // client-side URL construction and isn't frozen yet at L1's wave.
-    const parts = url.pathname.split('/').filter(Boolean);
-    const roomId = parts[parts.length - 1] || 'lobby';
 
     const responseKey = acceptKey(key);
     socket.write(
@@ -242,7 +269,13 @@ export function startRelay({ port = 8787, host = '0.0.0.0', origins = null } = {
         `Sec-WebSocket-Accept: ${responseKey}\r\n\r\n`
     );
 
-    const conn = makeConnection(socket, roomId);
+    // The upgrade URL path is TRANSPORT addressing only. Room identity is
+    // determined by the first valid `hello.room` on the connection (see
+    // handleData), not by parsing the path. A connection is unbound to any
+    // room until that hello arrives — anything else from a pre-hello
+    // connection is a protocol violation (close 1002), so binding late
+    // here is both safe and the spec-required behavior.
+    const conn = makeConnection(socket);
     conns.set(socket, conn);
     if (head && head.length) handleData(conn, head);
 

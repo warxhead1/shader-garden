@@ -240,7 +240,7 @@ One JSON object per WebSocket text message. `{ t: "<type>", ... }`.
 
 | `t` | fields | rules |
 |---|---|---|
-| `hello` | `protocol`, `room`, `name` | MUST be first. Wrong `protocol` -> close 1002. Room full (`MAX_MEMBERS=8`) -> `error{code:'room_full'}` then close 1013. |
+| `hello` | `protocol`, `room`, `name` | MUST be first. Wrong `protocol` -> close 1002. Room full (`MAX_MEMBERS=8`) -> `error{code:'room_full'}` then close 1013. `room` is the authoritative room identity: a non-string, empty, or longer-than-128-char value -> close 1002 and no room/member created. |
 | `pose` | `x,z,yaw,speed01,gait` | Non-finite or out-of-range -> ignored. Token bucket: `POSE_BUDGET=40` refilled 30/s; overflow -> silently dropped (never a disconnect — a laggy client is not an attacker). |
 | `ring` | `inRing` | asserts the sender is inside the lectern radius. |
 | `lease.request` | — | granted only if `lease.holder == null || expired`, **and** `member.inRing`. Otherwise `lease{...}` unchanged (a denial is just the current truth, not an error). A **denial** goes to the requester only; a **grant / expiry / release** broadcasts to `*`, because that is state everyone needs. `lease.keepalive` broadcasts nothing — re-arming every ~10s is not news. |
@@ -277,6 +277,19 @@ Constants: `LEASE_TTL_MS=20000`, `POSE_HZ=15`, `MAX_MEMBERS=8`,
 `setInterval` driving `tick()` at 30 Hz + heartbeat. CLI: `--port` (default
 8787), `--host`, `--origin <allowlist,...>` (default: allow all, warn once).
 `GET /healthz` -> `{ok, rooms, members}`. Empty rooms are reaped.
+
+**Room authority is `hello.room`, NOT the upgrade URL path.** The HTTP /
+WebSocket upgrade URL path is transport addressing only — it does not choose
+room membership. Before the first valid `hello` lands, the connection is
+unbound to any room and any other message is a protocol violation (close
+**1002**). On the first `hello`: validate `room` (non-empty string of at most
+128 characters; otherwise close **1002** and create no room/member), bind the
+connection to that exact room, get/create it subject to `MAX_ROOMS=64`, and
+reduce `hello` there. The `MAX_ROOMS` cap is therefore enforced at the moment
+a `hello` first names a never-before-seen room, not on every message — two
+clients with the same `hello.room` always share a room regardless of upgrade
+path, and two clients on the same upgrade path with different `hello.room`
+values are always isolated.
 
 Origin check: if an allowlist is configured, a mismatching `Origin` on upgrade
 gets a 403 before any WebSocket handshake.

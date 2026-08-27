@@ -109,6 +109,20 @@ async function connectClient(port, room, name) {
   return client;
 }
 
+// Variant that takes an explicit URL path so tests (7) and (8) can pin a
+// connection to a specific upgrade path independently of `hello.room` — which
+// is the whole point of those checks: the relay must route by hello.room, not
+// by what was on the URL line.
+async function connectAt(port, path, room, name) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+  await waitForEvent(ws, 'open', 5000, `${name} socket open`);
+  const client = wrapClient(ws);
+  ws.send(JSON.stringify({ t: 'hello', protocol: PROTOCOL, room, name }));
+  const welcome = await client.nextMatching((m) => m.t === 'welcome', 5000, `${name} welcome`);
+  client.selfId = welcome.selfId;
+  return client;
+}
+
 let PORT = derivePort(31337); // reassigned by the bind retry below; distinct offset — never the static-server default port; see the bind retry below
 // Retries on EADDRINUSE. derivePort() can land on any listener on the box:
 // mp-clock died in 0s against an unrelated service on 9101 and took a whole
@@ -256,6 +270,89 @@ try {
     check('(6) heartbeat: relay closes a connection that never pongs', true);
   } catch (e) {
     check('(6) heartbeat close', false, e.message);
+  }
+
+  /* ---------- 7) same-path / different-room isolation ----------
+   * The upgrade URL path is transport addressing only — it must not choose
+   * room membership. Two clients connecting to the SAME path but sending
+   * DIFFERENT hello.room values end up in DIFFERENT rooms, even though they
+   * dialed the same URL. Without the binding-step change in relay.mjs, the
+   * relay would (wrongly) put them both in whichever room the path named.
+   */
+  try {
+    const samePath = '/room/same-path';
+    const c = await connectAt(PORT, samePath, 'mp-relay-iso-alpha', 'Cee');
+    const d = await connectAt(PORT, samePath, 'mp-relay-iso-beta', 'Dee');
+    // Each welcome's `room` field must be the caller's hello.room, not the path.
+    const cWelcome = c.messages.find((m) => m.t === 'welcome');
+    const dWelcome = d.messages.find((m) => m.t === 'welcome');
+    check('(7) same-path/diff-room: c welcome names c\'s hello.room, not the URL path',
+      cWelcome && cWelcome.room === 'mp-relay-iso-alpha', cWelcome && cWelcome.room);
+    check('(7) same-path/diff-room: d welcome names d\'s hello.room, not the URL path',
+      dWelcome && dWelcome.room === 'mp-relay-iso-beta', dWelcome && dWelcome.room);
+
+    // Cross-room isolation: neither side should see the other join. We
+    // assert this by racing against a short deadline — if isolation is
+    // broken, peer.join shows up well before the timer.
+    const cSeesDJ = await Promise.race([
+      c.nextMatching((m) => m.t === 'peer.join', 1000, 'c unexpectedly sees d join').then(() => true, () => false),
+      new Promise((resolve) => setTimeout(() => resolve(false), 1500)),
+    ]);
+    const dSeesCJ = await Promise.race([
+      d.nextMatching((m) => m.t === 'peer.join', 1000, 'd unexpectedly sees c join').then(() => true, () => false),
+      new Promise((resolve) => setTimeout(() => resolve(false), 1500)),
+    ]);
+    check('(7) same-path/diff-room: c does NOT see d\'s peer.join (different rooms)', cSeesDJ === false);
+    check('(7) same-path/diff-room: d does NOT see c\'s peer.join (different rooms)', dSeesCJ === false);
+
+    c.ws.close(); d.ws.close();
+  } catch (e) {
+    check('(7) same-path/diff-room isolation', false, e.message);
+  }
+
+  /* ---------- 8) different-path / same-room joining ----------
+   * Mirror of (7). Two clients on DIFFERENT upgrade paths but the SAME
+   * hello.room land in the SAME room. Without the binding-step change,
+   * they would land in different rooms named after each path's last
+   * segment, and never see each other's peer.join or pose relay.
+   */
+  try {
+    const sameRoom = 'mp-relay-join-gamma';
+    // Subscribe on e BEFORE f connects — the same trick test (1) uses —
+    // so there's no race between f's hello landing and e's listener being
+    // attached. (f's broadcast of e's peer.join is unreachable here because
+    // e joined before f's listener existed; instead we assert it via f's
+    // `welcome.members` snapshot, which is exactly what late joiners use
+    // to learn who's already in the room.)
+    const e = await connectAt(PORT, '/foo/a', sameRoom, 'Ee');
+    const eSeesF = e.nextMatching((m) => m.t === 'peer.join' && m.id === f?.selfId, 5000, 'e sees peer.join for f');
+    const f = await connectAt(PORT, '/bar/b', sameRoom, 'Eff');
+    const onE = await eSeesF;
+    check('(8) diff-path/same-room: e receives f\'s peer.join', onE.id === f.selfId, JSON.stringify(onE));
+
+    const eWelcome = e.messages.find((m) => m.t === 'welcome');
+    const fWelcome = f.messages.find((m) => m.t === 'welcome');
+    check('(8) diff-path/same-room: both welcomes name the shared hello.room',
+      eWelcome && eWelcome.room === sameRoom && fWelcome && fWelcome.room === sameRoom,
+      eWelcome && fWelcome ? `${eWelcome.room}/${fWelcome.room}` : 'missing welcome');
+    // f's welcome carries the existing members — the snapshot a late joiner
+    // uses to learn who's already there. e must be in it; if the path split
+    // them into separate rooms, f would see an empty room.
+    check('(8) diff-path/same-room: f\'s welcome lists e as an existing member',
+      fWelcome && fWelcome.members.some((m) => m.id === e.selfId),
+      fWelcome && JSON.stringify(fWelcome.members.map((m) => m.id)));
+
+    // Pose relay across paths: if the path split them, f would never see e's
+    // pose. Same POSE_HZ timing as test (2).
+    e.ws.send(JSON.stringify({ t: 'pose', x: 1, z: 2, yaw: 0.5, speed01: 0.4, gait: 0.1 }));
+    const poses = await f.nextMatching((m) => m.t === 'poses' && m.poses.some((p) => p.id === e.selfId), 3000, 'f receives e\'s pose');
+    const mine = poses.poses.find((p) => p.id === e.selfId);
+    check('(8) diff-path/same-room: pose relays across different upgrade paths',
+      !!mine && mine.x === 1 && mine.z === 2, JSON.stringify(poses));
+
+    e.ws.close(); f.ws.close();
+  } catch (e) {
+    check('(8) diff-path/same-room joining', false, e.message);
   }
 } finally {
   relay.close();

@@ -60,7 +60,7 @@ One JSON object per text WebSocket message, always `{ "t": "<type>", ... }`.
 
 | `t` | Purpose |
 |---|---|
-| `hello` | Join a room. MUST be the first message on a connection. |
+| `hello` | Join a room. MUST be the first message on a connection. The room is named by `hello.room` — the WebSocket upgrade URL path is transport addressing only and does **not** choose which room you join. Two clients with the same `hello.room` always share a room regardless of upgrade path; two clients on the same upgrade path with different `hello.room` values are always isolated. `hello.room` must be a non-empty string of at most 128 characters; anything else closes with WebSocket code **1002** and creates no room/member. |
 | `pose` | Report `{x,z,yaw,speed01,gait}`. Rate-limited (see below). |
 | `ring` | Tell the server whether you just entered/left the lectern's ring. |
 | `lease.request` / `lease.keepalive` / `lease.release` | The "one writer" baton for editing the shared shader. |

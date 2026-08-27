@@ -139,25 +139,20 @@ async function armPrepareSpy(page) {
 // said, independent of any DOM the production UI may or may not have kept
 // alive.
 //
-// This is load-bearing, not a convenience: index.js's `if (room) {...}`
-// block builds the roster/lease/game panel (`mpPanel`) and appends it to
-// `stage` at the very TOP of mount() — BEFORE the later
-// `rh = await runtimeHost(stage, {...})` call. runtime-host.js's build()
-// does `host.replaceChildren()` on that same `stage` element to mount its
-// canvas (core/runtime-host.js:89/186), which silently deletes mpPanel (the
-// roster `<ul>`, the lease line/button, the game controls) the instant the
-// runtime finishes its first build. Confirmed empirically: `.garden-canvas`,
-// `.garden-mp-status` and `.garden-mp-room` all exist post-mount (they're
-// children of `topbar`, a sibling never cleared) but `.garden-mp-panel`,
-// `.garden-roster`, `.garden-lease-btn` and `.garden-lease-line` do not
-// exist AT ALL in the live DOM on either page — there is no lease button to
-// click and no roster to read. The internal `lastLease`/`isHolder` state
-// index.js's own authorization logic runs on is unaffected (it's driven by
-// the `onLease` callback, not the dead DOM), so this suite drives lease
-// acquisition/denial over each page's own real socket instead — the actual
-// production wire protocol, just without the (currently non-functional) UI
-// affordance in front of it. Flagged as the top bug in this suite's report;
-// out of scope to fix (index.js is L5's file, off-limits here).
+// This is load-bearing for a different reason than it once was: index.js's
+// `if (room) {...}` block builds the roster/lease/game panel (`mpPanel`) and
+// appends it to `stage` at the very TOP of mount() — BEFORE the later
+// `rh = await runtimeHost(stage, {...})` call. build() used to do an unscoped
+// `host.replaceChildren()` on that same `stage` element, which silently
+// deleted mpPanel (the roster `<ul>`, the lease line/button, the game
+// controls) the instant the runtime finished its first build. That is fixed:
+// runtime-host.js now owns only the canvas it created and prepends it beneath
+// the caller's children (core/runtime-host.js build()/dispose(), regression in
+// tools/test/runtime-host-loss.mjs). This suite still drives lease
+// acquisition/denial over each page's own real socket rather than through the
+// UI affordance — the wire protocol is what it means to assert on, and doing
+// it over the socket keeps these checks independent of whatever DOM the
+// production UI happens to keep alive.
 async function armSocketSpy(page) {
   await page.evaluateOnNewDocument(() => {
     window.__sockets = [];
@@ -494,27 +489,21 @@ check('(setup) A\'s editor mounted EDITABLE (A is the holder)', aReadOnly === fa
 const skyPixelBaseline = await readSkyPixels(pageB);
 check('(setup) got B\'s baseline sky pixels', skyPixelBaseline.some(Array.isArray), JSON.stringify(skyPixelBaseline));
 
-// PRODUCT BUG (found here, not a test artifact — see final report): both
-// "Edit here" mounts above (A's and B's) fail on this box. Root cause,
-// confirmed independently of this suite with a single-page repro: index.js's
+// The "Edit here" mounts above used to fail on every box: index.js's
 // onEditHere calls `rh.rebuild({ prefer: 'webgl2' })` on a WebGPU-backed
-// mount (GARDEN-IDE is GLSL-only) BEFORE mounting the editor — but
-// runtime-host.js's build() does an unscoped `host.replaceChildren()` on
-// the shared `stage` element (core/runtime-host.js:89), and index.js
-// appends the probe panel itself (`panel.el`, the ancestor of the very
-// "Edit here" button just clicked) as a direct child of that same `stage`
-// (organs/garden/index.js:538). The rebuild wipes the probe panel—and the
-// editHost the click handler is about to append into—out of the live DOM
-// mid-handler. mountComponentEditor() still resolves cleanly (no console
-// error, no rejection: confirmed cm-editor.bundle.js loads fine and
-// createDocAdapter/setLanguage/etc all complete) and its result IS
-// appended — just into a detached subtree nobody will ever see. Every
-// #/garden mount now defaults to WebGPU (§0.5 C1 supersession), so this
-// fires on EVERY "Edit here" click, not just in a room. Not fixable here:
-// core/runtime-host.js and organs/garden/index.js are outside this lane's
-// seven files. The two checks above and everything below that depends on
-// an editor existing are therefore honest FAILs, not vacuous ones — this
-// is exactly what "the editor never mounted" should look like.
+// mount (GARDEN-IDE is GLSL-only) BEFORE mounting the editor, and
+// runtime-host.js's build() did an unscoped `host.replaceChildren()` on the
+// shared `stage` element — while index.js appends the probe panel itself
+// (`panel.el`, the ancestor of the very "Edit here" button just clicked) as a
+// direct child of that same `stage` (organs/garden/index.js:538). The rebuild
+// wiped the probe panel — and the editHost the click handler was about to
+// append into — out of the live DOM mid-handler, so mountComponentEditor()
+// resolved cleanly into a detached subtree nobody would ever see. Fixed in
+// core/runtime-host.js: a rebuild now removes only the canvas the host itself
+// created, so the probe panel and editHost survive the WebGPU->WebGL2 pin
+// (regression: tools/test/runtime-host-loss.mjs). The guard below stays: an
+// editor that fails to mount for any OTHER reason must still produce honest
+// FAILs on the checks that depend on it, not vacuous passes.
 const editorsAvailable = !!(await pageA.$('.component-editor .code-editor')) && !!(await pageB.$('.component-editor .code-editor'));
 if (editorsAvailable) {
   const GOOD_BODY = 'vec3 sg_sky_color(vec3 rd, float time) {\n  return vec3(1.0, 0.0, 1.0); // magenta — never produced by the real gradient\n}';
@@ -633,7 +622,7 @@ if (editorsAvailable) {
   check('(b) A\'s commit changed B\'s RENDERED canvas pixel (not just a JS variable)',
     committed && dist >= 25, 'committed=' + committed + ' baseline=' + JSON.stringify(skyPixelBaseline) + ' afterCommit=' + JSON.stringify(skyPixelAfterCommit) + ' dist=' + dist.toFixed(1));
 } else {
-  check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', false, 'BLOCKED: editor never mounted, see product-bug note above');
+  check('(d) B\'s read-only mirror picked up A\'s UNCOMMITTED draft', false, 'BLOCKED: editor never mounted, see note above');
   check('(d) B\'s editor is still read-only after the draft landed (never becomes editable)', false, 'BLOCKED: editor never mounted');
   check('(setup) a draft (not yet committed) never triggers B\'s prepareShader (no recompile from a draft)', false, 'BLOCKED: editor never mounted');
   check('(setup) A\'s commit succeeded', false, 'BLOCKED: editor never mounted');

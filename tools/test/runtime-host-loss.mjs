@@ -121,6 +121,57 @@ check('runtime.lost.v1 fired once per loss, including the final give-up', result
   'lostEvents=' + result.lostEvents + ' forcedLosses=' + result.forcedLosses);
 check('no page errors', errors.length === 0, errors.join(' | '));
 
+// Ownership regression (design contract 1/2): the host element is SHARED with
+// the caller — garden hangs the probe/editor panel, MP panel and tray off the
+// same node runtimeHost() mounts its canvas into. A rebuild (including the
+// "Edit here" WebGPU->WebGL2 pin) or a release must therefore touch only the
+// canvas THIS host created. The regression this guards is the old unscoped
+// full-wipe of host children, which evicted the very panel the editor was
+// mid-flight to mount into and left it rendering into an orphaned subtree.
+const ownership = await page.evaluate(async () => {
+  const { runtimeHost } = await import('./js/core/runtime-host.js');
+
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const sibling = document.createElement('div');
+  sibling.className = 'unrelated-sibling';
+  sibling.textContent = 'panel the caller mounted';
+  host.appendChild(sibling);
+
+  const snap = () => ({
+    siblingAlive: host.contains(sibling) && document.body.contains(sibling),
+    canvases: host.querySelectorAll('canvas').length,
+    canvasFirst: host.firstElementChild?.tagName === 'CANVAS',
+  });
+
+  const rh = await runtimeHost(host, {
+    prefer: 'webgl2',
+    glslSrc: 'void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(1.0); }',
+    canvasClass: 'owned-canvas',
+    onLost: 'release',
+  });
+  const afterBuild = { ...snap(), backend: rh.backend };
+  // The same call shape garden's editing seam uses to pin a mount to WebGL2.
+  await rh.rebuild({ prefer: 'webgl2' });
+  const afterRebuild = { ...snap(), backend: rh.backend };
+  rh.dispose();
+  const afterDispose = snap();
+
+  sibling.remove(); host.remove();
+  return { afterBuild, afterRebuild, afterDispose };
+});
+
+check('build mounts exactly one owned canvas, beneath the caller\'s sibling',
+  ownership.afterBuild.canvases === 1 && ownership.afterBuild.canvasFirst && ownership.afterBuild.siblingAlive,
+  JSON.stringify(ownership.afterBuild));
+check('rebuild replaces only its own canvas — the unrelated sibling survives',
+  ownership.afterRebuild.siblingAlive && ownership.afterRebuild.canvases === 1 && ownership.afterRebuild.backend === 'webgl2',
+  JSON.stringify(ownership.afterRebuild));
+check('release removes the owned canvas and nothing else',
+  ownership.afterDispose.canvases === 0 && ownership.afterDispose.siblingAlive,
+  JSON.stringify(ownership.afterDispose));
+check('no page errors after the ownership pass', errors.length === 0, errors.join(' | '));
+
 await page.close();
 await browser.close();
 server.kill();

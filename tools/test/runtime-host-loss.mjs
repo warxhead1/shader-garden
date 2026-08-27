@@ -172,6 +172,218 @@ check('release removes the owned canvas and nothing else',
   JSON.stringify(ownership.afterDispose));
 check('no page errors after the ownership pass', errors.length === 0, errors.join(' | '));
 
+// Overlapping-build race (the fix 529de42 proved). An initial WebGL2 build
+// gives us an `rh` handle; we then stub navigator.gpu.requestAdapter with a
+// deferred promise; rebuild A with prefer:'auto' + WGSL stalls inside
+// tryWebgpu awaiting the adapter; while A stalls, rebuild B with
+// prefer:'webgl2' runs to completion (synchronous, no WebGPU); we then
+// resolve A as unavailable and await both. Without the fix, A's continuation
+// fell through to the WebGL2 leg, replaceWith()'d a fresh canvas onto a
+// parentless node (a no-op), and assigned ownCanvas to the orphan — so
+// dispose() later removed the orphan instead of B's live canvas and left a
+// stranded canvas in the shared host. With the fix, A detects my !== gen
+// BEFORE the WebGL2 leg and abandon()s only its own canvas, leaving B's
+// canvas intact and removable by dispose.
+const overlap = await page.evaluate(async () => {
+  const { runtimeHost } = await import('./js/core/runtime-host.js');
+
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const sibling = document.createElement('div');
+  sibling.className = 'unrelated-sibling';
+  sibling.textContent = 'panel the caller mounted';
+  host.appendChild(sibling);
+
+  const GLSL = 'void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(1.0); }';
+  const WGSL = '@fragment fn main() {}';
+
+  // Step 1: an initial WebGL2 build so `rh` is available to call rebuild().
+  const rh = await runtimeHost(host, {
+    prefer: 'webgl2', glslSrc: GLSL, canvasClass: 'owned-canvas', onLost: 'release',
+  });
+  const initialBaseline = {
+    canvases: host.querySelectorAll('canvas').length,
+    siblingAlive: host.contains(sibling),
+    backend: rh.backend,
+  };
+
+  // Step 2: stub navigator.gpu.requestAdapter with a deferred promise so
+  // build A stalls inside tryWebgpu until we choose to resolve it. Try the
+  // browser-native navigator.gpu first; if it is absent, synthesise the
+  // minimum surface the WebGPU leg needs to reach its await — requestAdapter
+  // must exist for the stub to take effect.
+  let resolveGpu;
+  const adapterDeferred = new Promise((r) => { resolveGpu = r; });
+  let adapterCalls = 0;
+  const origGpu = navigator.gpu;
+  if (origGpu && typeof origGpu.requestAdapter === 'function') {
+    navigator.gpu.requestAdapter = () => { adapterCalls++; return adapterDeferred; };
+  } else {
+    Object.defineProperty(navigator, 'gpu', {
+      configurable: true,
+      value: {
+        requestAdapter: () => { adapterCalls++; return adapterDeferred; },
+        getPreferredCanvasFormat: () => 'bgra8unorm',
+      },
+    });
+  }
+
+  const trail = {};
+  let pageErr = null;
+  try {
+    // Step 3: start rebuild A (prefer:'auto' + WGSL) without awaiting — we
+    // interleave B before A resolves.
+    const promiseA = rh.rebuild({ prefer: 'auto', wgslSrc: WGSL });
+    // Wait for build A to reach the requestAdapter() await.
+    while (!adapterCalls) await new Promise((r) => setTimeout(r, 5));
+    trail.afterAStalled = {
+      canvases: host.querySelectorAll('canvas').length,
+      siblingAlive: host.contains(sibling),
+      firstChildTag: host.firstElementChild?.tagName,
+    };
+
+    // Step 4: complete rebuild B with prefer:'webgl2' while A is stalled.
+    await rh.rebuild({ prefer: 'webgl2' });
+    trail.afterBComplete = {
+      canvases: host.querySelectorAll('canvas').length,
+      siblingAlive: host.contains(sibling),
+      backend: rh.backend,
+      firstChildTag: host.firstElementChild?.tagName,
+    };
+
+    // Step 5: resolve A as unavailable/failure and await it.
+    resolveGpu(null);
+    await promiseA;
+    trail.afterAComplete = {
+      canvases: host.querySelectorAll('canvas').length,
+      siblingAlive: host.contains(sibling),
+      backend: rh.backend,
+      firstChildTag: host.firstElementChild?.tagName,
+    };
+
+    // Step 6: dispose — the only canvas left must be the one B installed.
+    rh.dispose();
+    trail.afterDispose = {
+      canvases: host.querySelectorAll('canvas').length,
+      siblingAlive: host.contains(sibling),
+    };
+  } catch (e) {
+    pageErr = String(e?.message ?? e);
+  } finally {
+    // Restore navigator.gpu regardless of how the race ended.
+    if (origGpu === undefined) {
+      try { delete navigator.gpu; } catch { /* gone */ }
+    } else if (origGpu) {
+      navigator.gpu.requestAdapter = origGpu.requestAdapter;
+    }
+    sibling.remove(); host.remove();
+  }
+
+  return { initialBaseline, trail, adapterCalls, pageErr };
+});
+
+check('overlap: initial WebGL2 baseline left exactly one canvas and the sibling intact',
+  overlap.initialBaseline.canvases === 1 && overlap.initialBaseline.siblingAlive && overlap.initialBaseline.backend === 'webgl2',
+  JSON.stringify(overlap.initialBaseline));
+check('overlap: while A was stalled, host held exactly one canvas and the sibling survived',
+  overlap.trail.afterAStalled?.canvases === 1 && overlap.trail.afterAStalled?.siblingAlive && overlap.trail.afterAStalled?.firstChildTag === 'CANVAS',
+  JSON.stringify(overlap.trail.afterAStalled));
+check('overlap: B completed first — backend is webgl2, exactly one canvas is live',
+  overlap.trail.afterBComplete?.canvases === 1 && overlap.trail.afterBComplete?.backend === 'webgl2' && overlap.trail.afterBComplete?.siblingAlive,
+  JSON.stringify(overlap.trail.afterBComplete));
+check('overlap: A finishing stale left B\'s canvas intact (no orphan, no extra canvas)',
+  overlap.trail.afterAComplete?.canvases === 1 && overlap.trail.afterAComplete?.siblingAlive && overlap.trail.afterAComplete?.firstChildTag === 'CANVAS',
+  JSON.stringify(overlap.trail.afterAComplete));
+check('overlap: dispose removed the one owned canvas — host is empty',
+  overlap.trail.afterDispose?.canvases === 0 && overlap.trail.afterDispose?.siblingAlive,
+  JSON.stringify(overlap.trail.afterDispose));
+check('overlap: adapter stub was actually called (the WebGPU leg really ran)', overlap.adapterCalls >= 1, 'adapterCalls=' + overlap.adapterCalls);
+check('overlap: no errors raised during the staged race', overlap.pageErr === null, overlap.pageErr || '');
+check('overlap: no page errors', errors.length === 0, errors.join(' | '));
+
+// Dispose while A is stalled (if feasible). The losing build's continuation
+// lands inside dispose=true after the host is already torn down — it must
+// not strand a canvas in the host AND must not raise. On both old and new
+// code dispose() itself clears the live canvas before A's continuation
+// runs, so this is a regression guard rather than a fix discriminator, but
+// it pins the contract for the dispose-then-resolve order and surfaces any
+// later regression that re-introduces a leak into the WebGL2 fallback path.
+const disposeWhileStalled = await page.evaluate(async () => {
+  const { runtimeHost } = await import('./js/core/runtime-host.js');
+
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const sibling = document.createElement('div');
+  sibling.className = 'unrelated-sibling';
+  sibling.textContent = 'panel the caller mounted';
+  host.appendChild(sibling);
+
+  const GLSL = 'void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(1.0); }';
+  const WGSL = '@fragment fn main() {}';
+
+  const rh = await runtimeHost(host, {
+    prefer: 'webgl2', glslSrc: GLSL, canvasClass: 'owned-canvas', onLost: 'release',
+  });
+
+  let resolveGpu;
+  const adapterDeferred = new Promise((r) => { resolveGpu = r; });
+  let adapterCalls = 0;
+  const origGpu = navigator.gpu;
+  if (origGpu && typeof origGpu.requestAdapter === 'function') {
+    navigator.gpu.requestAdapter = () => { adapterCalls++; return adapterDeferred; };
+  } else {
+    Object.defineProperty(navigator, 'gpu', {
+      configurable: true,
+      value: {
+        requestAdapter: () => { adapterCalls++; return adapterDeferred; },
+        getPreferredCanvasFormat: () => 'bgra8unorm',
+      },
+    });
+  }
+
+  const trail = {};
+  let pageErr = null;
+  try {
+    const promiseA = rh.rebuild({ prefer: 'auto', wgslSrc: WGSL });
+    while (!adapterCalls) await new Promise((r) => setTimeout(r, 5));
+
+    // Dispose WHILE A is stalled — A's continuation lands in dispose=true.
+    rh.dispose();
+    trail.afterDisposeStalled = {
+      canvases: host.querySelectorAll('canvas').length,
+      siblingAlive: host.contains(sibling),
+    };
+
+    // Resolve the adapter promise. A's continuation must not strand a canvas.
+    resolveGpu(null);
+    await promiseA;
+    trail.afterAComplete = {
+      canvases: host.querySelectorAll('canvas').length,
+      siblingAlive: host.contains(sibling),
+    };
+  } catch (e) {
+    pageErr = String(e?.message ?? e);
+  } finally {
+    if (origGpu === undefined) {
+      try { delete navigator.gpu; } catch { /* gone */ }
+    } else if (origGpu) {
+      navigator.gpu.requestAdapter = origGpu.requestAdapter;
+    }
+    sibling.remove(); host.remove();
+  }
+
+  return { trail, pageErr };
+});
+
+check('dispose-while-stalled: dispose dropped canvases to zero with the sibling intact',
+  disposeWhileStalled.trail.afterDisposeStalled?.canvases === 0 && disposeWhileStalled.trail.afterDisposeStalled?.siblingAlive,
+  JSON.stringify(disposeWhileStalled.trail.afterDisposeStalled));
+check('dispose-while-stalled: A\'s later continuation did not strand a canvas',
+  disposeWhileStalled.trail.afterAComplete?.canvases === 0 && disposeWhileStalled.trail.afterAComplete?.siblingAlive,
+  JSON.stringify(disposeWhileStalled.trail.afterAComplete));
+check('dispose-while-stalled: no errors raised', disposeWhileStalled.pageErr === null, disposeWhileStalled.pageErr || '');
+check('dispose-while-stalled: no page errors', errors.length === 0, errors.join(' | '));
+
 await page.close();
 await browser.close();
 server.kill();

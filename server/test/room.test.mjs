@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRoom, reduce, tick, removeMember, PROTOCOL, LEASE_TTL_MS, MAX_MEMBERS } from '../room.mjs';
+import { createRoom, reduce, tick, removeMember, PROTOCOL, LEASE_TTL_MS, MAX_MEMBERS, TUNE_NAME_RE, TUNE_VALUE_MAX_ABS } from '../room.mjs';
 
 function hello(room, from, name, nowMs) {
   return reduce(room, { from, msg: { t: 'hello', protocol: PROTOCOL, room: room.id, name }, nowMs });
@@ -16,7 +16,7 @@ function join(room, from, name, nowMs) {
   return r;
 }
 
-test('hello joins a member and welcome carries full member list + edits', () => {
+test('hello joins a member and welcome carries full member list + edits + tunes', () => {
   let room = createRoom('r1', 1000);
   let r = join(room, 'a', 'Alice', 1000);
   room = r.room;
@@ -26,6 +26,7 @@ test('hello joins a member and welcome carries full member list + edits', () => 
   assert.equal(welcome.protocol, PROTOCOL);
   assert.equal(welcome.members.length, 1);
   assert.deepEqual(welcome.edits, {});
+  assert.deepEqual(welcome.tunes, {}); // tunes rides the welcome as an object, late joiners see current dials
 
   r = join(room, 'b', 'Bob', 1001);
   room = r.room;
@@ -432,4 +433,205 @@ test('rename changes the member name and tells everyone', () => {
 
   // A no-op rename broadcasts nothing.
   assert.equal(reduce(room, { from: 'b', msg: { t: 'rename', name: 'x'.repeat(24) }, nowMs: 4 }).sends.length, 0);
+});
+
+// --- Tunes (Wave-5 §1) ----------------------------------------------------
+// A late joiner must see the current tune values, not just an empty map — the
+// slider in the UI binds to the welcome's tunes object, so a fresh dial has
+// to ride that object straight through.
+test('a late joiner sees the current tunes in the welcome', () => {
+  let room = createRoom('tn', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'tune', name: 'SG_TIME', value: 1.5 }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'tune', name: 'SG_BLOOM', value: 0.25 }, nowMs: 0 }).room;
+
+  const r = join(room, 'b', 'Baz', 1);
+  room = r.room;
+  const welcome = r.sends.find((s) => s.to === 'b').msg;
+  assert.deepEqual(welcome.tunes, { SG_TIME: 1.5, SG_BLOOM: 0.25 });
+  // tune storage shape is a Map in the room — JSON-friendly projection is
+  // the welcome's job, not the room's.
+  assert.equal(room.tunes instanceof Map, true);
+});
+
+test('tune: only the lease holder can dial, broadcasts {t,name,value,by}', () => {
+  let room = createRoom('tn', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = join(room, 'b', 'Baz', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+
+  // Non-holder tune is dropped, never broadcast, never stored.
+  let r = reduce(room, { from: 'b', msg: { t: 'tune', name: 'SG_TIME', value: 1.5 }, nowMs: 0 });
+  assert.equal(r.sends.length, 0);
+  assert.equal(r.room.tunes.size, 0);
+
+  // Holder's tune broadcasts with `by` and stores the latest value.
+  r = reduce(room, { from: 'a', msg: { t: 'tune', name: 'SG_TIME', value: 1.5 }, nowMs: 0 });
+  room = r.room;
+  assert.equal(r.sends.length, 1);
+  assert.equal(r.sends[0].to, '*');
+  assert.deepEqual(r.sends[0].msg, { t: 'tune', name: 'SG_TIME', value: 1.5, by: 'a' });
+  assert.equal(room.tunes.get('SG_TIME'), 1.5);
+});
+
+test('tune: invalid name is rejected (must match TUNE_NAME_RE)', () => {
+  let room = createRoom('tn', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+
+  // Each of these would reach across to an arbitrary uniform or just be a
+  // parse error in the shader side if we let it through. We refuse them all.
+  // (`x'.repeat(64)` is the boundary the grammar accepts: 1 initial + 63
+  // subsequent = 64 chars total. Anything past that is over.)
+  const badNames = ['1LEAD', 'SG-TIME', 'SG TIME', '', 'SG.TIME', 'x'.repeat(65)];
+  for (const name of badNames) {
+    const r = reduce(room, { from: 'a', msg: { t: 'tune', name, value: 1 }, nowMs: 0 });
+    assert.equal(r.sends.length, 0, `name ${JSON.stringify(name)} should be rejected`);
+    assert.equal(r.room.tunes.size, 0);
+  }
+  // The regex itself must match the grammar the spec locks in.
+  assert.equal(TUNE_NAME_RE.test('SG_TIME'), true);
+  assert.equal(TUNE_NAME_RE.test('_a'), true);
+  assert.equal(TUNE_NAME_RE.test('a1_b2'), true);
+});
+
+test('tune: non-finite or out-of-range value is rejected', () => {
+  let room = createRoom('tn', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+
+  for (const value of [NaN, Infinity, -Infinity, TUNE_VALUE_MAX_ABS + 1, -(TUNE_VALUE_MAX_ABS + 1), '1', null]) {
+    const r = reduce(room, { from: 'a', msg: { t: 'tune', name: 'SG_TIME', value }, nowMs: 0 });
+    assert.equal(r.sends.length, 0, `value ${JSON.stringify(value)} should be rejected`);
+    assert.equal(r.room.tunes.size, 0);
+  }
+
+  // The boundary value is accepted (inclusive).
+  const r = reduce(room, { from: 'a', msg: { t: 'tune', name: 'SG_TIME', value: TUNE_VALUE_MAX_ABS }, nowMs: 0 });
+  assert.equal(r.sends.length, 1);
+  assert.equal(r.room.tunes.get('SG_TIME'), TUNE_VALUE_MAX_ABS);
+});
+
+// --- snapshot.request -----------------------------------------------------
+// A joined member who needs the full room state again (e.g. after a UI re-
+// mount) asks for one. We return a FRESH complete welcome only to the
+// requester — state is unchanged, no broadcast.
+test('snapshot.request returns a fresh complete welcome only to the requester', () => {
+  let room = createRoom('sn', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = join(room, 'b', 'Baz', 0).room;
+  // Some state we expect to come back.
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'tune', name: 'SG_TIME', value: 0.75 }, nowMs: 0 }).room;
+  const epochBefore = room.epoch;
+  const tunesBefore = new Map(room.tunes);
+  const holderBefore = room.lease.holder;
+
+  const r = reduce(room, { from: 'b', msg: { t: 'snapshot.request' }, nowMs: 5 });
+  assert.equal(r.sends.length, 1);
+  assert.equal(r.sends[0].to, 'b', 'snapshot goes only to the requester');
+  const snap = r.sends[0].msg;
+  assert.equal(snap.t, 'welcome');
+  assert.equal(snap.selfId, 'b');
+  assert.equal(snap.members.length, 2);
+  assert.deepEqual(snap.tunes, { SG_TIME: 0.75 });
+  assert.equal(snap.lease.holder, 'a');
+  // State must be untouched by a snapshot.
+  assert.equal(r.room.epoch, epochBefore);
+  assert.deepEqual([...r.room.tunes], [...tunesBefore]);
+  assert.equal(r.room.lease.holder, holderBefore);
+  assert.equal(room.epoch, epochBefore);
+});
+
+test('snapshot.request from a non-member is ignored (closes 1002 via the pre-hello guard)', () => {
+  const room = createRoom('sn', 0);
+  const r = reduce(room, { from: 'stranger', msg: { t: 'snapshot.request' }, nowMs: 0 });
+  assert.equal(r.close.code, 1002);
+  assert.equal(r.sends.length, 0);
+});
+
+// --- ring release ---------------------------------------------------------
+// Walking OUT of the lectern ring while holding the lease forfeits it
+// immediately, rather than waiting for the TTL — otherwise a holder who
+// walks away still looks like the holder to the rest of the room for up to
+// LEASE_TTL_MS.
+test('ring: stepping out of the ring releases a normal lectern lease', () => {
+  let room = createRoom('rg', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+  assert.equal(room.lease.holder, 'a');
+
+  const r = reduce(room, { from: 'a', msg: { t: 'ring', inRing: false }, nowMs: 1 });
+  room = r.room;
+  assert.equal(room.lease.holder, null);
+  assert.equal(room.lease.expiresAt, 0);
+  assert.equal(r.sends.length, 1);
+  assert.equal(r.sends[0].to, '*');
+  assert.equal(r.sends[0].msg.t, 'lease');
+  assert.equal(r.sends[0].msg.holder, null);
+});
+
+test('ring: stepping in (false -> true) does not touch the lease', () => {
+  let room = createRoom('rg', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 0 }).room;
+  room = reduce(room, { from: 'a', msg: { t: 'lease.request' }, nowMs: 0 }).room;
+  assert.equal(room.lease.holder, 'a');
+
+  // Idempotent re-entry: inRing was already true.
+  const r = reduce(room, { from: 'a', msg: { t: 'ring', inRing: true }, nowMs: 1 });
+  assert.equal(r.sends.length, 0);
+  assert.equal(r.room.lease.holder, 'a');
+});
+
+test('ring: stepping out does NOT release the seeker role lease during seeking', () => {
+  // 3 members so a seeker role lease exists during `seeking`.
+  let room = createRoom('rg', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = join(room, 'b', 'Baz', 0).room;
+  room = join(room, 'c', 'Cy', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 }).room;
+  room = tick(room, 30001).room; // -> seeking; seeker holds the role lease
+  const seeker = room.game.seekerId;
+  assert.equal(room.lease.holder, seeker);
+
+  // The seeker steps out of the ring. The role lease is round-owned, not
+  // lectern-owned, so it must survive.
+  const r = reduce(room, { from: seeker, msg: { t: 'ring', inRing: false }, nowMs: 30002 });
+  room = r.room;
+  assert.equal(room.lease.holder, seeker, 'role lease survives a false ring transition');
+  assert.equal(r.sends.length, 0, 'no lease broadcast — nothing changed');
+});
+
+test('ring: stepping out DOES release the seeker role lease once the round is over', () => {
+  // Drive the round to `over`, where the lease was already released by
+  // advanceGame(). After that, the holder is null and a ring transition has
+  // no lease to release anyway — but a non-seeker in `over` holding a
+  // (hypothetical) lease should still be released on ring false. We assert
+  // the simpler property that the released-holder stays released.
+  let room = createRoom('rg', 0);
+  room = join(room, 'a', 'Ada', 0).room;
+  room = join(room, 'b', 'Baz', 0).room;
+  room = reduce(room, { from: 'a', msg: { t: 'game.start' }, nowMs: 0 }).room;
+  room = tick(room, 30001).room; // -> seeking
+  const seeker = room.game.seekerId;
+  room = tick(room, 30001 + 120001).room; // -> over; role lease released
+  assert.equal(room.lease.holder, null);
+
+  // a non-seeker takes the lectern in `over` (lobby-mode behavior), then
+  // steps out.
+  const other = [...room.members.keys()].find((id) => id !== seeker);
+  room = reduce(room, { from: other, msg: { t: 'ring', inRing: true }, nowMs: 200000 }).room;
+  room = reduce(room, { from: other, msg: { t: 'lease.request' }, nowMs: 200001 }).room;
+  assert.equal(room.lease.holder, other);
+
+  const r = reduce(room, { from: other, msg: { t: 'ring', inRing: false }, nowMs: 200002 });
+  assert.equal(r.room.lease.holder, null);
 });

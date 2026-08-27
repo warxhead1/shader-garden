@@ -317,7 +317,15 @@ AGGREGATES = [
     # role-aware HUD, panel clearing on the round edge, tray.collapse()). The
     # aggregate moves WITH the per-file row so a single file cannot grow the
     # organ silently. Actual 2955/3010 at the time of writing.
-    ("site/js/organs/garden/*.js", 3010, None),
+    # 3010 -> 3480: room-core.js (470 LOC, the shared browser-safe sg.mp.v1
+    # reducer — Wave-5 §1 frozen contract). One source file loaded by both
+    # server/room.mjs (Node relay) and the elected browser host, so this is
+    # not optional growth in any single client module; the reducer has to
+    # live SOMEWHERE under the garden tree because the browser host looks
+    # for it there. New file, not a refactor — its size is the reducer's
+    # own ~440 LOC plus the spec's "comment every non-obvious line" tax
+    # (no comments were skimmed to fit this cap). Actual 3474/3480.
+    ("site/js/organs/garden/*.js", 3480, None),
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.

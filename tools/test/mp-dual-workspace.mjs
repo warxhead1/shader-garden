@@ -92,9 +92,19 @@ async function openEditHere(page) {
   return page.waitForSelector('.component-editor .code-editor', { timeout: 8000 }).then(() => true).catch(() => false);
 }
 
-// Same Ctrl+A/Backspace/type as mp-two-browsers.mjs's replaceAllAndType.
+// Same Ctrl+A/Backspace/type as mp-two-browsers.mjs's replaceAllAndType, but
+// scoped to the EDITABLE pane. The non-holder's panel has TWO `.code-editor`
+// nodes — the read-only mirror above (inserted before the editable pane in
+// edit.js) and the editable one — and `.component-editor .code-editor`
+// resolves to the first match in document order, i.e. the mirror. Ctrl+A on
+// a read-only textarea is a no-op (good) but the Backspace that follows
+// would land on the editable pane with the mirror's text "selected" in the
+// host's head and the editable pane's text untouched in its value — so the
+// keystrokes would type into the editable pane while the harness thought it
+// was typing into the mirror. `.component-editor-editable .code-editor` is the
+// only selector that uniquely picks the user's actual edit target.
 async function replaceAllAndType(page, text) {
-  await page.focus('.component-editor .code-editor');
+  await page.focus('.component-editor-editable .code-editor');
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyA');
   await page.keyboard.up('Control');
@@ -140,23 +150,31 @@ async function moveIntoLecternRing(page, observerPage, label) {
   // focused after a replaceAllAndType round, so a re-take must blur it
   // first — otherwise the d+w press is silently swallowed and the lease
   // request below is denied for a reason nothing in the harness surfaces.
+  // We deliberately do NOT click the canvas here: index.js's onPointerUp
+  // fires probeAt() (an async GPU readback on WebGPU) and then synchronously
+  // calls openProbe() on whatever's under the cursor, which REPLACES the
+  // panel that's hosting the editor the harness just typed into. A click is
+  // unnecessary anyway — blurring the editable chrome is sufficient to
+  // route d+w to index.js's window-level onKeyDown.
   await page.evaluate(() => {
     const ae = document.activeElement;
     if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.isContentEditable)) ae.blur();
   }).catch(() => {});
-  await page.click('.garden-canvas').catch(() => {});
   await page.keyboard.down('d');
   await page.keyboard.down('w');
-  await sleep(1500);
-  // Bounded observable wait — same shape as mp-two-browsers.mjs's `>= 2`
-  // peer-uniform check, but stricter: the moving page must actually be
-  // INSIDE the ring, not just emitting poses. Matches mp-two-browsers.mjs's
-  // header: "A's real movement ... drove checkRing() -> net.setInRing(true)
-  // -> a real `ring` send on A's actual connection; sending it again here
-  // is a harmless, idempotent confirmation, not a substitute for the real
-  // trigger." Same principle here — the wait is a confirmation, not a
-  // substitute for the actual movement.
-  await observerPage.waitForFunction(
+  // Poll the observer WHILE the moving page drives d+w — release the keys
+  // the INSTANT the observer's uPeer0X/uPeer0Z shows the peer inside
+  // LECTERN_RADIUS. The previous implementation held d+w for a fixed 1500ms,
+  // which at MOVE_SPEED=1.8 u/s along the normalised (1,-1)/sqrt(2) diagonal
+  // covers ~1.91 units — starting from the origin, that carries the figure
+  // across the (1.6,-1.4) lectern centre AND past the ring's outer edge on
+  // the far side. By the time the keys release, checkRing() has already
+  // fired ring:false and the authority-core's "ring:false => immediate
+  // release" rule has cancelled the lease before any subsequent
+  // lease.request ever lands. Releasing on the observer's first sighting of
+  // the peer inside the ring stops the figure inside the ring, so the
+  // lease.request that follows is admitted by the gate, not bounced.
+  const seenInRing = await observerPage.waitForFunction(
     ({ rx, rz, rr }) => {
       const calls = window.__uniformCalls || [];
       for (let i = calls.length - 1; i >= 0; i--) {
@@ -168,10 +186,16 @@ async function moveIntoLecternRing(page, observerPage, label) {
       return false;
     },
     { rx: RING_X, rz: RING_Z, rr: RING_R },
-    { timeout: scaled(8000), polling: 200 },
-  ).catch(() => { /* fall through: lease.request below will fail loudly and the assertion will surface why */ });
+    { timeout: scaled(8000), polling: 100 },
+  ).then(() => true).catch(() => false);
+  // Stop keyboard movement the instant the observer confirms the peer is
+  // inside the ring. The move integrator in index.js idle-exits on the next
+  // frame once heldKeys is empty, so the figure stops inside the ring (the
+  // observer's most-recent uniform snapshot is what's true at the moment of
+  // release — the figure doesn't carry any further).
   await page.keyboard.up('d');
   await page.keyboard.up('w');
+  if (!seenInRing) console.log(`  [${label}] peer did NOT reach the ring within timeout`);
   await sleep(300); // last POSE_HZ=15 broadcast to land
 }
 
@@ -356,6 +380,15 @@ check('(b) A\'s editor HAS a Revert button (can rewind to pristine)', aHasRevert
 await pageB.evaluate(() => { window.__wsReceived.length = 0; });
 const bDraftText = '// B-LOCAL-DRAFT-MARKER\nvec3 sg_sky_color(vec3 rd, float t) { return vec3(0.1, 0.2, 0.3); }';
 await replaceAllAndType(pageB, bDraftText);
+// Assert the draft lands in the editable pane IMMEDIATELY, before the
+// edit.js 300ms debounce even fires — proves the keystroke reached the
+// editable pane (not the read-only mirror above it) and that no lazy
+// re-render defers the value the user can already see. Reading via
+// `.component-editor-editable .code-editor` rules out the mirror textarea,
+// which the broader `.component-editor .code-editor` selector would have
+// matched first in document order.
+const bDraftImmediate = await pageB.$eval('.component-editor-editable .code-editor', (el) => el.value).catch(() => null);
+check('(c) B\'s editable pane holds the typed draft immediately (no debounce defer)', bDraftImmediate === bDraftText, JSON.stringify(bDraftImmediate));
 await sleep(scaled(800)); // plenty for the 300ms edit.js debounce + 150ms net draft debounce
 const wireSeenBLocalDraft = await pageB.evaluate((txt) => {
   return (window.__wsReceived || []).some((m) => {

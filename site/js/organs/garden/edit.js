@@ -85,7 +85,22 @@ const DEBOUNCE_MS = 300;
  */
 export async function mountComponentEditor({ component, initialBody, originalBody, initialMirrorBody, recompile, isHolder, isRoom, holderName, onLocalDraftChange, onCommit }) {
   let isHolderLocal = !!isHolder;
-  const wrap = el('div', 'component-editor' + (isHolderLocal ? '' : ' component-editor-nonholder'));
+  // The wrap's class list is the single source of truth for whether the
+  // mirror pane is CSS-visible: main.css's `.component-editor.component-
+  // editor-holder .component-editor-mirror { display: none }` rule is what
+  // hides it on a holder, and the constructor had a quiet gap — it only
+  // stamped `component-editor-nonholder` on non-holders, leaving initial
+  // holders with just `.component-editor` (and therefore a *visible* mirror
+  // pane in any room, since the mirror DOM is built up front for everyone
+  // in a room). Without `component-editor-holder` on construction, a
+  // holder's first paint flashed the dual-workspace layout until the
+  // first setAuthority() re-stamped the class. Solo mounts never build the
+  // mirror DOM (isRoom === false), so they get neither class.
+  const wrap = el('div', 'component-editor' + (
+    isHolderLocal
+      ? (isRoom ? ' component-editor-holder' : '')
+      : ' component-editor-nonholder'
+  ));
   const statusRow = el('div', 'component-editor-status');
   const statusPill = el('span', 'pill', isHolderLocal ? 'unchanged' : 'local');
   const revertBtn = el('button', 'btn btn-small btn-ghost', 'Revert');
@@ -146,7 +161,11 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     // Mirror is the FIRST visible pane for non-holders; for holders the
     // wrap is hidden via CSS until a lease flip. The DOM ordering stays
     // "mirror above editable" either way, so a later un-hide is just
-    // a class swap.
+    // a class swap. Initial holders also get `mirrorWrap.hidden = true`
+    // for symmetry with the setAuthority() holder branch below — a later
+    // lease loss does `mirrorWrap.hidden = false` and removes the holder
+    // class in one step, never a stale un-hide that races the class swap.
+    if (isHolderLocal) mirrorWrap.hidden = true;
     wrap.insertBefore(mirrorWrap, editableWrap);
   }
 

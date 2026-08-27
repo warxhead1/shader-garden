@@ -102,6 +102,79 @@ async function replaceAllAndType(page, text) {
   await page.keyboard.type(text, { delay: 2 });
 }
 
+// index.js's checkRing() drives the `ring` wire-send off charX/charZ vs
+// SG_LECTERN_XZ, and room-core.js's `ring` handler releases the lease the
+// instant the holder steps OUT. So a lease.request from a page that has
+// never moved (or has moved away) is denied — the lease is gated on
+// member.inRing AND the "ring:false => immediate release" rule applies
+// before the request even lands. Same trick mp-two-browsers.mjs uses
+// (lines 416-435): press d+w together for 1500ms (diagonal at MOVE_SPEED
+// 1.8 u/s into [1.6,-1.4] inside LECTERN_RADIUS=0.9), then wait on the
+// other page's uPeer0X/uPeer0Z uniforms — the OBSERVABLE proof that the
+// moving page actually reached the ring, not a guessed `ring:true`
+// injection that would sidestep the very invariant the lease gates on.
+const RING_X = 1.6, RING_Z = -1.4, RING_R = 0.9;
+async function isPeerInRing(observerPage) {
+  return observerPage.evaluate(({ rx, rz, rr }) => {
+    const calls = window.__uniformCalls || [];
+    for (let i = calls.length - 1; i >= 0; i--) {
+      const x = calls[i].uPeer0X, z = calls[i].uPeer0Z;
+      if (typeof x === 'number' && typeof z === 'number') {
+        return Math.hypot(x - rx, z - rz) < rr;
+      }
+    }
+    return false;
+  }, { rx: RING_X, rz: RING_Z, rr: RING_R });
+}
+async function moveIntoLecternRing(page, observerPage, label) {
+  // Idempotent: if the moving page is already standing in the ring (e.g.
+  // A retakes later without having stepped out), skip the movement — holding
+  // d+w from inside the ring would carry A OUT past LECTERN_RADIUS and
+  // immediately trigger the authority-core's `ring:false => lease release`.
+  if (await isPeerInRing(observerPage)) {
+    console.log(`  [${label}] already in ring, no movement`);
+    return;
+  }
+  // index.js's onKeyDown ignores keys while focus is on a textarea / content-
+  // editable (inEditableChrome guard). The holder editor's textarea is
+  // focused after a replaceAllAndType round, so a re-take must blur it
+  // first — otherwise the d+w press is silently swallowed and the lease
+  // request below is denied for a reason nothing in the harness surfaces.
+  await page.evaluate(() => {
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.isContentEditable)) ae.blur();
+  }).catch(() => {});
+  await page.click('.garden-canvas').catch(() => {});
+  await page.keyboard.down('d');
+  await page.keyboard.down('w');
+  await sleep(1500);
+  // Bounded observable wait — same shape as mp-two-browsers.mjs's `>= 2`
+  // peer-uniform check, but stricter: the moving page must actually be
+  // INSIDE the ring, not just emitting poses. Matches mp-two-browsers.mjs's
+  // header: "A's real movement ... drove checkRing() -> net.setInRing(true)
+  // -> a real `ring` send on A's actual connection; sending it again here
+  // is a harmless, idempotent confirmation, not a substitute for the real
+  // trigger." Same principle here — the wait is a confirmation, not a
+  // substitute for the actual movement.
+  await observerPage.waitForFunction(
+    ({ rx, rz, rr }) => {
+      const calls = window.__uniformCalls || [];
+      for (let i = calls.length - 1; i >= 0; i--) {
+        const x = calls[i].uPeer0X, z = calls[i].uPeer0Z;
+        if (typeof x === 'number' && typeof z === 'number') {
+          return Math.hypot(x - rx, z - rz) < rr;
+        }
+      }
+      return false;
+    },
+    { rx: RING_X, rz: RING_Z, rr: RING_R },
+    { timeout: scaled(8000), polling: 200 },
+  ).catch(() => { /* fall through: lease.request below will fail loudly and the assertion will surface why */ });
+  await page.keyboard.up('d');
+  await page.keyboard.up('w');
+  await sleep(300); // last POSE_HZ=15 broadcast to land
+}
+
 // GL2Runtime.setUniforms spy on BOTH backends — multi-player rooms can
 // land on either (see mp-two-browsers.mjs's armUniformSpy header note).
 async function armUniformSpy(page) {
@@ -206,8 +279,15 @@ const bWelcome = await waitForNextOnPage(pageB, 'welcome', -1);
 const bSelfId = bWelcome && bWelcome.msg.selfId;
 check('(setup) A and B are distinct members', aSelfId && bSelfId && aSelfId !== bSelfId, `A=${aSelfId} B=${bSelfId}`);
 
-// A is the only member on arrival; give it the lease over its own real socket.
+// A is the only member on arrival; drive A into the lectern ring FIRST so
+// index.js's checkRing() emits `ring:true` from A's actual charX/charZ, and
+// room-core.js's lease.request gate (`if (expired && member.inRing)`) is
+// satisfied from a real ring-membership transition — not an injected
+// `ring:true` short-circuit. The observable proof is B's uPeer0X/uPeer0Z
+// (the moving page's pose broadcast to its peer) settling inside
+// LECTERN_RADIUS=0.9 of SG_LECTERN_XZ.
 let aIdx = aWelcome ? aWelcome.index : -1;
+await moveIntoLecternRing(pageA, pageB, 'A-takes-lease');
 await sendOnLiveSocket(pageA, { t: 'lease.request' });
 const aLease = await waitForNextOnPage(pageA, 'lease', aIdx);
 aIdx = aLease ? aLease.index : aIdx;
@@ -291,8 +371,15 @@ check('(c) B\'s local draft NEVER reached the wire (no draft / commit / anycast)
 
 // Local draft preserved across panel close/reopen: destroy the panel by
 // navigating to another component, then come back. The editable pane MUST
-// still hold the same body the user typed.
-await clickTrayItem(pageB, components[0].name); // swap to a different component to force a panel close
+// still hold the same body the user typed. components[0] is `sky` (sky is
+// the first @component declared in scene.glsl, and parseScene assigns ids
+// by file order), so picking it would just re-open the SAME panel — the
+// editable pane would never be torn down and the "preserved" body would
+// be tautological. Pick the first component with an id that differs from
+// sky's, guaranteed to be a different editor mount.
+const detourComponent = components.find((c) => c.id !== 'sky');
+if (!detourComponent) { console.log('FAIL setup: scene.glsl has no non-sky @component for the close/reopen detour'); process.exit(1); }
+await clickTrayItem(pageB, detourComponent.name); // swap to a different component to force a panel close
 await sleep(200);
 await clickTrayItem(pageB, skyComponent.name); // reopen the same one
 await sleep(200);
@@ -302,9 +389,13 @@ check('(c) B\'s local draft is preserved across panel close+reopen', bLocalAfter
 
 // Now release A's lease, take it on B (over the wire), and verify the
 // SAME text becomes the editable body on B's editor — without remount.
+// B's editable textarea is focused from the typing round above — blur it
+// so the movement keys reach index.js's window-level onKeyDown (it gates
+// on inEditableChrome(activeElement) and would otherwise swallow d+w).
 const aReleaseIdx = aIdx;
 await sendOnLiveSocket(pageA, { t: 'lease.release' });
 await sleep(200);
+await moveIntoLecternRing(pageB, pageA, 'B-takes-lease');
 await sendOnLiveSocket(pageB, { t: 'lease.request' });
 const bTakesLease = await waitForNextOnPage(pageB, 'lease', bIdx, scaled(10000));
 bIdx = bTakesLease ? bTakesLease.index : bIdx;
@@ -418,6 +509,11 @@ const editableNodeBefore = await pageB.evaluate(() => {
 });
 await sendOnLiveSocket(pageB, { t: 'lease.release' });
 await sleep(200);
+// Re-take: A is still inside the ring from the original (setup) move — the
+// helper's isPeerInRing() guard makes this a no-op movement when so, which
+// is exactly the "keep A in-ring" half of the brief. If anything had stepped
+// A out (it does not here), the helper would re-issue d+w and re-enter.
+await moveIntoLecternRing(pageA, pageB, 'A-retakes-lease');
 await sendOnLiveSocket(pageA, { t: 'lease.request' });
 const aTakesBack = await waitForNextOnPage(pageA, 'lease', aIdx, scaled(10000));
 aIdx = aTakesBack ? aTakesBack.index : aIdx;

@@ -324,7 +324,16 @@ AGGREGATES = [
     # openEditors/mirrorBodies/localDrafts triple that keeps open editors in
     # lockstep with the world across lease flips and phase edges. Actual
     # 3265/3360 at the time of writing.
-    ("site/js/organs/garden/*.js", 3360, None),
+    # 3360 -> 3380: dynamic editor authority. An editor mounted as a
+    # non-holder and later promoted must gain a FUNCTIONAL Revert and Commit
+    # without a remount (a remount would discard the user's local draft), and
+    # its recompile callback must read authority at callback time rather than
+    # from the mount-time snapshot that froze dryRun and draft transmission.
+    # +6 real production lines across edit.js (unconditional listener
+    # binding) and index.js (callback-time `!room || lastLease.isSelf`,
+    # onCommit for every room editor), plus headroom so the next change is
+    # not paid for by deleting the rationale comments. Actual 3366/3380.
+    ("site/js/organs/garden/*.js", 3380, None),
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.
@@ -348,7 +357,12 @@ AGGREGATES = [
     # is just a brace, but the JSDoc + comment trail explaining WHY it
     # must live outside the room gate grew the file by another 17 lines.
     # Actual 1304/1310 at the time of writing.
-    ("site/js/organs/garden/index.js", 1310, None),
+    # 1310 -> 1320: the index.js half of dynamic editor authority (see the
+    # organ aggregate note above) — the callback-time `!room ||
+    # lastLease.isSelf` read that replaces the frozen mount-time isHolder
+    # snapshot, and onCommit passed for every room editor so a promotion
+    # has a callback without a remount. Actual 1313/1320.
+    ("site/js/organs/garden/index.js", 1320, None),
     # net.js: connectRoom() + the frozen module surface in spec §8.1
     # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
     ("site/js/organs/garden/net.js", 480, None),

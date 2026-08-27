@@ -245,8 +245,21 @@ async function clearEditable(page, label = '') {
 // other page's uPeer0X/uPeer0Z uniforms — the OBSERVABLE proof that the
 // moving page actually reached the ring, not a guessed `ring:true`
 // injection that would sidestep the very invariant the lease gates on.
-const RING_X = 1.6, RING_Z = -1.4, RING_R = 0.9;
-async function isPeerInRing(observerPage) {
+// LECTERN_RADIUS=0.9 is the OUTER boundary the production gate uses; that is
+// what every assertion below still checks. RING_INNER_R is a harness-only
+// stopping target: the observer only learns the moving figure's position via
+// POSE_HZ=15 pose broadcasts, so by the time the observer sees the peer at
+// radius r the real figure has already travelled a frame or three further
+// along the (1,-1)/sqrt(2) diagonal at MOVE_SPEED=1.8 u/s. Stopping on the
+// first sighting inside 0.9 therefore stops the figure somewhere in
+// [0, 0.9+lag] — sometimes OUTSIDE, which fires checkRing()'s ring:false and
+// the authority-core's "ring:false => immediate release" before the
+// lease.request lands. Stopping on 0.35 instead leaves 0.55 units of slack
+// (~300ms of broadcast lag at 1.8 u/s) between where the figure actually
+// halts and the boundary, so the post-keyup confirmation below is a real
+// check rather than a coin flip.
+const RING_X = 1.6, RING_Z = -1.4, RING_R = 0.9, RING_INNER_R = 0.35;
+async function isPeerInRing(observerPage, radius = RING_R) {
   return observerPage.evaluate(({ rx, rz, rr }) => {
     const calls = window.__uniformCalls || [];
     for (let i = calls.length - 1; i >= 0; i--) {
@@ -256,15 +269,19 @@ async function isPeerInRing(observerPage) {
       }
     }
     return false;
-  }, { rx: RING_X, rz: RING_Z, rr: RING_R });
+  }, { rx: RING_X, rz: RING_Z, rr: radius });
 }
 async function moveIntoLecternRing(page, observerPage, label) {
-  // Idempotent: if the moving page is already standing in the ring (e.g.
-  // A retakes later without having stepped out), skip the movement — holding
-  // d+w from inside the ring would carry A OUT past LECTERN_RADIUS and
+  // Idempotent: if the moving page is already standing WELL inside the ring
+  // (inner radius, not the outer boundary), skip the movement — holding d+w
+  // from inside the ring would carry the figure OUT past LECTERN_RADIUS and
   // immediately trigger the authority-core's `ring:false => lease release`.
-  if (await isPeerInRing(observerPage)) {
-    console.log(`  [${label}] already in ring, no movement`);
+  // Using the inner radius for the early-return keeps the skip honest: a
+  // figure parked at 0.85 is nominally "in the ring" but one lagged pose
+  // sample away from being outside it, so it gets re-driven to the centre
+  // rather than trusted.
+  if (await isPeerInRing(observerPage, RING_INNER_R)) {
+    console.log(`  [${label}] already deep in ring, no movement`);
     return;
   }
   // index.js's onKeyDown ignores keys while focus is on a textarea / content-
@@ -288,16 +305,14 @@ async function moveIntoLecternRing(page, observerPage, label) {
   await page.keyboard.down('w');
   // Poll the observer WHILE the moving page drives d+w — release the keys
   // the INSTANT the observer's uPeer0X/uPeer0Z shows the peer inside
-  // LECTERN_RADIUS. The previous implementation held d+w for a fixed 1500ms,
+  // RING_INNER_R. The original implementation held d+w for a fixed 1500ms,
   // which at MOVE_SPEED=1.8 u/s along the normalised (1,-1)/sqrt(2) diagonal
   // covers ~1.91 units — starting from the origin, that carries the figure
   // across the (1.6,-1.4) lectern centre AND past the ring's outer edge on
-  // the far side. By the time the keys release, checkRing() has already
-  // fired ring:false and the authority-core's "ring:false => immediate
-  // release" rule has cancelled the lease before any subsequent
-  // lease.request ever lands. Releasing on the observer's first sighting of
-  // the peer inside the ring stops the figure inside the ring, so the
-  // lease.request that follows is admitted by the gate, not bounced.
+  // the far side, so checkRing() had already fired ring:false before any
+  // lease.request landed. Stopping on the inner radius stops the figure near
+  // the lectern centre, so the lease.request that follows is admitted by the
+  // gate, not bounced.
   const seenInRing = await observerPage.waitForFunction(
     ({ rx, rz, rr }) => {
       const calls = window.__uniformCalls || [];
@@ -309,18 +324,38 @@ async function moveIntoLecternRing(page, observerPage, label) {
       }
       return false;
     },
-    { rx: RING_X, rz: RING_Z, rr: RING_R },
+    { rx: RING_X, rz: RING_Z, rr: RING_INNER_R },
     { timeout: scaled(8000), polling: 100 },
   ).then(() => true).catch(() => false);
-  // Stop keyboard movement the instant the observer confirms the peer is
-  // inside the ring. The move integrator in index.js idle-exits on the next
-  // frame once heldKeys is empty, so the figure stops inside the ring (the
-  // observer's most-recent uniform snapshot is what's true at the moment of
-  // release — the figure doesn't carry any further).
+  // Stop keyboard movement IMMEDIATELY — before any logging or awaiting on
+  // the observer — so nothing between the sighting and the keyup lets the
+  // figure keep integrating toward the far edge. index.js's move integrator
+  // idle-exits on the next frame once heldKeys is empty.
   await page.keyboard.up('d');
   await page.keyboard.up('w');
-  if (!seenInRing) console.log(`  [${label}] peer did NOT reach the ring within timeout`);
-  await sleep(300); // last POSE_HZ=15 broadcast to land
+  if (!seenInRing) console.log(`  [${label}] peer did NOT reach the inner ring within timeout`);
+  // Confirm where the figure actually CAME TO REST, not where it was when we
+  // decided to stop: take the observer's uniform-call watermark now (post
+  // keyup) and require a LATER pose sample — i.e. one broadcast after the
+  // keys were released — to still be inside the production LECTERN_RADIUS.
+  // Without this the harness would proceed on a pre-keyup sighting and a
+  // lease.request could land after checkRing() had already sent ring:false.
+  const watermark = await observerPage.evaluate(() => (window.__uniformCalls || []).length);
+  const restingInRing = await observerPage.waitForFunction(
+    ({ rx, rz, rr, from }) => {
+      const calls = window.__uniformCalls || [];
+      for (let i = calls.length - 1; i >= from; i--) {
+        const x = calls[i].uPeer0X, z = calls[i].uPeer0Z;
+        if (typeof x === 'number' && typeof z === 'number') {
+          return Math.hypot(x - rx, z - rz) < rr;
+        }
+      }
+      return false;
+    },
+    { rx: RING_X, rz: RING_Z, rr: RING_R, from: watermark },
+    { timeout: scaled(5000), polling: 50 },
+  ).then(() => true).catch(() => false);
+  check(`(ring) ${label}: peer rests inside LECTERN_RADIUS after keyup`, restingInRing);
 }
 
 // GL2Runtime.setUniforms spy on BOTH backends — multi-player rooms can
@@ -388,6 +423,22 @@ async function waitForNextOnPage(page, type, afterIndex, timeoutMs = scaled(8000
     await sleep(50);
   }
   return null;
+}
+
+// A `lease.release` makes the relay broadcast a `lease` message with
+// holder:null to EVERY member — and that broadcast has the SAME `t` as a
+// grant. So a `waitForNextOnPage(page, 'lease', idx)` issued after a
+// release-then-request sequence can satisfy itself on the RELEASE and
+// return before the grant has landed, making the following
+// `msg.holder === selfId` assertion read null and fail (or, on a slower
+// poll, race green for the wrong reason). Consume the null-holder
+// broadcast explicitly on BOTH pages that see it and advance their cursors
+// past it, so the next `lease` wait can only be satisfied by the grant.
+async function consumeLeaseRelease(page, afterIndex, label) {
+  const rel = await waitForNextOnPage(page, 'lease', afterIndex, scaled(10000));
+  check(`(lease) ${label} received the null-holder release broadcast`,
+    !!rel && rel.msg.holder == null, JSON.stringify(rel));
+  return rel ? rel.index : afterIndex;
 }
 
 // Reads what the runtime was LAST told for a uniform. uSpongeOn and
@@ -502,7 +553,13 @@ check('(b) A\'s editor HAS a Revert button (can rewind to pristine)', aHasRevert
 
 // First, B types a unique local draft. We watch what the wire sees; the
 // local draft must NEVER appear in any draft/commit/anycast message.
+// Clearing __wsReceived renumbers the log from zero, so bIdx — an index
+// into the OLD log — is stale the instant the array is truncated. Left
+// stale it points past the front of the fresh log and every
+// waitForNextOnPage(pageB, …) below would silently skip the messages it
+// was supposed to observe. Reset the cursor with the buffer, always.
 await pageB.evaluate(() => { window.__wsReceived.length = 0; });
+bIdx = -1;
 const bDraftText = '// B-LOCAL-DRAFT-MARKER\nvec3 sg_sky_color(vec3 rd, float t) { return vec3(0.1, 0.2, 0.3); }';
 await replaceAllAndType(pageB, bDraftText, 'B-draft');
 // Assert the draft lands in the editable pane IMMEDIATELY, before the
@@ -559,7 +616,13 @@ const aReleaseIdx = aIdx;
 // green on a freshly remounted pane.
 const bEditableNodeBeforeFlip = await pageB.$(EDITABLE);
 await sendOnLiveSocket(pageA, { t: 'lease.release' });
-await sleep(200);
+// Drain the null-holder broadcast on BOTH pages before asking for the
+// grant, so the `lease` wait after B's request cannot be satisfied by
+// A's release. Without this, bTakesLease could return the release
+// message (holder:null) and the holder assertion below would fail on a
+// timing artifact rather than on real behaviour.
+aIdx = await consumeLeaseRelease(pageA, aReleaseIdx, 'A (releaser)');
+bIdx = await consumeLeaseRelease(pageB, bIdx, 'B (peer)');
 await moveIntoLecternRing(pageB, pageA, 'B-takes-lease');
 await sendOnLiveSocket(pageB, { t: 'lease.request' });
 const bTakesLease = await waitForNextOnPage(pageB, 'lease', bIdx, scaled(10000));
@@ -583,6 +646,33 @@ check('(c) B\'s local draft becomes the editable body on the lease flip (preserv
 // handleRemoteDraft / handleRemoteCommit still have a target).
 const bHasCommitNow = !!(await pageB.$('.component-editor .btn-primary'));
 check('(c) B\'s editor now HAS a Commit button (promoted to holder)', bHasCommitNow);
+// Promotion must also restore Revert, and both buttons must be FUNCTIONAL
+// — index.js hands every room editor an onCommit up front and edit.js binds
+// both listeners at mount regardless of initial authority, precisely so a
+// promotion-without-remount does not hand back inert chrome. Clicking
+// Revert is the observable proof: an unbound button leaves the pane at B's
+// draft, a bound one rewinds it to the pristine component source.
+const bRevertNow = !!(await pageB.$('.component-editor .btn-ghost'));
+check('(c) B\'s editor now HAS a Revert button (promoted to holder)', bRevertNow);
+if (bRevertNow) {
+  await pageB.click('.component-editor .btn-ghost');
+  await sleep(scaled(400));
+  const bAfterRevert = await readEditableBody(pageB);
+  // Compared with a trailing-newline tolerance: CM's doc model normalises a
+  // final empty line, and that detail is not what this assertion is about —
+  // the claim is "the pane content was replaced by the pristine source",
+  // which a still-present draft marker would fail outright.
+  const revertedToPristine = typeof bAfterRevert === 'string'
+    && bAfterRevert.replace(/\n+$/, '') === skyComponent.source.replace(/\n+$/, '');
+  check('(c) B\'s promoted Revert is functional (rewinds to pristine, listener was bound at mount)',
+    revertedToPristine, JSON.stringify(bAfterRevert));
+  // Put B's draft back so the rest of the run continues from the same body
+  // the earlier sections established.
+  await replaceAllAndType(pageB, bDraftText, 'B-restore-after-revert');
+  await sleep(scaled(800));
+  const bRestored = await readEditableBody(pageB);
+  check('(c) B\'s draft restored after the Revert probe', bRestored === bDraftText, JSON.stringify(bRestored));
+}
 const bMirrorNowVisible = await pageB.$eval('.component-editor-mirror', (el) => {
   const cs = getComputedStyle(el);
   return cs.display !== 'none' && el.offsetParent !== null;
@@ -603,6 +693,7 @@ check('(c) B\'s editor class flipped from nonholder to holder', Array.isArray(bC
 const bPrepareBefore = await pageB.evaluate(() => window.__prepareCalls);
 const BROKEN = 'this is not valid glsl at all --- vec3 sg_sky_color(vec3 rd, float t) { return';
 await pageB.evaluate(() => { window.__wsReceived.length = 0; });
+bIdx = -1; // same rule as (c): the cursor is an index into the log we just truncated
 // Clear + retype through the real keyboard. The previous programmatic clear
 // (`el.value = ''` + a synthetic 'input' on `.component-editor-editable
 // .code-editor`) is a no-op under CodeMirror: that node is CM's wrapper
@@ -697,7 +788,11 @@ check('(d) B\'s editor recovers cleanly on a passing re-type (pill returns to ok
 // old check and cannot slip past this one.
 const editableNodeBefore = await pageB.$(EDITABLE);
 await sendOnLiveSocket(pageB, { t: 'lease.release' });
-await sleep(200);
+// Same drain as (c), mirrored: B is the releaser this time, A is the peer.
+// Advancing both cursors past the null-holder broadcast is what makes the
+// `aTakesBack` wait below unambiguously the GRANT.
+bIdx = await consumeLeaseRelease(pageB, bIdx, 'B (releaser)');
+aIdx = await consumeLeaseRelease(pageA, aIdx, 'A (peer)');
 // Re-take: A is still inside the ring from the original (setup) move — the
 // helper's isPeerInRing() guard makes this a no-op movement when so, which
 // is exactly the "keep A in-ring" half of the brief. If anything had stepped

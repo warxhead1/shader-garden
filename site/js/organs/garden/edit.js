@@ -63,9 +63,11 @@ const DEBOUNCE_MS = 300;
  *   onLocalDraftChange?: (body: string) => void,  // every keystroke on the local draft,
  *                               // so index.js's localDrafts map stays in sync.
  *   onCommit?: (body: string) => Promise<{ok: boolean, reason?: string}>,
- *     // MP §6.2: present only for the lease holder in a room — renders a
- *     // "Commit" button that validates locally (via `recompile`) before
- *     // ever sending.
+ *     // MP §6.2: passed for EVERY room editor (never for solo). The
+ *     // "Commit" button is only *rendered* while this editor currently
+ *     // holds the lease, but the callback must be in hand up front so a
+ *     // promotion via setAuthority() yields a working button without a
+ *     // remount. Validates locally (via `recompile`) before ever sending.
  * }}
  * @returns {Promise<{
  *   el: HTMLElement,
@@ -114,14 +116,15 @@ export async function mountComponentEditor({ component, initialBody, originalBod
   const backendNote = el('span', 'muted component-editor-note',
     isHolderLocal ? 'editing runs on WebGL2' : 'local draft — compiles locally, never sent');
   statusRow.append(statusPill, backendNote);
+  // Revert + Commit are holder-only CHROME, but their listeners bind
+  // unconditionally below: setAuthority() re-appends these exact nodes on a
+  // promotion (no remount), and a node that never got a listener would come
+  // back inert. Non-holders still cannot Revert away the local sandbox they
+  // are shaping, or Commit over the holder — neither button is in the DOM
+  // for them (see setAuthority).
   if (isHolderLocal) {
     statusRow.append(revertBtn);
     if (onCommit) statusRow.append(commitBtn);
-  } else {
-    // Non-holders get NO Revert and NO Commit — Revert would discard the
-    // local sandbox the user is intentionally shaping, and a Commit would
-    // conflict with the holder. Only the editable pane's own diagnostic pill
-    // surfaces the local-compile state.
   }
 
   // --- Editable pane (always present) — drives recompile/onLocalDraftChange.
@@ -214,25 +217,22 @@ export async function mountComponentEditor({ component, initialBody, originalBod
     debounce = setTimeout(() => runRecompile(body), DEBOUNCE_MS);
   }
 
-  // Holder-only Revert: rewinds the editable pane to the pristine source
-  // and forces an immediate (no-debounce) recompile. Non-holders have no
-  // Revert — the local draft IS the user's work in progress; an accidental
-  // click would lose it without a second confirmation surface.
-  if (isHolderLocal) {
-    revertBtn.addEventListener('click', () => {
-      clearTimeout(debounce);
-      adapter.setValue(originalBody);
-      runRecompile(originalBody); // immediate — Revert shouldn't wait out the debounce
-    });
-  }
+  // Revert rewinds the editable pane to the pristine source and forces an
+  // immediate (no-debounce) recompile. Bound unconditionally — see the
+  // chrome note above.
+  revertBtn.addEventListener('click', () => {
+    clearTimeout(debounce);
+    adapter.setValue(originalBody);
+    runRecompile(originalBody); // immediate — Revert shouldn't wait out the debounce
+  });
 
   // §6.2 step 1: the holder validates locally (recompile(), which already
   // ran on every debounced keystroke above) before EVER sending. A body
-  // that never got a passing recompile can't be committed — commitBtn only
-  // exists when onCommit was passed (index.js only does that for the
-  // in-room holder), and lastGoodBody only advances on res.ok above, so a
-  // currently-broken buffer has nothing eligible to send.
-  if (isHolderLocal && onCommit) {
+  // that never got a passing recompile can't be committed — lastGoodBody
+  // only advances on res.ok above, so a currently-broken buffer has nothing
+  // eligible to send. Bound whenever a callback exists at all (index.js
+  // passes one for every room editor) — see the chrome note above.
+  if (onCommit) {
     commitBtn.addEventListener('click', async () => {
       if (destroyed) return;
       commitBtn.disabled = true;

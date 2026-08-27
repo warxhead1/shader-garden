@@ -666,7 +666,7 @@ export async function mount(ctx) {
           // or the pristine source as the absolute fallback.
           initialMirrorBody: mirrorBodies.get(component.id) ?? component.source,
           // Same recompile path for everyone — recompileWithBody is
-          // transactional (trial build; only the holder's success path
+          // transactional (trial build; only an authoritative success path
           // commits into editedBodies), so a non-holder's local sandbox
           // runs as a trial build that renders locally to give them
           // their own diagnostics, never touches editedBodies, and is
@@ -675,14 +675,19 @@ export async function mount(ctx) {
           // local compile — their draft is a local sandbox, not a claim
           // on the world.
           recompile: (body) => {
-            const res = recompileWithBody(component, body, { dryRun: !isHolder });
+            // Authority is read HERE, at callback time — not from the
+            // mount-time `isHolder` snapshot, which froze both dryRun and
+            // draft transmission to whatever the lease was when the panel
+            // opened, so a promoted editor never started transmitting.
+            const authoritative = !room || lastLease.isSelf;
+            const res = recompileWithBody(component, body, { dryRun: !authoritative });
             variantChoices.delete(component.id); // hand-edited — no named stage describes this body anymore
             onSourceChanged();
             // Only the holder broadcasts their draft. A non-holder's
             // local sandbox is local — §5.2 verbatim: "never transmitted
             // while non-holder", which is exactly why a non-holder's
             // recompile runs but their body never enters the net layer.
-            if (room && net && res.ok && isHolder) net.sendDraft(component.id, body);
+            if (room && net && res.ok && authoritative) net.sendDraft(component.id, body);
             return res;
           },
           // Keeps localDrafts in sync with the editable pane for EVERY mount,
@@ -699,7 +704,11 @@ export async function mount(ctx) {
           },
           // §6.2 step 1: local validation via prepareShader() BEFORE ever
           // sending — a body that fails never leaves this machine.
-          onCommit: room && isHolder ? async (body) => {
+          // Passed for EVERY room editor, not just one mounted as holder: a
+          // later promotion can't acquire a callback without a remount, and
+          // a remount would discard the local draft. Safe because edit.js
+          // only shows Commit while current authority is holder.
+          onCommit: room ? async (body) => {
             if (!net) return { ok: false, reason: 'no relay' };
             return net.commit(component.id, body);
           } : undefined,

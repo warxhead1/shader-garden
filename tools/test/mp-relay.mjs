@@ -123,6 +123,39 @@ async function connectAt(port, path, room, name) {
   return client;
 }
 
+// Signal-mode equivalent of connectClient: greets with sg.signal.v1 and
+// captures the relay's signal.welcome so subsequent tests can pull selfId,
+// hostId, and the existing peers list without re-parsing messages.
+const SIGNAL_PROTOCOL = 'sg.signal.v1';
+async function connectSignalClient(port, room, name) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/room/${room}`);
+  await waitForEvent(ws, 'open', 5000, `${name} signal socket open`);
+  const client = wrapClient(ws);
+  ws.send(JSON.stringify({ t: 'hello', protocol: SIGNAL_PROTOCOL, room, name }));
+  const welcome = await client.nextMatching((m) => m.t === 'signal.welcome', 5000, `${name} signal.welcome`);
+  client.selfId = welcome.selfId;
+  client.hostId = welcome.hostId;
+  client.peers = welcome.peers;
+  return client;
+}
+
+// /healthz is the only way to peek at internal Map sizes from outside the
+// relay process — keep this helper tiny and rely on the same relay the rest
+// of the suite talks to (no extra port).
+function fetchHealthz(port) {
+  return withDeadline(() => new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/healthz' }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(2000, () => req.destroy(new Error('healthz timeout')));
+  }), 3000, 'healthz fetch');
+}
+
 let PORT = derivePort(31337); // reassigned by the bind retry below; distinct offset — never the static-server default port; see the bind retry below
 // Retries on EADDRINUSE. derivePort() can land on any listener on the box:
 // mp-clock died in 0s against an unrelated service on 9101 and took a whole
@@ -353,6 +386,241 @@ try {
     e.ws.close(); f.ws.close();
   } catch (e) {
     check('(8) diff-path/same-room joining', false, e.message);
+  }
+
+  /* ---------- 9) signal: host is first, guest sees hostId + peer ---------- */
+  // The signaling protocol is the relay's dumb-pipe WebRTC forwarder: it
+  // owns no game state, only membership. The first joiner is the host
+  // (immutable for the room's lifetime), late joiners get hostId and a
+  // peers snapshot — same shape an sg.mp.v1 late joiner would expect, minus
+  // the gameplay fields.
+  let sigHost, sigGuest;
+  try {
+    sigHost = await connectSignalClient(PORT, 'mp-relay-signal-hostguest', 'SigHost');
+    check('(9) signal host: first joiner is host (hostId === selfId)',
+      sigHost.hostId === sigHost.selfId, `hostId=${sigHost.hostId} selfId=${sigHost.selfId}`);
+    check('(9) signal host: first joiner sees an empty peers list',
+      Array.isArray(sigHost.peers) && sigHost.peers.length === 0, JSON.stringify(sigHost.peers));
+
+    const hostSeesGuest = sigHost.nextMatching((m) => m.t === 'signal.peer.join', 5000, 'host sees guest join');
+    sigGuest = await connectSignalClient(PORT, 'mp-relay-signal-hostguest', 'SigGuest');
+    const onHost = await hostSeesGuest;
+    check('(9) signal guest: second joiner sees hostId === first joiner', sigGuest.hostId === sigHost.selfId);
+    check('(9) signal guest: peers snapshot lists the host exactly once',
+      sigGuest.peers.length === 1 && sigGuest.peers[0].id === sigHost.selfId && sigGuest.peers[0].name === 'SigHost',
+      JSON.stringify(sigGuest.peers));
+    check('(9) signal host: existing member is told about the new join',
+      onHost.id === sigGuest.selfId && onHost.name === 'SigGuest', JSON.stringify(onHost));
+  } catch (e) {
+    check('(9) signal host/guest', false, e.message);
+  }
+
+  /* ---------- 10) signal: offer/answer/candidate opaque forwarding ----------
+   * The relay does NOT inspect the WebRTC SDP/ICE bytes — the entire `data`
+   * field of every signal message is forwarded exactly as the sender wrote
+   * it (JSON round-trip on the wire only). Three flavors of real-world
+   * WebRTC traffic are exercised here: an offer, an answer, and a trickle
+   * ICE candidate; the receiver sees the same shape with `from` set to the
+   * sender's signalId.
+   */
+  try {
+    const offerData = {
+      type: 'offer',
+      sdp: 'v=0\r\no=- 12345 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n',
+    };
+    const answerData = { type: 'answer', sdp: 'v=0\r\no=- 67890 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' };
+    const candidateData = {
+      candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 12345 typ host generation 0',
+      sdpMid: '0',
+      sdpMLineIndex: 0,
+      usernameFragment: 'abcd',
+    };
+
+    sigHost.ws.send(JSON.stringify({ t: 'signal', to: sigGuest.selfId, data: offerData }));
+    const gotOffer = await sigGuest.nextMatching((m) => m.t === 'signal' && m.data?.type === 'offer', 3000, 'guest receives offer');
+    check('(10) signal offer: forwarded exactly with `from` set to sender',
+      gotOffer.from === sigHost.selfId && JSON.stringify(gotOffer.data) === JSON.stringify(offerData),
+      JSON.stringify(gotOffer));
+
+    sigGuest.ws.send(JSON.stringify({ t: 'signal', to: sigHost.selfId, data: answerData }));
+    const gotAnswer = await sigHost.nextMatching((m) => m.t === 'signal' && m.data?.type === 'answer', 3000, 'host receives answer');
+    check('(10) signal answer: round-trip preserves the answer body exactly',
+      gotAnswer.from === sigGuest.selfId && JSON.stringify(gotAnswer.data) === JSON.stringify(answerData),
+      JSON.stringify(gotAnswer));
+
+    sigHost.ws.send(JSON.stringify({ t: 'signal', to: sigGuest.selfId, data: candidateData }));
+    const gotCandidate = await sigGuest.nextMatching((m) => m.t === 'signal' && m.data?.candidate, 3000, 'guest receives ICE candidate');
+    check('(10) signal candidate: forwarded with all candidate fields intact',
+      gotCandidate.from === sigHost.selfId && JSON.stringify(gotCandidate.data) === JSON.stringify(candidateData),
+      JSON.stringify(gotCandidate));
+  } catch (e) {
+    check('(10) signal opaque forwarding', false, e.message);
+  }
+
+  /* ---------- 11) signal: unknown target ignored, self-echo blocked ----------
+   * A third-party id (one the sender made up) and an id that happens to
+   * match the sender itself both must NOT cause any write — the relay
+   * never echoes back to the sender and never speculatively forwards to
+   * ids it does not know about. The "no message arrives" property is what
+   * a race-free client depends on; both checks below are negative ones,
+   * but each is timed (a deadline that is much shorter than the heartbeat)
+   * so a buggy relay that forwards anyway is caught, not silently ignored.
+   */
+  try {
+    const sigProbeBefore = sigGuest.messages.length;
+    sigHost.ws.send(JSON.stringify({ t: 'signal', to: 'definitely-not-a-peer', data: { type: 'offer', sdp: 'x' } }));
+    sigHost.ws.send(JSON.stringify({ t: 'signal', to: sigHost.selfId, data: { type: 'offer', sdp: 'x' } }));
+    await new Promise((r) => setTimeout(r, 500));
+    check('(11) signal unknown target: guest receives no message for unknown id',
+      sigGuest.messages.length === sigProbeBefore, `got ${sigGuest.messages.length - sigProbeBefore} extra`);
+    check('(11) signal self-echo: host receives no message when addressing self',
+      !sigHost.messages.slice(sigProbeBefore).some((m) => m.t === 'signal'), 'self-echo leaked');
+  } catch (e) {
+    check('(11) signal unknown target / self-echo', false, e.message);
+  }
+
+  /* ---------- 12) signal: same-named rooms are isolated -------------------
+   * Mirror of test (7) for the signal protocol: two signaling clients in
+   * different rooms must not see each other's join. Reusing distinct room
+   * names exercises the signal-side room lookup, not the mp-side one.
+   */
+  try {
+    const isoA = await connectSignalClient(PORT, 'mp-relay-signal-iso-a', 'IsoA');
+    const isoB = await connectSignalClient(PORT, 'mp-relay-signal-iso-b', 'IsoB');
+    const aSawB = await Promise.race([
+      isoA.nextMatching((m) => m.t === 'signal.peer.join', 800, 'a unexpectedly sees b').then(() => true, () => false),
+      new Promise((r) => setTimeout(() => r(false), 1200)),
+    ]);
+    const bSawA = await Promise.race([
+      isoB.nextMatching((m) => m.t === 'signal.peer.join', 800, 'b unexpectedly sees a').then(() => true, () => false),
+      new Promise((r) => setTimeout(() => r(false), 1200)),
+    ]);
+    check('(12) signal room isolation: alpha does NOT see beta\'s signal.peer.join', aSawB === false);
+    check('(12) signal room isolation: beta does NOT see alpha\'s signal.peer.join', bSawA === false);
+
+    isoA.ws.close(); isoB.ws.close();
+  } catch (e) {
+    check('(12) signal room isolation', false, e.message);
+  }
+
+  /* ---------- 13) signal: 9th member refusal ------------------------------
+   * SIGNAL_MAX_MEMBERS is 8; the 9th connection is closed with 1013 and
+   * never receives a signal.welcome. Every connection here is tracked so
+   * the test can clean up after itself — eight leaked sockets would put
+   * a real relay under heartbeat pressure for the rest of the suite.
+   */
+  try {
+    const room13 = 'mp-relay-signal-cap';
+    const members = [];
+    for (let i = 0; i < 8; i++) {
+      members.push(await connectSignalClient(PORT, room13, `Cap${i}`));
+    }
+    // 9th must fail: open a socket, send the hello, and watch it close.
+    const overflow = new WebSocket(`ws://127.0.0.1:${PORT}/room/${room13}`);
+    await waitForEvent(overflow, 'open', 5000, 'overflow socket open');
+    const overflowWrap = wrapClient(overflow);
+    overflow.send(JSON.stringify({ t: 'hello', protocol: SIGNAL_PROTOCOL, room: room13, name: 'Overflow' }));
+    const closeEvt = await waitForEvent(overflow, 'close', 5000, 'overflow close 1013');
+    check('(13) signal 9th-member refusal: closed with code 1013',
+      closeEvt.code === 1013, `code=${closeEvt.code}`);
+    check('(13) signal 9th-member refusal: never received signal.welcome',
+      !overflowWrap.messages.some((m) => m.t === 'signal.welcome'),
+      `got: ${overflowWrap.messages.map((m) => m.t).join(',')}`);
+
+    for (const m of members) m.ws.close();
+  } catch (e) {
+    check('(13) signal 9th-member refusal', false, e.message);
+  }
+
+  /* ---------- 14) signal: host close notifies remaining and 1012 closes --
+   * The host disconnects and every remaining guest sees (in order on the
+   * wire): a signal.host-lost application message, then a WebSocket close
+   * frame with code 1012. No host migration, no elect-new-host round —
+   * the relay tears the room down on purpose and the clients must reconnect.
+   */
+  try {
+    const hostLossRoom = 'mp-relay-signal-hostloss';
+    const host = await connectSignalClient(PORT, hostLossRoom, 'HostLoss');
+    const guest1 = await connectSignalClient(PORT, hostLossRoom, 'Guest1');
+    const guest2 = await connectSignalClient(PORT, hostLossRoom, 'Guest2');
+
+    const g1HostLost = guest1.nextMatching((m) => m.t === 'signal.host-lost', 5000, 'guest1 sees signal.host-lost');
+    const g1Close = waitForEvent(guest1.ws, 'close', 5000, 'guest1 close 1012');
+    const g2HostLost = guest2.nextMatching((m) => m.t === 'signal.host-lost', 5000, 'guest2 sees signal.host-lost');
+    const g2Close = waitForEvent(guest2.ws, 'close', 5000, 'guest2 close 1012');
+
+    host.ws.close(); // triggers host-close path
+
+    const [g1Hl, g1Closed, g2Hl, g2Closed] = await Promise.all([g1HostLost, g1Close, g2HostLost, g2Close]);
+    check('(14) signal host-loss: guest1 receives signal.host-lost',
+      g1Hl && g1Hl.t === 'signal.host-lost');
+    check('(14) signal host-loss: guest1 socket closed with code 1012',
+      g1Closed && g1Closed.code === 1012, `code=${g1Closed && g1Closed.code}`);
+    check('(14) signal host-loss: guest2 receives signal.host-lost',
+      g2Hl && g2Hl.t === 'signal.host-lost');
+    check('(14) signal host-loss: guest2 socket closed with code 1012',
+      g2Closed && g2Closed.code === 1012, `code=${g2Closed && g2Closed.code}`);
+  } catch (e) {
+    check('(14) signal host-loss', false, e.message);
+  }
+
+  /* ---------- 15) signal: NEVER creates an sg.mp room / emits gameplay -----
+   * This is the negative proof: a signaling-only session must leave the
+   * gameplay side of the relay completely untouched. We assert both
+   * observable surfaces — /healthz's `rooms` count, and the actual frame
+   * stream on a signaling socket — show no sg.mp.v1 artifacts. A relay
+   * that "happened to also create an mp room" or "happened to also fire
+   * welcome/commit/poses" would fail every check below.
+   */
+  try {
+    // Baseline: read /healthz with no signal rooms yet and remember the
+    // mp-side counts. A subsequent regression would move either of these.
+    const baseline = await fetchHealthz(PORT);
+    const baseRooms = baseline.rooms;
+    const baseMembers = baseline.members;
+
+    const isoSig = await connectSignalClient(PORT, 'mp-relay-signal-iso-mp', 'IsoSig');
+
+    // (a) /healthz: the gameplay-side `rooms` count MUST NOT have changed.
+    const afterOne = await fetchHealthz(PORT);
+    check('(15) signal isolation: /healthz rooms count unchanged after signal join',
+      afterOne.rooms === baseRooms, `before=${baseRooms} after=${afterOne.rooms}`);
+    check('(15) signal isolation: /healthz members count unchanged after signal join',
+      afterOne.members === baseMembers, `before=${baseMembers} after=${afterOne.members}`);
+    check('(15) signal isolation: /healthz signalRooms bumped to 1, signalMembers to 1',
+      afterOne.signalRooms === baseline.signalRooms + 1 && afterOne.signalMembers === baseline.signalMembers + 1,
+      JSON.stringify(afterOne));
+
+    // (b) Frames observed on a SIGNALING socket: NO gameplay `t` values.
+    // Anything outside the signaling vocabulary is the relay leaking the
+    // wrong protocol onto the wrong socket.
+    const signalOnlyTypes = new Set(['signal.welcome', 'signal.peer.join', 'signal.peer.leave', 'signal.host-lost', 'signal']);
+    const leaked = isoSig.messages.filter((m) => !signalOnlyTypes.has(m.t));
+    check('(15) signal isolation: signal socket only sees signal.* message types',
+      leaked.length === 0, `leaked: ${leaked.map((m) => m.t).join(',')}`);
+
+    // (c) A signal-only session in the same room name as an mp room MUST
+    // not interfere with the mp room. Establish an mp room 'mp-relay-iso-mp'
+    // (same string the signal client used) and verify the mp room's members
+    // snapshot does not include the signaling socket's id.
+    const mpClient = await connectClient(PORT, 'mp-relay-iso-mp', 'MpTwin');
+    const mpWelcome = mpClient.messages.find((m) => m.t === 'welcome');
+    check('(15) signal isolation: an mp room with the same name does NOT include the signal id',
+      mpWelcome && !mpWelcome.members.some((m) => m.id === isoSig.selfId),
+      `signalId=${isoSig.selfId} mpMembers=${JSON.stringify(mpWelcome && mpWelcome.members.map((m) => m.id))}`);
+
+    // (d) After the mp client joined, /healthz's `rooms` count bumped by 1
+    // (mp-side) and signal-side counts were untouched — a final cross-check
+    // that the two Maps move independently.
+    const afterBoth = await fetchHealthz(PORT);
+    check('(15) signal isolation: mp join bumps mp rooms, not signal rooms',
+      afterBoth.rooms === baseRooms + 1 && afterBoth.signalRooms === baseline.signalRooms + 1,
+      JSON.stringify(afterBoth));
+
+    isoSig.ws.close(); mpClient.ws.close();
+    sigHost?.ws.close(); sigGuest?.ws.close();
+  } catch (e) {
+    check('(15) signal isolation', false, e.message);
   }
 } finally {
   relay.close();

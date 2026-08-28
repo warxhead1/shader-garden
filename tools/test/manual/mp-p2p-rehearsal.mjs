@@ -24,8 +24,8 @@
 // --no-origin to suppress even that when screen-sharing.
 //
 // Usage:
-//   node tools/test/mp-p2p-rehearsal.mjs --url https://<host>/<path>/ --room <room>
-//   node tools/test/mp-p2p-rehearsal.mjs --url ... --room ... --minutes 20 --interval 10
+//   node tools/test/manual/mp-p2p-rehearsal.mjs --url https://<host>/<path>/ --room <room>
+//   node tools/test/manual/mp-p2p-rehearsal.mjs --url ... --room ... --minutes 20 --interval 10
 //
 // Flags:
 //   --url <u>        REQUIRED. Public deployment root or index.html URL.
@@ -41,7 +41,7 @@
 // browser never reached the room at all — a rehearsal that could not start is
 // different from a rehearsal that showed you a bad number.
 
-import { launch, sleep, gotoSafe } from './browser.mjs';
+import { launch, sleep, gotoSafe } from '../browser.mjs';
 
 /* ---------------- flags ---------------- */
 
@@ -69,7 +69,7 @@ const args = parseArgs(process.argv.slice(2));
 function usage(msg) {
   if (msg) console.error('error: ' + msg);
   console.error(
-    'usage: node tools/test/mp-p2p-rehearsal.mjs --url <public-url> --room <room>\n' +
+    'usage: node tools/test/manual/mp-p2p-rehearsal.mjs --url <public-url> --room <room>\n' +
     '       [--name <n>] [--interval <seconds>] [--minutes <m>] [--transport p2p|ws]\n' +
     '       [--no-origin] [--json-only]');
   process.exit(msg ? 2 : 0);

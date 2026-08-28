@@ -902,10 +902,12 @@ throws, never rejects — whenever there is nothing to report: `ws` transport,
 solo, no socket, a socket without the method, or a socket that is not `OPEN`.
 Callers get a stable array shape and never branch on transport.
 
-**Rehearsal tooling.** `tools/test/mp-p2p-rehearsal.mjs` opens ONE local
+**Rehearsal tooling.** `tools/test/manual/mp-p2p-rehearsal.mjs` opens ONE local
 browser peer against a supplied public URL and room and prints sanitized
 diagnostics plus gameplay convergence on an interval, for a rehearsal with a
-real friend on a real second network. It is provider-neutral (names no
+real friend on a real second network. It lives under `manual/` because it
+asserts nothing and is never gated: it is an operator instrument, not a suite.
+It is provider-neutral (names no
 STUN/TURN vendor) and prints no URL, address, candidate, SDP, or credential.
 The evidence gates it feeds are enumerated in `DEPLOY.md` §6.3. The
 automated `tools/test/mp-p2p-two-browsers.mjs` suite asserts the shape,

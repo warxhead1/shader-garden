@@ -12,6 +12,7 @@ Anything in here that grows real assertions belongs one level up, wired into
 |---|---|
 | `play-session.mjs` | Drives two real browsers through one room: join, start a round, move with real key events, capture what a player sees at each phase. Screenshots land in the path set at the top of the file. |
 | `profile-garden.mjs` | Splits the live garden's frame cost into JS self-time vs everything else, and reports backend, DPR and backing-store size. `SG_NO_WEBGPU=1` hides `navigator.gpu` to A/B the WebGL2 fallback on an identical mount. |
+| `mp-p2p-rehearsal.mjs` | Opens one browser against a public deployment and prints sanitized WebRTC/gameplay convergence while a friend joins from another household. Requires `--url` and `--room`; see `DEPLOY.md` §6.3. |
 
 ## The measurement trap
 

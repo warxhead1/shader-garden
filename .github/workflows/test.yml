@@ -237,6 +237,19 @@ jobs:
         timeout-minutes: 5
         working-directory: tools/test
         run: node mp-p2p-unit.mjs 2>&1 | tee out/logs/mp-p2p-unit.log
+      # TURN credential vending is pure Node: server endpoint/auth behavior
+      # plus the browser-side fail-closed validation. Keep both in the deploy
+      # tier so a secret-handling regression blocks publication.
+      - name: ice-credentials
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: tools/test
+        run: node ice-credentials.mjs 2>&1 | tee out/logs/ice-credentials.log
+      - name: mp-ice-credentials
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: tools/test
+        run: node mp-ice-credentials.mjs 2>&1 | tee out/logs/mp-ice-credentials.log
       - name: smoke
         continue-on-error: true
         timeout-minutes: 10

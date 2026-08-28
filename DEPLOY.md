@@ -330,7 +330,7 @@ From `tools/test` (after `npm ci`), open ONE local browser peer against the
 public deploy and let it print sanitized diagnostics on an interval:
 
 ```sh
-node tools/test/mp-p2p-rehearsal.mjs \
+node tools/test/manual/mp-p2p-rehearsal.mjs \
   --url https://<domain>/ --room rehearsal-1 --interval 10 --minutes 30
 ```
 

@@ -463,3 +463,10 @@ test('startRelay mounts GET /ice-credentials and answers the frozen contract end
     ]);
   }
 });
+
+// The CI battery derives pass/fail from this sentinel because suite steps use
+// continue-on-error. Emit it only after node:test has settled a successful exit.
+process.on('exit', (code) => {
+  if (code === 0 || code === undefined) console.log('all-PASS');
+  else console.log(`FAIL (exit ${code})`);
+});

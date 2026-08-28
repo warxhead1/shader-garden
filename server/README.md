@@ -1,13 +1,23 @@
 # server/ — The Commons relay
 
 A tiny, dependency-free WebSocket relay for multiplayer Shader Garden rooms
-(`#/garden/:room`). It speaks one JSON-over-WebSocket protocol, `sg.signal.v1`,
-and does three things: hands out a shared clock, relays SDP/ICE between
-peers during WebRTC handshake, and tracks member liveness so a missing host
-takes the whole room down (fail-closed). Game traffic — player poses,
-committed shader edits, lease flips, game state — flows browser-to-browser
-over WebRTC data channels and never passes through here. See
-`docs/multiplayer-spec.md` §2 for the frozen design this implements.
+(`#/garden/:room`). It speaks two JSON-over-WebSocket protocols —
+`sg.signal.v1` (the deployed default for the P2P transport; membership,
+host selection, SDP/ICE forwarding, host-loss teardown) and `sg.mp.v1`
+(the legacy central-relay ws transport; the relay itself runs the
+reducer in that mode). In the deployed P2P mode the relay's job is
+three things and only three things: track room membership, pick the
+first member to arrive as the room's immutable host, and forward SDP
+offers/answers + ICE candidates between peers during the WebRTC
+handshake — the relay does not parse the SDP/ICE, but the operator can
+read those descriptions and candidates because that is what signaling is.
+The shared clock and game authority (lease flips, commits, drafts, poses,
+game phase) run inside the browser host as
+`site/js/multiplayer/room-core.js`, never on this process; game traffic
+flows browser-to-browser over WebRTC data channels and never passes
+through here. A host departure takes the whole room down (fail-closed —
+see §3 below). See `docs/multiplayer-spec.md` §2 for the frozen design
+this implements.
 
 ## Running it
 
@@ -202,15 +212,27 @@ brief is explicit:
    encrypted SRTP/SCTP-DTLS payload, never the plaintext gameplay. A TURN
    operator can see IP addresses, packet timing, and bandwidth use; they
    cannot see what players are editing.
-3. **Signaling sees only opaque SDP/ICE.** The signaling endpoint carries
-   `sg.signal.v1` messages (`hello`/`signal`/`welcome`/`peer`/`host-lost`)
-   only — never `sg.mp.v1` gameplay. The relay sees SDP/ICE, never edits,
-   poses, tunes, or game scores.
+3. **The signaling operator sees SDP/ICE and membership — but no
+   gameplay.** The signaling endpoint carries `sg.signal.v1` messages
+   (`hello` for join, `signal` for client→server→peer forwarding of SDP
+   offers/answers and ICE candidates, `signal.welcome` /
+   `signal.peer.join` / `signal.peer.leave` / `signal.host-lost` for
+   server→client membership and host-loss notifications) only — never
+   `sg.mp.v1` gameplay. The relay treats the forwarded SDP/ICE as
+   opaque bytes it just relays, but the operator **can** read those
+   descriptions and candidates because that is what signaling is. The
+   relay sees no edits, poses, tunes, or game scores.
 4. **Host authority / star topology.** The first member to reach the
    signal becomes the immutable host and runs `room-core.js`. The room
    caps at 8 members total (host + 7 peers); the 8th attempt is
    rejected. A host departure takes the whole room down — surviving
-   members close with 1012 and visibly retry, never silently.
+   members close with WebSocket code **1012** and the client surfaces a
+   visible `closed` / "host lost" status. There is **no automatic
+   retry** and **no silent promotion of a new host** on this path: the
+   `code === 1012` branch in `site/js/organs/garden/net.js` returns
+   before `scheduleReconnect()`, because re-dialling would land on a
+   different room and never reconcile. The user has to explicitly
+   reload or rejoin.
 5. **Use short-lived TURN credentials.** Static or long-lived credentials
    embedded in the public site would expose the TURN service to abuse.
    The brief calls this out as a hard requirement for the ship.

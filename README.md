@@ -93,17 +93,25 @@ it is hide-and-seek.
   **Solo `#/garden` is unchanged** — no relay, no net code, same single-player
   garden as before. This is invariant I1 of the multiplayer spec and is
   covered by the solo parity suite.
-- **Architecture:** browser clients connect to a single central,
-  dependency-free Node WebSocket relay (`server/relay.mjs`). The relay hands
-  out a shared clock and referees the game. **Game traffic — player poses,
-  committed shader edits, lease flips, game state — flows browser-to-browser
-  over WebRTC data channels** in a star topology with the first member as
-  the room's immutable host. The relay carries only SDP/ICE signaling — never
-  gameplay. The relay has zero npm dependencies. See
+- **Architecture:** browser clients connect to a single, dependency-free
+  Node WebSocket signaling relay (`server/relay.mjs` → `server/signal.mjs`)
+  that does three things and only three things: track room membership,
+  pick the first member to arrive as the room's immutable **host**, and
+  forward SDP offers/answers + ICE candidates between peers during the
+  WebRTC handshake. The relay carries **no gameplay**. The shared
+  clock and game authority — lease flips, commits, drafts, poses, game
+  phase — run inside the browser host as `site/js/multiplayer/room-core.js`,
+  the single authoritative `sg.mp.v1` reducer, and are broadcast from
+  host to every other member over WebRTC data channels in a star
+  topology. The relay has zero npm dependencies; see
   [docs/multiplayer-spec.md §2.6](docs/multiplayer-spec.md) for the
-  transport selection rules and the trust/privacy disclosures the operator
-  must accept (visible ICE/TURN credentials in the public site, signaling
-  sees only opaque SDP/ICE, host-loss is fail-closed).
+  transport selection rules and the trust/privacy disclosures the
+  operator must accept. Two of them are easy to misread: the signaling
+  operator **can** see SDP descriptions and ICE candidates (that is the
+  whole point of a signaling server), and host loss is **fail-closed**
+  with a visible "host lost" notice — survivors do **not** auto-retry,
+  and there is no silent promotion of a new host; the user has to
+  explicitly reload or rejoin.
 - **Spec and design:** [docs/multiplayer-spec.md](docs/multiplayer-spec.md)
   is the frozen implementation spec (the authoritative "what we are
   building"); [docs/the-commons-design.md](docs/the-commons-design.md) is the

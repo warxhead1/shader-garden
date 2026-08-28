@@ -21,27 +21,40 @@ as of writing:
   `releaseRoleLease` and the `seeking` branch of `advanceGame` are the
   shipped implementation; the design doc asked for nothing else.
 
+- **§1's dual-workspace — "Watching \<name\>" + "My draft"** — every
+  non-holder in a room sees a read-only "Watching \<name\>" mirror of the
+  holder's buffer **above** their own editable "My draft" pane, exactly
+  as §1 proposes. The shipped implementation is
+  `site/js/organs/garden/edit.js`'s `mountComponentEditor({ isHolder,
+  holderName, isRoom })`, which builds BOTH a `.component-editor-mirror`
+  pane (read-only `textarea`, never compiles, never transmits) and a
+  `.component-editor-editable` pane (the user's local draft), and
+  `site/js/organs/garden/index.js`'s `isHolder = !room || lastLease.isSelf`
+  selection that drives the mount. The holder's mirror is CSS-hidden via
+  `.component-editor-holder .component-editor-mirror { display: none }`
+  in `site/css/main.css`, so the holder sees the same single-pane UX as
+  solo. `tools/test/mp-dual-workspace.mjs` is the suite that proves the
+  full shape end-to-end against a real relay: a non-holder mount shows
+  both panes; the holder mount shows only the editable pane; the local
+  draft never transmits; the draft survives panel close + reopen; a
+  lease flip to holder promotes the draft to committable. The prior
+  narrower landing — a single read-only non-holder mirror with no
+  per-client draft pane — is what the old `mp-two-browsers.mjs` (d)
+  branch covered and is preserved in the spec changelog.
+
 **Exploratory — written here as prior art and intent, NOT the shipped
 behavior. Do not infer behavior from these sections:**
 
-- **§1 "The baton is a commit lock, not an edit lock"** as written there
-  proposes that non-holders are not read-only: every non-holder gets two
-  editor tabs, **Watching \<name\>** (read-only mirror of the holder's
-  buffer) **and** **My draft** (a sandbox they can freely edit and
-  locally compile). **That proposal is NOT what shipped.** The shipped
-  behavior per spec §5.2 — and what `site/js/organs/garden/edit.js`'s
-  `mountComponentEditor({ readOnly: true })` and the
-  `mp-two-browsers.mjs` browser test prove — is a **single read-only
-  non-holder mirror** of the holder's draft. Non-holders cannot edit
-  locally and there is no per-client draft tab in the UI. The reason
-  the change narrowed is recorded in the spec, not here; this doc keeps
-  the wider proposal so the prior-art reasoning is preserved.
+- *(none at this revision.)* §1's broader rationale (waiting time as
+  rehearsal; a correctness reason for the lock grounded in shared-source
+  compilation, not UX convention; the Unreal Multi-User Editing and
+  Figma priors) is preserved verbatim below as design rationale — none
+  of it diverges from what shipped.
 
-Sections 2–6 are downstream of those two and should be read with the
-above in mind: they describe the game-feel, legibility, collision, and
-demoscene references the design was reaching toward. None of them is
-contradicted by the shipped behavior above; the only one whose proposal
-diverges from what shipped is §1.
+Sections 2–6 are downstream of §0 and §1's dual-workspace and should be
+read with the above in mind: they describe the game-feel, legibility,
+collision, and demoscene references the design was reaching toward.
+None of them is contradicted by the shipped behavior above.
 
 ---
 

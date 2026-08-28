@@ -357,13 +357,20 @@ embedded in the public site are visible to anyone who views source.
    payload end-to-end. A TURN operator can see IP addresses, packet
    timing, and bandwidth use. They CANNOT see what two players are
    editing.
-3. **The signaling server sees only opaque SDP/ICE.** The signaling
-   transport (`SG_RELAY_URL`) carries `sg.signal.v1` messages
-   (`hello`/`signal`/`welcome`/`peer`/`host-lost`) — never `sg.mp.v1`
+3. **The signaling operator sees SDP/ICE and membership — but no
+   gameplay.** The signaling transport (`SG_RELAY_URL`) carries
+   `sg.signal.v1` messages: `hello` (the first message on a connection,
+   names the room and the connecting member), `signal` (client→server→
+   peer forwarding of SDP offers/answers and ICE candidates — the
+   relay treats the payload as opaque bytes, but the operator **can**
+   read the descriptions and candidates because that is the whole
+   point of signaling), `signal.welcome` / `signal.peer.join` /
+   `signal.peer.leave` / `signal.host-lost` (server→client membership
+   and host-loss notifications). It carries **never** `sg.mp.v1`
    gameplay. The host's `room-core.js` reducer runs on the host's
-   machine; the relay sees SDP offers/answers and ICE candidates and
-   nothing else. A relay operator therefore has no view of the garden's
-   state, edits, tunes, poses, or hide-and-seek scores.
+   machine; the relay does not run a game reducer. A relay operator
+   therefore has no view of the garden's state, edits, tunes, poses,
+   or hide-and-seek scores.
 4. **Host authority / star topology.** The first member to reach the
    signal becomes the immutable host for the room and runs the
    `room-core.js` reducer; every subsequent member sends gameplay over a
@@ -371,8 +378,14 @@ embedded in the public site are visible to anyone who views source.
    caps at 8 members total (host + 7 peers); the 8th attempt closes
    1002. The brief calls this out as an honest star, not a mesh — a
    single host departure takes the whole room down, and the surviving
-   members are FAIL-CLOSED: their `close` code is 1012 and they visibly
-   retry, never silently papering over the loss.
+   members are FAIL-CLOSED: their `close` code is 1012 and the client
+   surfaces a visible "host lost" / `closed` status (`net.js`'s
+   `onStatus({ state: 'closed', message: 'host lost', code: 1012 })`).
+   There is **no automatic retry** and **no silent promotion of a new
+   host** on this path — re-dialling would land on a different room and
+   never reconcile, so the code branches on `code === 1012` and returns
+   before `scheduleReconnect()`. The user must explicitly reload or
+   rejoin the room to continue.
 5. **Long-lived ICE/TURN credentials are NOT acceptable for this
    ship.** The deploy workflow must use short-lived TURN credentials
    (REST-style time-limited) if TURN is enabled. Static or long-lived

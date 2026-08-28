@@ -1109,34 +1109,34 @@ export async function mount(ctx) {
     mp.statusPill.className = 'pill garden-mp-status garden-mp-status-' + status.state;
   }
 
-  // §5.3 late-join snapshot: apply EVERY committed body, then build + compile
-  // the whole scene ONCE — never one compile per component (reuses the same
-  // buildSceneSource() the solo path's own recompile flow reassembles from).
-  function applyEditsSnapshot(edits) {
-    if (!edits || !edits.size || !rh.runtime) return;
+  // §5.3: validate and compile the entire snapshot once before publishing it.
+  async function applyEditsSnapshot(edits) {
+    if (!edits?.size || !rh.runtime?.prepareShader) return;
+    const trialBodies = new Map(editedBodies);
+    const pending = [];
     for (const [componentId, body] of edits) {
       const component = components.find((c) => c.id === componentId);
       if (!component) continue;
+      if (body == null) trialBodies.delete(componentId);
+      else trialBodies.set(componentId, body);
+      pending.push({ componentId, body, component });
+    }
+    if (!pending.length) return;
+    const prepared = await rh.runtime.prepareShader(buildSceneSource(trialBodies)).catch(() => null);
+    if (!prepared || !prepared.ok) { prepared?.dispose(); return; }
+    prepared.commit();
+    for (const { componentId, body, component } of pending) {
       if (body == null) {
         editedBodies.delete(componentId);
         mirrorBodies.delete(componentId);
       } else {
         editedBodies.set(componentId, body);
-        // The mirror pane should start at the freshly-snapshotted body
-        // too — late-join means mirrorBodies was empty for this
-        // component, and the next non-holder to open "Edit here" would
-        // otherwise see pristine text in their Watching pane.
         mirrorBodies.set(componentId, body);
       }
       tray.setEdited(componentId, editedBodies.has(componentId));
-      // If an editor is currently OPEN for this component (someone hit
-      // "Edit here" before the snapshot arrived), keep its mirror in
-      // lockstep — the holder's editor ignores the call, the non-
-      // holder's pane re-renders to the newly-snapshotted body.
       openEditors.get(componentId)?.setMirrorBody?.(body ?? component.source);
     }
-    const res = rh.runtime.setShader(buildSceneSource());
-    if (res.ok) rh.runtime.setUniforms(tuneValues);
+    rh.runtime.setUniforms(tuneValues);
   }
 
   // See handleRemoteCommit: how many times a TLE-only gate result is retried,

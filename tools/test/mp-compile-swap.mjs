@@ -233,21 +233,13 @@ check('(setup) receiver reached live status', receiverLive);
 // independent witness for "the broken commit never landed": a successful
 // commit calls the mirror's setBody(); a rejected one never touches it.
 //
-// PRODUCT BUG (see mp-two-browsers.mjs's report for the full trace, found
-// independently there and reproduced with a single non-MP page): every
-// "Edit here" click on a WebGPU-backed mount silently fails to show an
-// editor — index.js's onEditHere rebuilds onto WebGL2 first
-// (rh.rebuild({prefer:'webgl2'})), but runtime-host.js's build() does an
-// unscoped host.replaceChildren() on the shared `stage` element, which is
-// also the probe panel's own parent — the rebuild detaches the panel (and
-// the editHost inside it) mid-handler. mountComponentEditor() still
-// resolves and appends its result, just into an orphaned subtree. Every
-// #/garden/:room mount now defaults to WebGPU, so this fires here every
-// time. Not fixable in this lane (core/runtime-host.js and
-// organs/garden/index.js are outside the seven owned files) — the
-// editor-dependent checks below are gated on editorAvailable and degrade to
-// honest FAILs rather than crashing; the core I4 pixel/context-loss
-// evidence below does NOT depend on the editor and runs regardless.
+// Previous versions of this suite asserted read-only-ness via a
+// `.component-editor-readonly` WRAPPER class that the editor never actually
+// stamps — edit.js only sets `.component-editor-holder` and
+// `.component-editor-nonholder`, and the read-only surface lives on the
+// mirror textarea itself (`<textarea class="code-editor code-editor-readonly"
+// readonly>`, edit.js:159-160). That stale assertion silently passed for
+// the wrong reason and is replaced below with the actual mirror selector.
 const opened = await clickTrayItem(page, skyComponent.name);
 check('(setup) opened the sky probe panel', opened);
 await sleep(200);
@@ -255,17 +247,28 @@ await page.click('.probe-panel .btn:not(.probe-edit-link)').catch(() => {}); // 
 await page.waitForSelector('.component-editor .code-editor', { timeout: 8000 }).catch(() => {});
 await sleep(300);
 const editorAvailable = !!(await page.$('.component-editor .code-editor'));
-if (!editorAvailable) console.log('  [note] editor never mounted (product bug — see comment above); gating editor-dependent checks');
+if (!editorAvailable) console.log('  [note] editor never mounted; gating editor-dependent checks');
 
-const readOnlyBefore = editorAvailable
-  ? await page.$eval('.component-editor', (el) => el.classList.contains('component-editor-readonly')).catch(() => null)
+// Mirror textarea is the actual read-only surface (edit.js stamps
+// .code-editor-readonly on it AND sets the readonly attribute). The
+// wrapper-class assertion this replaces was an obsolete read of a class
+// the editor never applies.
+const mirrorTextareaExists = editorAvailable
+  ? !!(await page.$('.component-editor-mirror .code-editor-readonly'))
+  : false;
+check('(setup) the receiver\'s mirror textarea exists (read-only Watching pane, non-holder)',
+  editorAvailable && mirrorTextareaExists, editorAvailable ? '' : 'BLOCKED: editor never mounted');
+
+const mirrorReadOnlyBefore = editorAvailable
+  ? await page.$eval('.component-editor-mirror .code-editor-readonly', (el) => el.readOnly).catch(() => null)
   : null;
-check('(setup) the receiver\'s editor mounted read-only (not the holder)', editorAvailable && readOnlyBefore === true, editorAvailable ? 'got ' + readOnlyBefore : 'BLOCKED: editor never mounted');
+check('(setup) the receiver\'s mirror textarea is read-only (not the holder)',
+  editorAvailable && mirrorReadOnlyBefore === true, editorAvailable ? 'got ' + mirrorReadOnlyBefore : 'BLOCKED: editor never mounted');
 
 const editorBodyBefore = editorAvailable
-  ? await page.$eval('.component-editor .code-editor', (el) => el.value).catch(() => null)
+  ? await page.$eval('.component-editor-mirror .code-editor-readonly', (el) => el.value).catch(() => null)
   : null;
-check('(setup) the editor shows the pristine sky body before any commit', editorAvailable && editorBodyBefore === skyComponent.source, editorAvailable ? '' : 'BLOCKED: editor never mounted');
+check('(setup) the mirror shows the pristine sky body before any commit', editorAvailable && editorBodyBefore === skyComponent.source, editorAvailable ? '' : 'BLOCKED: editor never mounted');
 
 // FIVE sky oracles, not one. A single point at (720,60) is sometimes under a
 // Drifting Clouds puff, and a cloud composited over sg_sky_color() muffles
@@ -326,7 +329,8 @@ const epochAfterBroken = brokenCommitEcho ? brokenCommitEcho.msg.epoch : epoch +
 /* ---------------- assertions: receiver survives the broken commit ---------------- */
 
 const rejectedStatus = await page.waitForFunction(
-  () => /didn.t compile here/.test(document.querySelector('.garden-mp-status')?.textContent || ''),
+  () => document.getElementById('toast')?.classList.contains('show')
+    && /didn.t compile here/.test(document.getElementById('toast')?.textContent || ''),
   undefined, { timeout: 15000 },
 ).then(() => true).catch(() => false);
 check('(a) receiver shows a visible rejection notice for the broken commit', rejectedStatus);
@@ -348,7 +352,7 @@ check('(a) canvas still renders non-blank at the character oracle after the brok
   Array.isArray(charPixelAfterBroken) && charPixelAfterBroken.slice(0, 3).some((v) => v > 0), JSON.stringify(charPixelAfterBroken));
 
 const editorBodyAfterBroken = editorAvailable
-  ? await page.$eval('.component-editor .code-editor', (el) => el.value).catch(() => null)
+  ? await page.$eval('.component-editor-mirror .code-editor-readonly', (el) => el.value).catch(() => null)
   : null;
 check('(a) the read-only mirror STILL shows the pristine body — the broken commit never advanced local state (I4 epoch guard)',
   editorAvailable && editorBodyAfterBroken === skyComponent.source, editorAvailable ? 'got ' + JSON.stringify(editorBodyAfterBroken) : 'BLOCKED: editor never mounted');
@@ -366,7 +370,7 @@ check('(b) the relay broadcast the good commit', !!goodCommitEcho, JSON.stringif
 // Playwright's waitForFunction(pageFunction, arg, options) puts arg BEFORE
 // options (opposite of puppeteer's (fn, options, ...args)).
 const editorBodyAfterGood = editorAvailable && await page.waitForFunction(
-  (expected) => document.querySelector('.component-editor .code-editor')?.value === expected,
+  (expected) => document.querySelector('.component-editor-mirror .code-editor-readonly')?.value === expected,
   // 15000 was arithmetically too small, and the gate proved it. A remote commit
   // is gated on the RECEIVER, and that gate retries a TLE (garden/index.js:859,
   // REMOTE_GATE_TRIES=3, REMOTE_GATE_BACKOFF_MS=500). Worst case before the

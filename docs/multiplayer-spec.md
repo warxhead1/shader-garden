@@ -307,8 +307,13 @@ order in `site/js/organs/garden/net.js`:
    an `https://` page.
 
 `site/assets/relay.json` ships with `{ "url": null, "transport": "p2p",
-"iceServers": [] }` and is documented in DEPLOY.md as the one operator-edited
-file.
+"iceServers": [], "iceCredentialsUrl": null }` and is documented in
+DEPLOY.md as the one operator-edited file. The optional
+`iceCredentialsUrl` field is the public https URL of a short-lived TURN
+credential vending endpoint — when set, `net.js`'s
+`fetchIceCredentials()` runs on every connect/reconnect, BEFORE
+`createP2PSocket`, and merges the result with the public STUN list.
+§2.6 + §2.7 cover the fetch contract and validation.
 
 ### 2.6 Weekend P2P integration — transport selection
 
@@ -333,13 +338,25 @@ the two facades drive the same logic without a transport branch.
 #### What the deployed config looks like
 
 The deployed default is `transport: "p2p"` with an empty `iceServers`
-list. The CI workflow stamps `SG_RELAY_URL` (the wss:// signaling endpoint
-hosted alongside the static site) and, optionally, `SG_ICE_SERVERS_JSON`
-(deploy-time operator override) into `site/assets/relay.json`. The
-`SG_ICE_SERVERS_JSON` value, if present, is validated by the CI workflow
-as a JSON array of `RTCIceServer`-shaped objects BEFORE the file is
-written — the file emitted by CI is always a single JSON document, never
-a shell-printf that could break parsing.
+list and `iceCredentialsUrl: null`. The CI workflow stamps
+`SG_RELAY_URL` (the wss:// signaling endpoint hosted alongside the
+static site), optionally `SG_ICE_SERVERS_JSON` (deploy-time operator
+override for **public STUN-only** entries — any entry carrying
+`username`, `credential`, or `credentialType` is rejected at stamp
+time, per §2.7 below), and optionally `SG_ICE_CREDENTIALS_URL` (the
+public https URL of a runtime credential vending endpoint) into
+`site/assets/relay.json`. The `SG_ICE_SERVERS_JSON` value, if present,
+is validated by the CI workflow as a JSON array of `RTCIceServer`-
+shaped objects BEFORE the file is written — the file emitted by CI is
+always a single JSON document, never a shell-printf that could break
+parsing.
+
+**`SG_ICE_SERVERS_JSON` is for public STUN only.** Long-lived TURN
+credentials in the deployed artifact would expose the TURN service to
+abuse (anyone reading the JS can reroute arbitrary traffic through
+the operator's relay). The deploy workflow explicitly rejects any
+entry that names `username`/`credential`/`credentialType`. Short-lived
+TURN credentials belong in §2.7's runtime vending endpoint, not here.
 
 #### Trust / privacy disclosures the operator must accept
 
@@ -386,11 +403,134 @@ embedded in the public site are visible to anyone who views source.
    never reconcile, so the code branches on `code === 1012` and returns
    before `scheduleReconnect()`. The user must explicitly reload or
    rejoin the room to continue.
-5. **Long-lived ICE/TURN credentials are NOT acceptable for this
-   ship.** The deploy workflow must use short-lived TURN credentials
-   (REST-style time-limited) if TURN is enabled. Static or long-lived
-   credentials embedded in the public site would expose the TURN
-   service to abuse — the workflow is the gatekeeper for that.
+5. **Short-lived ICE/TURN credentials are vendable at runtime;
+   long-lived credentials embedded in the static site are NOT
+   acceptable for this ship.** When TURN is enabled, the deploy
+   workflow stamps the **URL** of a short-lived credential vending
+   endpoint (`SG_ICE_CREDENTIALS_URL`, a public https URL) into
+   `assets/relay.json`'s `iceCredentialsUrl` field; the actual
+   credentials are requested by the browser just-in-time, never
+   stitched into the static site. §2.7 covers the fetch contract
+   and validation gate; the deploy workflow enforces the STUN-only
+   constraint on `SG_ICE_SERVERS_JSON` (any entry carrying
+   `username`/`credential`/`credentialType` is rejected at stamp
+   time). The credentials themselves are short-lived (REST-style
+   TTL) and never appear in storage or logs — the validation gate's
+   error tags are short identifiers (`http-502`, `bad-json`, …),
+   not the payload data.
+
+### 2.7 Runtime ICE/TURN credential vending
+
+`SG_ICE_SERVERS_JSON` covers the **public, non-secret STUN** half of
+ICE configuration. TURN requires per-session credentials, and shipping
+those in the static site is unacceptable (§2.6 trust disclosure 5). The
+runtime vending flow is provider-neutral — any https endpoint that
+returns the documented JSON shape works — and runs in
+`site/js/organs/garden/net.js`'s `fetchIceCredentials()` helper, called
+from `connect()` BEFORE every `createP2PSocket()` (i.e. every
+connect/reconnect attempt). The flow:
+
+1. `connect()` reads `cfg.iceCredentialsUrl` (preserved by
+   `resolveTransportConfig()` from `assets/relay.json`'s
+   `iceCredentialsUrl` field).
+2. If set, it issues `GET <url>` with `cache: 'no-store'`,
+   `credentials: 'omit'`, and `Accept: application/json`. The
+   omit-credentials flag stops the browser from sending cookies to
+   the vending host across origins.
+3. The response is validated against the contract below. Any failure
+   is fail-closed: `createP2PSocket` is NOT called, the status pill
+   surfaces the error tag (`ice-vend:<tag>`), and `scheduleReconnect`
+   backs off.
+4. On success, the ephemeral `iceServers` list is merged with the
+   public STUN list (`cfg.iceServers`) — public STUN first, ephemeral
+   TURN second. WebRTC tries all candidates in parallel; the ordering
+   only affects DevTools visibility, not connectivity.
+5. The merged list is passed to `createP2PSocket({ iceServers })`.
+   Credentials NEVER appear in storage or logs — only the short error
+   tag is observable on the failure path.
+
+#### Vending endpoint contract
+
+Request:
+```
+GET <SG_ICE_CREDENTIALS_URL>
+Accept: application/json
+(no cookies — `credentials: 'omit'`)
+```
+
+Response (success):
+- HTTP 200 with `Content-Type: application/json` (the helper does not
+  enforce the content-type, only the JSON body shape).
+- Body is a JSON OBJECT:
+  ```json
+  {
+    "iceServers": [
+      { "urls": "turn:turn.example.com:3478?transport=udp",
+        "username": "<short-lived>",
+        "credential": "<short-lived>" },
+      { "urls": ["turn:turn.example.com:3478?transport=tcp",
+                 "turn:turn.example.com:443?transport=tcp"],
+        "username": "<short-lived>",
+        "credential": "<short-lived>" }
+    ]
+  }
+  ```
+
+Per-entry validation:
+- `urls` is REQUIRED. String form: a non-empty URL string. Array
+  form: a non-empty array of non-empty URL strings. Any other type
+  fails closed.
+- `username` and `credential` are OPTIONAL. When present, both must
+  be strings (empty string allowed — WebRTC permits `username: ''`
+  for non-authenticated entries).
+- `credentialType` is not validated client-side (the spec allows
+  `password` / `oauth`); a malformed value here surfaces as a
+  WebRTC dial-time failure rather than a validation error, which is
+  fine — the credential itself is short-lived.
+
+Top-level body validation:
+- Body MUST be a JSON OBJECT. Strings, arrays, numbers, booleans, null
+  all fail closed (`not-object`).
+- `iceServers` MUST be a non-empty array. Empty array fails closed
+  (`empty-ice-servers`).
+- Other top-level fields are ignored.
+
+URL validation:
+- `SG_ICE_CREDENTIALS_URL` itself must be `https://` in production;
+  `http://localhost` is allowed on a non-https page for the test
+  rig. Mixed content (http on https) is rejected.
+
+Failure modes (all fail closed, all surface a short error tag, none
+leak the payload):
+- `no-url` — `iceCredentialsUrl` was empty.
+- `bad-url` — URL didn't parse.
+- `bad-protocol` — scheme was not http/https (e.g. ws://, file://).
+- `http-not-localhost` — production http URL on a non-localhost host.
+- `mixed-content` — http URL on an https page.
+- `fetch-failed` — the fetch threw (network error, CORS rejection, …).
+- `bad-response` — response missing `ok`/`status` (browser shim quirk).
+- `http-<status>` — non-ok HTTP status (e.g. `http-401`, `http-502`).
+- `bad-json` — body wasn't valid JSON.
+- `not-object` — body wasn't a JSON object.
+- `no-ice-servers` — body missing `iceServers` or `iceServers` was
+  not an array.
+- `empty-ice-servers` — `iceServers` is an empty array.
+- `bad-entry` — an entry was not an object.
+- `bad-urls` — an entry's `urls` was the wrong type, an empty string,
+  an empty array, or an array containing non-string entries.
+- `empty-urls` — an entry's `urls` was an empty string or empty array.
+- `bad-username` / `bad-credential` — present but not a string.
+
+Provider-neutrality is the point — Twilio Network Traversal, Cloudflare
+Calls, Xirsys, and a hand-rolled `node:http` endpoint all work as long
+as they return the documented shape. The vending host enforces auth
+(API keys, mTLS, whatever the operator chooses); the browser only
+sees the public-facing response.
+
+What the repo ships: validation in `net.js`, deploy-time stamping in
+`.github/workflows/deploy.yml` (`SG_ICE_CREDENTIALS_URL` variable,
+https-only), and unit tests in `tools/test/mp-ice-credentials.mjs`
+covering every validation branch plus the merge contract.
 
 
 ---

@@ -203,6 +203,100 @@ you; the URL you set has to point at infrastructure you operate, with
 TLS termination you control, in front of a container you built from
 `server/Dockerfile`.
 
+### 5.4 Public STUN-only entries — `SG_ICE_SERVERS_JSON`
+
+A **SECRET** with the same name as a previously-suggested "stun or turn"
+override, kept for backward compatibility but now explicitly bounded to
+**public, non-secret STUN entries only**.
+
+```sh
+# Example — public STUN list (the canonical "twelve servers, no auth"
+# trick works fine here; these are all client-dialed directly and visible
+# to anyone watching your network anyway):
+SG_ICE_SERVERS_JSON='[
+  {"urls": "stun:stun.l.google.com:19302"},
+  {"urls": ["stun:stun1.l.google.com:19302","stun:stun2.l.google.com:19302"]}
+]'
+```
+
+The deploy step validates the JSON, requires it to be an array of
+`RTCIceServer`-shaped objects, and rejects any entry that carries
+`username`, `credential`, or `credentialType` — long-lived TURN
+credentials in a public artifact would expose your TURN service to
+abuse (an attacker reading the deployed JS can reroute arbitrary
+traffic through your relay). **For TURN, use §5.5 below.**
+
+If unset, an empty `iceServers` array is stamped — direct connectivity
+only, no TURN. Two visitors on hostile networks will then fail to
+connect to each other. WebRTC's ICE layer will still try every direct
+candidate pair; only the TURN fallback is missing.
+
+### 5.5 Short-lived TURN credentials — `SG_ICE_CREDENTIALS_URL`
+
+When two peers cannot establish a direct connection (symmetric NAT,
+captive portal, restrictive firewall), WebRTC's ICE layer falls back
+to a TURN server — a relay that forwards encrypted media/data. TURN
+requires per-session credentials; long-lived ones in a public artifact
+are a security risk, so the credentials are vended at runtime.
+
+```sh
+# Example: a public https URL that returns short-lived TURN credentials.
+# The URL itself is public (it ships in the deployed artifact); the
+# credentials it returns are short-lived (REST-style TTL, seconds to
+# minutes) and never appear in the static site.
+SG_ICE_CREDENTIALS_URL='https://my-turn-vend.example.com/credentials'
+```
+
+A **VARIABLE**, not a secret — same reasoning as `SG_RELAY_URL`. The
+URL is callable by every visitor; the secrets stay on the vending host.
+
+When this is set, `site/js/organs/garden/net.js`'s `fetchIceCredentials()`
+runs BEFORE every `createP2PSocket()` call (i.e. on every
+connect/reconnect), and:
+
+1. Calls `GET <url>` with `cache:'no-store'`, `credentials:'omit'`,
+   and `Accept: application/json`. The omit-credentials flag stops the
+   browser from sending cookies to the vending host — important across
+   origins.
+2. Requires `response.ok`. 401/403/5xx all fail closed.
+3. Requires a JSON OBJECT body whose `iceServers` field is a NONEMPTY
+   array of `{ urls: string|string[] [, username, credential] }` entries.
+4. **Fails closed** when the URL was configured but the response is
+   malformed: the connection does not dial without ephemeral credentials
+   (no spurious STUN-only fallback), the status pill surfaces the error
+   tag (`ice-vend:http-502`, etc.), and the retry backoff takes over.
+5. Merges public STUN (from `SG_ICE_SERVERS_JSON`) FIRST, then
+   ephemeral TURN (from the vending endpoint) — visible in DevTools,
+   but the credential strings themselves are never logged or persisted.
+
+The endpoint contract:
+
+```json
+{
+  "iceServers": [
+    { "urls": "turn:turn.example.com:3478?transport=udp",
+      "username": "<short-lived>",
+      "credential": "<short-lived>" },
+    { "urls": "turn:turn.example.com:3478?transport=tcp",
+      "username": "<short-lived>",
+      "credential": "<short-lived>" }
+  ]
+}
+```
+
+Any other top-level fields are ignored. An empty `iceServers` array,
+a non-object body, or an entry whose `urls` is the wrong type is
+rejected — the brief is explicit that failure must fail closed. See
+`docs/multiplayer-spec.md` §2.6 for the full validation contract and
+`tools/test/mp-ice-credentials.mjs` for the unit tests.
+
+**What you operate.** This repository does not run a credential
+vending service for you; you point `SG_ICE_CREDENTIALS_URL` at one you
+run, with TTL short enough to limit the blast radius of a stolen
+credential (the spec suggests seconds to minutes, not hours). Cloud
+providers with managed TURN (Twilio Network Traversal, Cloudflare
+Calls, etc.) expose this shape directly.
+
 ## 6. Sanity checklist after first deploy
 
 - [ ] `https://<domain>/manifest.webmanifest` loads (correct MIME, not 404).

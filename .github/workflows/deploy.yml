@@ -96,7 +96,7 @@ jobs:
 
       - name: Point the deployed site at the relay
         # site/assets/relay.json ships as
-        #   {"url": null, "transport": "p2p", "iceServers": []}
+        #   {"url": null, "transport": "p2p", "iceServers": [], "iceCredentialsUrl": null}
         # The default URL is null (resolveTransportConfig treats this as a clean
         # no-multiplayer site, NOT an error). To switch multiplayer on:
         #   1. Set the repository VARIABLE SG_RELAY_URL to a public wss://
@@ -106,14 +106,32 @@ jobs:
         #      pretending otherwise would just hide it from the people
         #      maintaining it.
         #   2. Optionally, set the repository SECRET SG_ICE_SERVERS_JSON to a
-        #      JSON array of RTCIceServer-shaped objects (used verbatim as the
-        #      WebRTC `iceServers` list). Validate the JSON via Node, NEVER
-        #      shell parsing — the brief is explicit that the emitted file
-        #      must be a single, valid JSON document. If unset, an empty
-        #      array is written (no TURN — direct connectivity only).
+        #      JSON array of PUBLIC, NON-SECRET RTCIceServer-shaped STUN-only
+        #      entries (used verbatim as the WebRTC `iceServers` list).
+        #      SG_ICE_SERVERS_JSON is for public STUN entries only — it must
+        #      NEVER carry credentials. Long-lived TURN credentials would be
+        #      visible in the deployed artifact and could be abused to relay
+        #      arbitrary traffic through the operator's TURN server. The
+        #      workflow explicitly rejects any entry that has `username` or
+        #      `credential` fields. Validate the JSON via Node, NEVER shell
+        #      parsing — the brief is explicit that the emitted file must be
+        #      a single, valid JSON document. If unset, an empty array is
+        #      written (no TURN — direct connectivity only).
+        #   3. Optionally, set the repository VARIABLE SG_ICE_CREDENTIALS_URL
+        #      to a public https:// URL that vends short-lived TURN
+        #      credentials at runtime. This is a VARIABLE (not a secret):
+        #      the URL itself is public (it ships in the deployed artifact
+        #      for the client to fetch), but the credentials it returns are
+        #      short-lived and never appear in the static site. When this
+        #      is configured, net.js's fetchIceCredentials() runs BEFORE
+        #      every RTCPeerConnection creation, validates the response, and
+        #      merges the result with the public STUN list. Failure to fetch
+        #      valid credentials when this is configured is fail-closed — the
+        #      site will not dial without ephemeral credentials.
         env:
           RELAY_URL: ${{ vars.SG_RELAY_URL }}
           ICE_SERVERS_JSON: ${{ secrets.SG_ICE_SERVERS_JSON }}
+          ICE_CREDENTIALS_URL: ${{ vars.SG_ICE_CREDENTIALS_URL }}
         run: |
           set -euo pipefail
           # Correction 6: env parsing simplification. The previous shell
@@ -167,16 +185,15 @@ jobs:
                     process.exit(1);
                   }
                 }
-                if ("username" in e && typeof e.username !== "string") {
-                  console.error("::error::entry " + i + " `username` must be a string when present.");
-                  process.exit(1);
-                }
-                if ("credential" in e && typeof e.credential !== "string") {
-                  console.error("::error::entry " + i + " `credential` must be a string when present.");
-                  process.exit(1);
-                }
-                if ("credentialType" in e && e.credentialType !== "password" && e.credentialType !== "oauth") {
-                  console.error("::error::entry " + i + " `credentialType` must be \"password\" or \"oauth\".");
+                // SG-MM-ICE-VENDING: SG_ICE_SERVERS_JSON is for PUBLIC,
+                // NON-SECRET STUN entries only. Reject any entry that
+                // carries `username` or `credential` — long-lived TURN
+                // credentials in the public site would expose the TURN
+                // service to abuse. Short-lived credentials belong in the
+                // runtime vending endpoint (SG_ICE_CREDENTIALS_URL), not
+                // here.
+                if ("username" in e || "credential" in e || "credentialType" in e) {
+                  console.error("::error::entry " + i + " has credentials (username/credential/credentialType). SG_ICE_SERVERS_JSON is for public STUN only — long-lived credentials are a security risk in a public artifact. Use SG_ICE_CREDENTIALS_URL for short-lived runtime vending.");
                   process.exit(1);
                 }
               }
@@ -184,13 +201,27 @@ jobs:
             ' -- "$ICE_SERVERS_JSON")"
             echo "ICE servers configured: $(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).length))' -- "$ICE") entries."
           fi
+          # Validate SG_ICE_CREDENTIALS_URL when set. Must be a syntactically
+          # valid absolute URL with https:// (production). http:// is rejected
+          # outright here — even localhost http is not exempted, because the
+          # URL in the deployed artifact will be hit by real visitors on
+          # https pages, where mixed content would be blocked silently.
+          ICE_CREDENTIALS_URL_STAMPED="null"
+          if [ -n "${ICE_CREDENTIALS_URL:-}" ]; then
+            case "$ICE_CREDENTIALS_URL" in
+              https://*) ;;
+              *) echo "::error::SG_ICE_CREDENTIALS_URL must be an https:// URL (got '$ICE_CREDENTIALS_URL')." ; exit 1 ;;
+            esac
+            ICE_CREDENTIALS_URL_STAMPED="$ICE_CREDENTIALS_URL"
+            echo "ICE credentials vending endpoint: $ICE_CREDENTIALS_URL"
+          fi
           # Pages is https, and a ws:// dial from an https page is blocked by
           # the browser SILENTLY (net.js says so at its own localhost branch).
           # Fail the deploy instead of shipping a site whose multiplayer looks
           # broken for no visible reason.
           if [ -z "$RELAY_URL" ]; then
             echo "SG_RELAY_URL unset — deploying a single-player site (no relay, transport=p2p but no signaling target)."
-            node -e 'process.stdout.write(JSON.stringify({url: null, transport: "p2p", iceServers: JSON.parse(process.argv[1])}))' -- "$ICE" > site/assets/relay.json
+            node -e 'process.stdout.write(JSON.stringify({url: null, transport: "p2p", iceServers: JSON.parse(process.argv[1]), iceCredentialsUrl: process.argv[2] === "null" ? null : process.argv[2]}))' -- "$ICE" "$ICE_CREDENTIALS_URL_STAMPED" > site/assets/relay.json
             exit 0
           fi
           case "$RELAY_URL" in
@@ -198,9 +229,14 @@ jobs:
             *) echo "::error::SG_RELAY_URL must be wss:// (got '$RELAY_URL'); ws:// is blocked as mixed content on Pages." ; exit 1 ;;
           esac
           node -e '
-            const out = { url: process.argv[1], transport: "p2p", iceServers: JSON.parse(process.argv[2]) };
+            const out = {
+              url: process.argv[1],
+              transport: "p2p",
+              iceServers: JSON.parse(process.argv[2]),
+              iceCredentialsUrl: process.argv[3] === "null" ? null : process.argv[3],
+            };
             process.stdout.write(JSON.stringify(out));
-          ' -- "$RELAY_URL" "$ICE" > site/assets/relay.json
+          ' -- "$RELAY_URL" "$ICE" "$ICE_CREDENTIALS_URL_STAMPED" > site/assets/relay.json
           echo "Relay configured: $RELAY_URL (transport=p2p)"
 
       - name: Check budgets

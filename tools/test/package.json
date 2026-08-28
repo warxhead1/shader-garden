@@ -18,6 +18,7 @@
     "mp-clock": "node mp-clock.mjs",
     "mp-p2p-unit": "node mp-p2p-unit.mjs",
     "mp-p2p-two-browsers": "node mp-p2p-two-browsers.mjs",
+    "mp-ice-credentials": "node mp-ice-credentials.mjs",
     "mp-two-browsers": "node mp-two-browsers.mjs",
     "mp-dual-workspace": "node mp-dual-workspace.mjs",
     "mp-compile-swap": "node mp-compile-swap.mjs",

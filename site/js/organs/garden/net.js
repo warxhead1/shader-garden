@@ -7,6 +7,14 @@
 // own id or reject), §7.4's "Start" uses `game.start`, `poses` batches
 // carry the array under a `poses` key. Weekend P2P: p2p-socket.js dynamic-
 // imported; selection ?relay=/?transport= > relay.json > localhost ws.
+// SG-MM-ICE-VENDING: when assets/relay.json's optional `iceCredentialsUrl`
+// is configured, this module fetches a short-lived ICE/TURN credential
+// document BEFORE every createP2PSocket call (i.e. every connect/reconnect),
+// validates the response, and merges the result with the public STUN
+// entries. Failure is fail-closed when the URL was configured — the
+// connection does not dial without ephemeral credentials, and credentials
+// never appear in storage or logs. See fetchIceCredentials() below for the
+// validation contract and resolveTransportConfig() for URL preservation.
 
 import { createTimeSync } from './timesync.js';
 import { createRoster } from './roster.js';
@@ -60,7 +68,7 @@ export async function resolveTransportConfig({ queryRelay, queryTransport, hostn
   // a neverFetch probe must never be called. `?transport=` still runs here.
   if (queryRelay) {
     const transport = (queryTransport === 'p2p' || queryTransport === 'ws') ? queryTransport : 'ws';
-    return { url: queryRelay, transport, iceServers: [], source: 'query' };
+    return { url: queryRelay, transport, iceServers: [], iceCredentialsUrl: null, source: 'query' };
   }
   // Legacy-shape fetch: STRING URL, OBJECT, or null. Coerce before reading
   // — otherwise `json.url` is `undefined` on a string return and the
@@ -71,6 +79,16 @@ export async function resolveTransportConfig({ queryRelay, queryTransport, hostn
   const jsonUrl = jsonObj ? jsonObj.url : jsonStr;
   const jsonTransport = jsonObj ? jsonObj.transport : undefined;
   const iceServers = Array.isArray(jsonObj && jsonObj.iceServers) ? jsonObj.iceServers : [];
+  // SG-MM-ICE-VENDING: iceCredentialsUrl is the operator-deployed URL of a
+  // short-lived TURN credential vending endpoint. Optional; absence =
+  // direct connectivity only (the pre-vending behaviour). Validated to
+  // be a string when present — anything else is treated as "not set"
+  // rather than a hard error, so a malformed deployment doesn't lock the
+  // site out of P2P entirely.
+  const rawIceCredUrl = jsonObj ? jsonObj.iceCredentialsUrl : undefined;
+  const iceCredentialsUrl = typeof rawIceCredUrl === 'string' && rawIceCredUrl.length > 0
+    ? rawIceCredUrl
+    : null;
   let url = null;
   let source = 'no-config';
   if (jsonUrl) { url = jsonUrl; source = 'relay.json'; }
@@ -90,7 +108,130 @@ export async function resolveTransportConfig({ queryRelay, queryTransport, hostn
   } else if (source !== 'query' && (jsonTransport === 'p2p' || jsonTransport === 'ws')) {
     transport = jsonTransport;
   }
-  return { url, transport, iceServers, source };
+  return { url, transport, iceServers, iceCredentialsUrl, source };
+}
+
+/** Pure: fetch a short-lived ICE/TURN credential document before creating
+ *  an RTCPeerConnection (SG-MM-ICE-VENDING). Plain inputs (no `window`)
+ *  so the validation logic is unit-testable; the caller (connectRoom)
+ *  passes `fetchImpl` from `globalThis.fetch` in production.
+ *
+ *  Contract (spec §2.5 + the deploy brief):
+ *   - GET the endpoint with `cache:'no-store', credentials:'omit', Accept:
+ *     application/json`. The omit-credentials flag stops the browser from
+ *     sending any cookies to the vending host, which keeps the endpoint
+ *     callable across origins without inheriting session state.
+ *   - Require an ok response. 401/403/5xx all fail closed.
+ *   - Require a JSON OBJECT body whose `iceServers` field is an ARRAY of
+ *     RTCIceServer-shaped entries (urls string OR nonempty string[]; optional
+ *     username/credential strings when present).
+ *   - Empty / malformed bodies fail closed — the connection will not
+ *     attempt to dial, the relay-status pill surfaces the failure, the
+ *     retry backoff takes over (per the brief: "fail-closed when
+ *     iceCredentialsUrl was configured").
+ *   - The returned `iceServers` array is the validated-and-trusted array;
+ *     credentials NEVER appear in logs. The `{ok:false, error}` path
+ *     identifies failure by a short tag (e.g. 'http-401', 'bad-json') —
+ *     useful for diagnostics, useless for replay.
+ */
+export async function fetchIceCredentials({ url, fetchImpl, isHttps, hostname }) {
+  if (typeof url !== 'string' || url.length === 0) {
+    return { ok: false, error: 'no-url' };
+  }
+  let parsed;
+  try { parsed = new URL(url); } catch {
+    return { ok: false, error: 'bad-url' };
+  }
+  // Production must be https. Plain http is allowed ONLY on localhost for
+  // the test rig — a production http URL would be silently downgraded by
+  // the browser and the credentials would land on the wire in cleartext.
+  if (parsed.protocol !== 'https:') {
+    if (parsed.protocol === 'http:') {
+      const host = parsed.hostname;
+      if (host !== 'localhost' && host !== '127.0.0.1') {
+        return { ok: false, error: 'http-not-localhost' };
+      }
+      // Localhost http on a non-https page is fine (dev only); on an https
+      // page the browser would block mixed content — refuse.
+      if (isHttps) {
+        return { ok: false, error: 'mixed-content' };
+      }
+    } else {
+      return { ok: false, error: 'bad-protocol' };
+    }
+  }
+
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      cache: 'no-store',
+      credentials: 'omit',
+      headers: { Accept: 'application/json' },
+    });
+  } catch {
+    return { ok: false, error: 'fetch-failed' };
+  }
+  if (!response || typeof response.ok !== 'boolean') {
+    return { ok: false, error: 'bad-response' };
+  }
+  if (!response.ok) {
+    return { ok: false, error: 'http-' + response.status };
+  }
+
+  let body;
+  try { body = await response.json(); } catch {
+    return { ok: false, error: 'bad-json' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, error: 'not-object' };
+  }
+  if (!Array.isArray(body.iceServers)) {
+    return { ok: false, error: 'no-ice-servers' };
+  }
+  if (body.iceServers.length === 0) {
+    return { ok: false, error: 'empty-ice-servers' };
+  }
+  const validated = [];
+  for (const entry of body.iceServers) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { ok: false, error: 'bad-entry' };
+    }
+    // urls: required, must be a non-empty string OR a non-empty array of
+    // non-empty strings. WebRTC requires every entry to actually point at
+    // something reachable — an empty array would never dial, an empty
+    // string would parse as a relative URL.
+    if (typeof entry.urls === 'string') {
+      if (entry.urls.length === 0) {
+        return { ok: false, error: 'empty-urls' };
+      }
+    } else if (Array.isArray(entry.urls)) {
+      if (entry.urls.length === 0) {
+        return { ok: false, error: 'empty-urls' };
+      }
+      for (const u of entry.urls) {
+        if (typeof u !== 'string' || u.length === 0) {
+          return { ok: false, error: 'bad-urls' };
+        }
+      }
+    } else {
+      return { ok: false, error: 'bad-urls' };
+    }
+    // username / credential are optional and, when present, must be
+    // strings. We intentionally do NOT enforce non-emptiness — the spec
+    // allows `username: ''` (e.g. for `stun:`-only entries that the
+    // provider nevertheless emits with an empty `username`), and the
+    // browser will reject any malformed TURN pair at dial time. The
+    // important gate here is the type, not the content.
+    if ('username' in entry && typeof entry.username !== 'string') {
+      return { ok: false, error: 'bad-username' };
+    }
+    if ('credential' in entry && typeof entry.credential !== 'string') {
+      return { ok: false, error: 'bad-credential' };
+    }
+    validated.push(entry);
+  }
+
+  return { ok: true, iceServers: validated };
 }
 
 /** Correction 5: backward-compat alias. mp-netclient.mjs §2.5 calls
@@ -402,7 +543,9 @@ export function connectRoom(opts) {
     if (relayUrlOverride) {
       // Bypasses query/JSON/localhost — must NOT touch `window` (undefined
       // in node unit harness). Tests/programmatic callers; always ws.
-      return { url: relayUrlOverride, transport: 'ws', iceServers: [], source: 'override' };
+      // No iceCredentialsUrl in override mode — the override is a
+      // developer escape hatch, not a production vending path.
+      return { url: relayUrlOverride, transport: 'ws', iceServers: [], iceCredentialsUrl: null, source: 'override' };
     }
     const query = new URLSearchParams(window.location.search);
     const res = await resolveTransportConfig({
@@ -431,12 +574,64 @@ export function connectRoom(opts) {
     let next;
     try {
       if (cfg.transport === 'p2p') {
+        // SG-MM-ICE-VENDING: when the deployed config names an
+        // iceCredentialsUrl, fetch a fresh credential document on EVERY
+        // connect/reconnect attempt and merge the result with the public
+        // STUN list BEFORE createP2PSocket is called. TURN credentials
+        // are short-lived (REST-style TTL on the vending side), so a
+        // reconnect needs a fresh document or the next dial fails.
+        //
+        // Failure here is fail-closed: we surface the retrying status
+        // and let scheduleReconnect back off. The credentials themselves
+        // never land in storage or logs — only the short error tag
+        // ('http-401', 'bad-json', etc.) is visible.
+        let mergedIceServers = Array.isArray(cfg.iceServers) ? cfg.iceServers : [];
+        if (cfg.iceCredentialsUrl) {
+          const isHttps = typeof window !== 'undefined'
+            ? window.location.protocol === 'https:'
+            : false;
+          const fetchImpl = (typeof window !== 'undefined' && typeof window.fetch === 'function')
+            ? window.fetch.bind(window)
+            : (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function')
+              ? globalThis.fetch
+              : null;
+          if (!fetchImpl) {
+            onStatus && onStatus({ state: 'retrying', message: 'no-fetch' });
+            scheduleReconnect();
+            return;
+          }
+          const vendRes = await fetchIceCredentials({
+            url: cfg.iceCredentialsUrl,
+            fetchImpl,
+            isHttps,
+            hostname: typeof window !== 'undefined' ? window.location.hostname : '',
+          });
+          if (!vendRes.ok) {
+            // Fail-closed when the vending endpoint was configured: a
+            // missing/malformed body on a configured endpoint means we
+            // cannot honour the operator's TURN choice, and silently
+            // falling through to STUN-only would degrade two peers'
+            // connectivity in a way neither of them could explain.
+            onStatus && onStatus({
+              state: 'retrying',
+              message: `ice-vend:${vendRes.error}`,
+            });
+            scheduleReconnect();
+            return;
+          }
+          // Merge: public STUN (from relay.json's `iceServers`) FIRST,
+          // then ephemeral (from the vending endpoint). WebRTC will try
+          // both — public STUN is cheaper, TURN is the fallback when
+          // direct paths are blocked. Order matters only for debugging
+          // visibility, not for connectivity.
+          mergedIceServers = mergedIceServers.concat(vendRes.iceServers);
+        }
         // Dynamic import — keeps p2p bundle off ws-only/solo/test paths.
         const { createP2PSocket } = await import('../../multiplayer/p2p-socket.js');
         next = createP2PSocket({
           signalUrl: cfg.url,
           room, name,
-          iceServers: cfg.iceServers || [],
+          iceServers: mergedIceServers,
           WebSocketImpl: window.WebSocket,
           RTCPeerConnectionImpl: window.RTCPeerConnection,
         });

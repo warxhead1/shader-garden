@@ -342,7 +342,12 @@ AGGREGATES = [
     # three new in-place tune methods + the tuneRanges Map). Actual
     # 3647/3660 at the time of writing. The aggregate moves WITH the
     # per-file rows so a single file cannot grow the organ silently.
-    ("site/js/organs/garden/*.js", 3660, None),
+    # 3660 -> 3855: SG-MM-ICE-VENDING. net.js grows to 773 LOC for the
+    # fetchIceCredentials() helper, the iceCredentialsUrl field on
+    # resolveTransportConfig/resolveConfig, and the connect() vend-and-
+    # merge path that runs before every createP2PSocket. The other garden
+    # files are untouched. Actual 3855/3855. Raised deliberately.
+    ("site/js/organs/garden/*.js", 3855, None),
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.
@@ -395,7 +400,15 @@ AGGREGATES = [
     # rejects and local compile failures; getTransport() exposed for the
     # status pill. Actual 578/590. Bumped to 590 for the rationale
     # comments documenting the §7.4 / Weekend P2P §3 / §5.3 references.
-    ("site/js/organs/garden/net.js", 590, None),
+    # 590 -> 800: SG-MM-ICE-VENDING. fetchIceCredentials() helper
+    # (URL/protocol validation, ok-response gate, JSON-object+iceServers-
+    # array shape validation, per-entry urls/username/credential type
+    # checks, empty-array fail-closed) plus the `iceCredentialsUrl` field
+    # plumbed through resolveTransportConfig / resolveConfig / connect()
+    # so every connect/reconnect attempts a fresh vending fetch BEFORE
+    # createP2PSocket, merges public STUN + ephemeral entries, and
+    # fails closed when the URL was configured. Actual 773/800.
+    ("site/js/organs/garden/net.js", 800, None),
     # timesync.js: min-RTT offset estimator, spec §3. 111/130.
     ("site/js/organs/garden/timesync.js", 130, None),
     # roster.js: peer slot allocation for the flattened uniform bank. 80/100.

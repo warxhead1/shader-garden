@@ -1,5 +1,6 @@
 {
   "url": null,
   "transport": "p2p",
-  "iceServers": []
+  "iceServers": [],
+  "iceCredentialsUrl": null
 }

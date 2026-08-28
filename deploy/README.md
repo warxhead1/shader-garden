@@ -1,9 +1,9 @@
-# deploy/ — provider-neutral TURN reference
+# deploy/ — provider-neutral multiplayer host
 
-This directory is a standalone reference for running a coturn instance
-alongside the existing Shader Garden relay. It is NOT wired into the
-repo's deploy.yml / GitHub Actions workflow and it does NOT mutate any
-service configuration.
+This directory includes a single-host stack for the signaling relay, Caddy
+TLS termination, and coturn, plus a standalone coturn reference. It is not
+started by the GitHub Pages workflow; Pages only receives the resulting public
+URLs through repository variables.
 
 ## What's here
 
@@ -12,6 +12,25 @@ service configuration.
 | `turnserver.conf.example` | The coturn config — read by the entrypoint at startup, placeholders filled in from env. |
 | `turn-entrypoint.sh` | Renders the config under `/run/turnserver.conf` (mode 0600) and execs `coturn`. |
 | `compose.turn.yml` | A `docker compose` reference using the official `coturn/coturn` image. |
+| `compose.host.yml` | Relay + Caddy + coturn on one public host. |
+| `Caddyfile` | Automatic HTTPS and WebSocket proxying for the relay. |
+| `host.env.example` | Non-secret placeholders for the gitignored runtime env file. |
+
+## Single-host quick-start
+
+```sh
+cp deploy/host.env.example deploy/host.env
+# Fill every value; generate the secret with: openssl rand -hex 32
+docker compose --env-file deploy/host.env -f deploy/compose.host.yml config
+docker compose --env-file deploy/host.env -f deploy/compose.host.yml up -d --build
+docker compose --env-file deploy/host.env -f deploy/compose.host.yml ps
+curl -fsS "https://$(sed -n 's/^SG_PUBLIC_HOST=//p' deploy/host.env)/healthz"
+```
+
+The relay is reachable only through Caddy. Coturn exposes 3478 over UDP/TCP
+and the bounded 49152–49407 UDP relay range. The stack deliberately does not
+advertise `turns:` until coturn certificate provisioning exists; WebRTC data
+remains DTLS-encrypted when relayed over `turn:`.
 
 ## Operator quick-start
 
@@ -30,10 +49,11 @@ cd /path/to/turn-deploy
 cat > .env <<EOF
 SG_TURN_SHARED_SECRET=<paste-the-secret>
 SG_TURN_REALM=turn.example.org
+SG_TURN_EXTERNAL_IP=<public-ipv4>
 EOF
 
 # 4. Give the same SG_TURN_SHARED_SECRET to the relay container, plus
-#    SG_TURN_URLS=turn:turn.example.org:3478?transport=udp,turns:turn.example.org:5349?transport=tcp
+#    SG_TURN_URLS=turn:turn.example.org:3478?transport=udp,turn:turn.example.org:3478?transport=tcp
 #    and SG_ALLOWED_ORIGINS=https://<your-pages-origin>.
 
 # 5. Start coturn.

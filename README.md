@@ -123,7 +123,12 @@ it is hide-and-seek.
   [DEPLOY.md](DEPLOY.md); it boils down to setting one repository variable
   and the deploy workflow stamps it into the published artifact. For
   P2P+ICE/TURN, the same workflow accepts an optional
-  `SG_ICE_SERVERS_JSON` secret and validates it with Node before stamping.
+  `SG_ICE_SERVERS_JSON` variable and validates it with Node before stamping.
+
+For a single-host multiplayer deployment (TLS signaling relay plus coturn),
+see [deploy/README.md](deploy/README.md). The TURN shared secret exists only
+in the host's gitignored `deploy/host.env`; it is never stored in GitHub Pages
+or exposed to browsers.
 
 The shipped garden is a single-player static PWA; The Commons is additive
 and off by default (public Pages without a configured relay is a clean

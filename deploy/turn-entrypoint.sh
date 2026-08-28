@@ -14,6 +14,7 @@
 # PLACEHOLDER markers replaced:
 #   PLACEHOLDER_STATIC_AUTH_SECRET  → $SG_TURN_SHARED_SECRET  (required)
 #   PLACEHOLDER_REALM                → $SG_TURN_REALM          (default: turn.example.org)
+#   PLACEHOLDER_EXTERNAL_IP          → $SG_TURN_EXTERNAL_IP    (required)
 #
 # Substitution is done with awk (not bash's ${var//pat/rep}) so a secret
 # containing `&`, `\`, or shell-special characters is replaced verbatim
@@ -34,6 +35,11 @@ RENDERED="${TURN_RENDERED:-/run/turnserver.conf}"
 
 if [ -z "${SG_TURN_SHARED_SECRET:-}" ]; then
   echo "[turn-entrypoint] SG_TURN_SHARED_SECRET is required and must be non-empty" >&2
+  exit 1
+fi
+
+if [ -z "${SG_TURN_EXTERNAL_IP:-}" ]; then
+  echo "[turn-entrypoint] SG_TURN_EXTERNAL_IP is required and must be non-empty" >&2
   exit 1
 fi
 
@@ -60,8 +66,10 @@ awk '
   BEGIN {
     secret = ENVIRON["SG_TURN_SHARED_SECRET"]
     realm = (ENVIRON["SG_TURN_REALM"] == "") ? "turn.example.org" : ENVIRON["SG_TURN_REALM"]
+    external_ip = ENVIRON["SG_TURN_EXTERNAL_IP"]
     ph_s = "PLACEHOLDER_STATIC_AUTH_SECRET"
     ph_r = "PLACEHOLDER_REALM"
+    ph_e = "PLACEHOLDER_EXTERNAL_IP"
   }
   {
     line = $0
@@ -71,6 +79,14 @@ awk '
     while ((p = index(rest, ph_s)) > 0) {
       out = out substr(rest, 1, p - 1) secret
       rest = substr(rest, p + length(ph_s))
+    }
+    line = out rest
+    # Replace placeholder_external_ip.
+    out = ""
+    rest = line
+    while ((p = index(rest, ph_e)) > 0) {
+      out = out substr(rest, 1, p - 1) external_ip
+      rest = substr(rest, p + length(ph_e))
     }
     line = out rest
     # Replace placeholder_realm.
@@ -95,7 +111,7 @@ if awk '
   {
     line = $0
     sub(/[ \t]*#.*$/, "", line)
-    if (line ~ /PLACEHOLDER_(STATIC_AUTH_SECRET|REALM)/) { found = 1; exit 0 }
+    if (line ~ /PLACEHOLDER_(STATIC_AUTH_SECRET|REALM|EXTERNAL_IP)/) { found = 1; exit 0 }
   }
   END { exit (found ? 0 : 1) }
 ' "$RENDERED"; then

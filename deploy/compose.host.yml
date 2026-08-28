@@ -1,0 +1,80 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: shaderland/relay:host
+    restart: unless-stopped
+    environment:
+      SG_ALLOWED_ORIGINS: "${SG_ALLOWED_ORIGINS:?set SG_ALLOWED_ORIGINS in deploy/host.env}"
+      SG_TURN_SHARED_SECRET: "${SG_TURN_SHARED_SECRET:?set SG_TURN_SHARED_SECRET in deploy/host.env}"
+      SG_TURN_URLS: "${SG_TURN_URLS:?set SG_TURN_URLS in deploy/host.env}"
+      SG_TURN_TTL_SECONDS: "${SG_TURN_TTL_SECONDS:-600}"
+      SG_TURN_CREDENTIALS_PER_MINUTE: "${SG_TURN_CREDENTIALS_PER_MINUTE:-30}"
+    expose:
+      - "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SG_PUBLIC_HOST: "${SG_PUBLIC_HOST:?set SG_PUBLIC_HOST in deploy/host.env}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      relay:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  turn:
+    image: coturn/coturn:4.7
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/turn-entrypoint.sh", "turnserver"]
+    user: "65534:65534"
+    environment:
+      SG_TURN_SHARED_SECRET: "${SG_TURN_SHARED_SECRET:?set SG_TURN_SHARED_SECRET in deploy/host.env}"
+      SG_TURN_REALM: "${SG_PUBLIC_HOST:?set SG_PUBLIC_HOST in deploy/host.env}"
+      SG_TURN_EXTERNAL_IP: "${SG_PUBLIC_IP:?set SG_PUBLIC_IP in deploy/host.env}"
+    volumes:
+      - ./turnserver.conf.example:/etc/coturn/turnserver.conf:ro
+      - ./turn-entrypoint.sh:/usr/local/bin/turn-entrypoint.sh:ro
+    tmpfs:
+      - /run:size=1M,mode=0700,uid=65534,gid=65534
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49152-49407:49152-49407/udp"
+    healthcheck:
+      test: ["CMD-SHELL", "pidof turnserver >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  caddy_data:
+  caddy_config:

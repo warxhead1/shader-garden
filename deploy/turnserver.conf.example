@@ -28,6 +28,7 @@ tls-listening-port=5349
 # ---- Realm / auth -----------------------------------------------------------
 
 realm=PLACEHOLDER_REALM
+external-ip=PLACEHOLDER_EXTERNAL_IP
 use-auth-secret
 static-auth-secret=PLACEHOLDER_STATIC_AUTH_SECRET
 

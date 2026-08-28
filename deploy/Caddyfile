@@ -1,0 +1,3 @@
+{$SG_PUBLIC_HOST} {
+    reverse_proxy relay:8787
+}

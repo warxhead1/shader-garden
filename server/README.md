@@ -148,7 +148,7 @@ framing rather than pulling in `ws`), so the image is just the base plus three
 files, and there is no install step to break.
 
 ```sh
-docker build -t sg-relay server/
+docker build -t sg-relay -f server/Dockerfile .
 docker run -p 8787:8787 -e SG_ALLOWED_ORIGINS=https://<owner>.github.io sg-relay
 ```
 

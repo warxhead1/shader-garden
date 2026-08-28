@@ -135,7 +135,7 @@ for WebSockets instead. That means:
 The image is just `server/Dockerfile` plus three files:
 
 ```sh
-docker build -t sg-relay server/
+docker build -t sg-relay -f server/Dockerfile .
 docker run -p 8787:8787 \
   -e SG_ALLOWED_ORIGINS=https://<user>.github.io \
   sg-relay

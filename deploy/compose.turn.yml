@@ -8,6 +8,8 @@
 #                            only ever hands clients an HMAC of it.
 #   SG_TURN_REALM          — a hostname you control (e.g. turn.example.org).
 #                            Used as the STUN long-term credential realm.
+#   SG_TURN_EXTERNAL_IP    — the host's public IPv4 address. Required when
+#                            coturn runs behind Docker's bridge/NAT.
 #
 # The shared secret is NEVER baked into the image. It is provided at
 # runtime via an env var, read by deploy/turn-entrypoint.sh, substituted
@@ -44,6 +46,7 @@ services:
     environment:
       SG_TURN_SHARED_SECRET: "${SG_TURN_SHARED_SECRET:?SG_TURN_SHARED_SECRET must be set in the operator's .env}"
       SG_TURN_REALM: "${SG_TURN_REALM:-turn.example.org}"
+      SG_TURN_EXTERNAL_IP: "${SG_TURN_EXTERNAL_IP:?SG_TURN_EXTERNAL_IP must be set in the operator's .env}"
     # /run is tmpfs on most container runtimes — the rendered config lives
     # there only for the lifetime of the container.
     tmpfs:
@@ -66,9 +69,6 @@ services:
       - "3478:3478/udp"
       # STUN/TURN over TCP — fallback when UDP is blocked.
       - "3478:3478/tcp"
-      # TURNS over TLS — required when the page is on HTTPS and the
-      # network blocks plain UDP/TCP to 3478.
-      - "5349:5349/tcp"
       # Bounded relay UDP range. The coturn reference config uses
       # 49152..49407 (256 ports); expand here if you change that range.
       # These MUST match min-port / max-port in turnserver.conf.example.

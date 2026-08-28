@@ -1,0 +1,26 @@
+# deploy/fail2ban-jail.local — install to /etc/fail2ban/jail.local
+#
+# SSH on this host is already key-only (`PasswordAuthentication no`), so this
+# is not what keeps an attacker out — the missing private key is. What it buys
+# is quiet: a public IPv4 on a well-known cloud range collects continuous
+# credential-stuffing noise, and every one of those attempts is a journal line
+# that a real incident then has to be found inside of.
+#
+# Deliberately NOT a lockout risk for the operator: fail2ban counts
+# authentication FAILURES, and a successful key auth is not one. An operator
+# holding the key can reconnect all day without ever incrementing a counter.
+[DEFAULT]
+# Ubuntu 24.04 logs sshd to the journal, not /var/log/auth.log — the file-based
+# backend would silently watch a file that never gets written and ban nobody.
+backend = systemd
+bantime = 1h
+findtime = 10m
+maxretry = 5
+# Never ban the loopback or the container bridge; the relay, Caddy and coturn
+# all talk to the host across it.
+ignoreip = 127.0.0.1/8 ::1 172.16.0.0/12
+
+[sshd]
+enabled = true
+port = 22
+mode = aggressive

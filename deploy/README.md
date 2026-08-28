@@ -15,6 +15,8 @@ URLs through repository variables.
 | `compose.host.yml` | Relay + Caddy + coturn on one public host. |
 | `Caddyfile` | Automatic HTTPS and WebSocket proxying for the relay. |
 | `host.env.example` | Non-secret placeholders for the gitignored runtime env file. |
+| `sg-watchdog.sh` + `.service` + `.timer` | Every-2-minute health probe over the PUBLIC path, with bounded self-healing. |
+| `fail2ban-jail.local` | SSH jail config for the host (install to `/etc/fail2ban/jail.local`). |
 
 ## Single-host quick-start
 
@@ -59,6 +61,58 @@ EOF
 # 5. Start coturn.
 docker compose -f compose.turn.yml up -d
 ```
+
+## Keeping it up — the watchdog
+
+Compose declares a healthcheck per container, but Docker never ACTS on one:
+`restart: unless-stopped` reacts to a process that EXITED, not to one that is
+up and wedged. And a container-internal check cannot see the things most
+likely to break in production anyway — TLS, the proxy in front, or a coturn
+that is running but no longer answering (its compose healthcheck is
+`pidof turnserver`, which proves only that a process exists).
+
+`sg-watchdog.sh` closes both gaps by probing the path a browser actually uses:
+
+- `GET https://$SG_PUBLIC_HOST/healthz` — Caddy, TLS and the relay together.
+- A real STUN Binding request to `3478/udp` — coturn actually replying.
+
+Install it:
+
+```sh
+install -m 0755 deploy/sg-watchdog.sh /usr/local/bin/sg-watchdog.sh
+install -m 0644 deploy/sg-watchdog.service deploy/sg-watchdog.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now sg-watchdog.timer
+journalctl -t sg-watchdog -f
+```
+
+Restarts are deliberately hard to trigger and hard to repeat: failures must be
+CONSECUTIVE (3 by default) and each service has a 10-minute cooldown, so a
+flapping dependency cannot become a restart loop. When the public probe fails
+while the relay container still reports healthy, the watchdog restarts **Caddy**
+rather than the relay — a restart aimed at the wrong service is just downtime
+with extra steps. Tunables (`SG_FAIL_THRESHOLD`, `SG_RESTART_COOLDOWN`,
+`SG_COMPOSE_DIR`) are environment overrides on the unit.
+
+Verify it can actually fire — a watchdog that has never fired is
+indistinguishable from a broken one:
+
+```sh
+docker compose --env-file deploy/host.env -f deploy/compose.host.yml stop turn
+systemctl start sg-watchdog.service   # x3; the third restarts coturn
+journalctl -t sg-watchdog -n 10
+```
+
+## Host hardening
+
+`fail2ban-jail.local` → `/etc/fail2ban/jail.local`, then
+`systemctl restart fail2ban`. SSH here should already be key-only, so this is
+not what keeps an attacker out — it keeps the journal readable, so a real
+incident is not buried under continuous credential-stuffing noise. It counts
+authentication FAILURES, and a successful key auth is not one, so it cannot
+lock out an operator holding the key. Note the `backend = systemd` line:
+Ubuntu 24.04 logs sshd to the journal, and the default file backend would
+happily watch a `/var/log/auth.log` that is never written and ban nobody.
 
 ## Why an entrypoint script?
 

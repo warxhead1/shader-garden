@@ -81,6 +81,32 @@ test('resolveTransportConfig: omits iceCredentialsUrl when JSON does not name it
   assert.equal(res.iceCredentialsUrl, null);
 });
 
+test('resolveTransportConfig: an explicit null iceCredentialsUrl is "not configured", not malformed', async () => {
+  // Regression. This is the EXACT shape the repo ships (spec §2.5) and the
+  // exact shape deploy.yml stamps when SG_ICE_CREDENTIALS_URL is unset, so if
+  // it throws, the default artifact cannot be resolved by its own resolver.
+  // The damage was remote from the cause: connect() catches the TypeError and
+  // schedules a reconnect, so a single-player deploy's room route backed off
+  // forever tagged `ice-config:bad-type` instead of settling into the clean
+  // `no-relay` state DEPLOY.md §5.3 promises. Production sets the field and
+  // the solo route never dials, which is why this survived — the null case is
+  // deliberately NOT in the malformed list in the test below.
+  const res = await resolveTransportConfig({
+    queryRelay: null,
+    hostname: 'example.com',
+    isHttps: true,
+    fetchTransportJson: async () => ({
+      url: null,
+      transport: 'p2p',
+      iceServers: [],
+      iceCredentialsUrl: null,
+    }),
+  });
+  assert.equal(res.iceCredentialsUrl, null);
+  assert.equal(res.url, null);
+  assert.equal(res.source, 'no-config');
+});
+
 test('resolveTransportConfig: malformed iceCredentialsUrl throws (deploy-time gate, not silent coerce)', async () => {
   // Spec §2.7 security nuance: a present-but-malformed iceCredentialsUrl
   // (wrong type OR empty string) must fail resolution rather than silently

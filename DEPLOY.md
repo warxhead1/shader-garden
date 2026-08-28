@@ -318,7 +318,11 @@ already ships.
    `https://<domain>/assets/relay.json` in a browser). `{"url": null}`
    means single-player and the rehearsal cannot start.
 2. Agree on ONE room name — plain lowercase, no spaces, e.g. `rehearsal-1`.
-   Both households open `https://<domain>/#/garden/<room>`.
+   The easy path is `https://<domain>/#/play`: type the name there, hit
+   **Open the room**, and use **Copy invite link** to send the other
+   household the exact URL rather than dictating it. Both of you can also
+   just open `https://<domain>/#/garden/<room>` directly — the lobby only
+   builds that URL, it is not a separate entry point.
 3. Decide who joins FIRST. The first signal member of a room is the
    immutable host (`docs/multiplayer-spec.md` §Weekend P2P); host loss is
    fail-closed with no re-election, so "who hosts" is a decision, not an

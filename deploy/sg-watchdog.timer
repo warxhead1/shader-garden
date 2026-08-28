@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the Shader Garden host watchdog every 2 minutes
+Documentation=https://github.com/warxhead1/shader-garden/blob/main/deploy/README.md
+
+[Timer]
+# First run shortly after boot — but not instantly: the stack's own containers
+# are still coming up, and a probe that races them would spend its first cycles
+# counting failures against a host that is merely still starting.
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=false
+Unit=sg-watchdog.service
+
+[Install]
+WantedBy=timers.target

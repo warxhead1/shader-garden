@@ -210,11 +210,35 @@ export async function mount(ctx) {
     nameInput.value = loadMpName();
     const ghostNote = el('div', 'garden-ghost-note muted',
       'the garden is a ghost world — hiding is visual only, you pass through matter');
+    // The first thing you do in a room is get someone else INTO it, and the
+    // room URL is the only way in. Before this, sharing it meant knowing to
+    // copy the address bar — so an empty room looked like a broken feature
+    // rather than one waiting on a guest.
+    const inviteBtn = el('button', 'btn btn-small btn-ghost garden-invite-btn', 'Copy invite link');
+    inviteBtn.type = 'button';
+    let inviteTimer = 0;
+    inviteBtn.addEventListener('click', async () => {
+      let ok = false;
+      try {
+        // No clipboard API off a secure context — normal on a dev host, not
+        // an error, so fall back to "select it and hit copy" rather than
+        // reporting a failure the player cannot act on.
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(location.href);
+          ok = true;
+        }
+      } catch { /* fall through */ }
+      inviteBtn.textContent = ok ? 'Copied — send it over' : 'Copy from the address bar';
+      clearTimeout(inviteTimer);
+      inviteTimer = setTimeout(() => { inviteBtn.textContent = 'Copy invite link'; }, 2400);
+    });
     const mpPanel = el('div', 'garden-mp-panel glass');
+    const inviteHead = el('div', 'garden-mp-head', 'Invite');
     const rosterHead = el('div', 'garden-mp-head', 'Who’s here');
     const leaseHead = el('div', 'garden-mp-head', 'The lectern');
     const gameHead = el('div', 'garden-mp-head', 'Hide and seek');
     mpPanel.append(
+      inviteHead, inviteBtn,
       rosterHead, nameInput, roster,
       leaseHead, leaseLine, leaseBtn,
       gameHead, gamePill, gameLine, startBtn,

@@ -70,9 +70,23 @@ export async function resolveTransportConfig({ queryRelay, queryTransport, hostn
   // SG-MM-ICE-VENDING (spec §2.7): malformed iceCredentialsUrl (wrong type
   // or empty) is a broken deploy — reject, never silently coerce to null.
   let iceCredentialsUrl = null;
-  if (jsonObj && 'iceCredentialsUrl' in jsonObj) {
+  // An explicit `null` is NOT malformed — it is the documented "not
+  // configured" value. Spec §2.5 says relay.json ships as
+  // `{..., "iceCredentialsUrl": null}`, and deploy.yml stamps exactly that
+  // whenever SG_ICE_CREDENTIALS_URL is unset. Treating it as malformed made
+  // the repo's own default file un-resolvable: connect() caught the throw and
+  // entered a permanent `ice-config:bad-type` reconnect backoff instead of the
+  // clean `no-relay` single-player state DEPLOY.md §5.3 promises. Invisible in
+  // production (which sets the field) and on the solo route (which never
+  // dials) — it only bit a room route on a default checkout or a
+  // single-player deploy, which is to say every first-time reader.
+  // §2.7's gate is about a present-but-MALFORMED value never being silently
+  // downgraded to "no TURN"; wrong types and the empty string still throw,
+  // which is what mp-ice-credentials.mjs pins (`null` is deliberately absent
+  // from its malformed list).
+  if (jsonObj && 'iceCredentialsUrl' in jsonObj && jsonObj.iceCredentialsUrl !== null) {
     const v = jsonObj.iceCredentialsUrl;
-    if (typeof v !== 'string' || v.length === 0) throw new TypeError('resolveTransportConfig: iceCredentialsUrl must be a non-empty string; see spec §2.7.');
+    if (typeof v !== 'string' || v.length === 0) throw new TypeError('resolveTransportConfig: iceCredentialsUrl must be a non-empty string or null; see spec §2.7.');
     iceCredentialsUrl = v;
   }
   let url = null;
@@ -108,7 +122,12 @@ export async function resolveRelayUrl({ queryRelay, hostname, isHttps, fetchRela
   return { url: res.url, source };
 }
 
-function fetchTransportJsonDefault() {
+// Exported so the /play lobby resolves transport config through the SAME
+// fetch + precedence path connectRoom() uses. resolveTransportConfig() has no
+// default for this argument (callers inject it, which is what keeps the
+// resolver unit-testable), so a second caller either reuses this or
+// hand-copies the best-effort-empty semantics and eventually disagrees.
+export function fetchTransportJsonDefault() {
   // Best-effort-empty: a missing file resolves to "nothing configured".
   return fetch('assets/relay.json')
     .then((r) => (r.ok ? r.json() : {}))

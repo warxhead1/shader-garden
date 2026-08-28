@@ -89,6 +89,12 @@ that one of you edits at a time. When the holder commits, every connected
 player's garden recompiles into the new world. The first game played inside
 it is hide-and-seek.
 
+- **Getting in:** `#/play` — the lobby. Name a room (it suggests one), open
+  it, and copy the invite link to send to the other player; inside a room the
+  multiplayer panel carries the same **Copy invite link** control. The lobby
+  asks the transport resolver whether a relay is actually configured, so a
+  single-player deploy says so plainly instead of offering a room that could
+  never connect.
 - **Route:** `#/garden/:room` — same `#/garden` organ, with a room segment.
   **Solo `#/garden` is unchanged** — no relay, no net code, same single-player
   garden as before. This is invariant I1 of the multiplayer spec and is

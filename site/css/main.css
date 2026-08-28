@@ -1296,12 +1296,94 @@ a:hover { text-decoration: underline; }
 .garden-game-over    { color: var(--muted); }
 .garden-game-line { font-size: 0.8rem; margin-bottom: 0.4rem; }
 .garden-game-start { align-self: flex-start; }
+.garden-invite-btn { align-self: flex-start; margin-bottom: 0.3rem; }
 .garden-ghost-note { font-size: 0.72rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
 
 /* §5.2: the read-only draft mirror — same box, dimmed to read as "watching"
    rather than "editing". */
 .component-editor-readonly { opacity: 0.92; }
 .code-editor-readonly { cursor: default; background: var(--bg-raise); }
+
+/* ================= #/play — the multiplayer lobby ================= */
+
+.commons-wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 4rem 1.25rem 5rem;
+}
+.commons-head { margin-bottom: 1.75rem; }
+.commons-title {
+  margin: 0 0 0.5rem;
+  font-size: clamp(1.9rem, 5vw, 2.6rem);
+  line-height: 1.1;
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.commons-sub { margin: 0; color: var(--muted); font-size: 0.95rem; line-height: 1.6; }
+
+.commons-card { padding: 1.5rem; }
+.commons-card-title { margin: 0 0 0.5rem; font-size: 1.05rem; }
+.commons-note { margin: 0 0 1rem; font-size: 0.85rem; color: var(--text); line-height: 1.6; }
+.commons-note.muted { color: var(--muted); font-size: 0.8rem; }
+
+.commons-label {
+  display: block;
+  margin-bottom: 0.4rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.commons-row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+.commons-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+  padding: 0.65em 0.9em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-raise);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+}
+.commons-input:focus {
+  outline: none;
+  border-color: rgba(34, 211, 238, 0.55);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.14);
+}
+
+.commons-link-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 1rem 0 0.35rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-raise);
+}
+/* The link is the artifact you actually send someone, so it must be fully
+   readable — wrap it rather than truncating a URL nobody can then verify. */
+.commons-link {
+  flex: 1 1 12rem;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--cyan);
+  overflow-wrap: anywhere;
+}
+.commons-copy { flex: none; }
+
+.commons-warn { margin: 0 0 0.75rem; font-size: 0.78rem; color: var(--muted); min-height: 1.2em; }
+.commons-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
+
+/* An anchor with no href is not focusable and not clickable, but it still
+   LOOKS like a button — dim it so an empty room name reads as "not yet". */
+.commons-open.is-disabled { opacity: 0.45; pointer-events: none; }
 
 /* ================= misc ================= */
 

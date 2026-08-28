@@ -1,0 +1,36 @@
+[Unit]
+Description=Shader Garden multiplayer host watchdog (external-path health probe)
+Documentation=https://github.com/warxhead1/shader-garden/blob/main/deploy/README.md
+# The probe goes out over the public internet and back, so it needs the network
+# up; it also drives `docker compose restart`, so it needs the daemon.
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sg-watchdog.sh
+# One probe cycle is two network round trips plus, at worst, a compose restart.
+# The cap keeps a wedged docker CLI from pinning the timer's next run.
+TimeoutStartSec=180
+
+# The script reads SG_PUBLIC_HOST out of host.env and drives the docker socket,
+# so it cannot be meaningfully sandboxed away from either — but everything else
+# is off the table.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# ProtectSystem=strict remounts everything except /dev, /proc and /sys
+# read-only — /run included. Connecting to a unix socket needs write access to
+# its inode, so without this line every `docker` call in the script fails.
+ReadWritePaths=/var/lib/sg-watchdog /run/docker.sock
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

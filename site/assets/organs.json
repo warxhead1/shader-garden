@@ -41,6 +41,16 @@
       "payload": "surface"
     },
     {
+      "id": "commons",
+      "title": "Play together",
+      "entry": "js/organs/commons/index.js",
+      "routes": ["/play"],
+      "emits": [],
+      "consumes": [],
+      "caps": ["clipboard"],
+      "payload": "surface"
+    },
+    {
       "id": "provenance",
       "title": "Kernel provenance",
       "entry": "js/organs/provenance/index.js",

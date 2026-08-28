@@ -250,9 +250,30 @@ jobs:
         timeout-minutes: 5
         working-directory: tools/test
         run: node mp-ice-credentials.mjs 2>&1 | tee out/logs/mp-ice-credentials.log
-      - name: smoke
+      - name: commons-lobby
+        # The /play lobby (room naming, invite link, normalization) plus the
+        # regression that the invite control stays INSIDE the garden's
+        # `if (room)` gate. Browser-based but DOM-only — no GPU assertions —
+        # so it belongs in the deploy tier: this is the path a first-time
+        # visitor takes to reach multiplayer at all, and shipping it broken
+        # is indistinguishable from shipping no multiplayer.
         continue-on-error: true
         timeout-minutes: 10
+        working-directory: tools/test
+        run: node commons-lobby.mjs 2>&1 | tee out/logs/commons-lobby.log
+      - name: smoke
+        continue-on-error: true
+        # 20, not 10. smoke is in the DEPLOY tier, so this cap is what gates
+        # publication. Run 33146601758 measured it at 10m12s against a 10m cap:
+        # the suite reached `all-PASS` and the step was killed at essentially
+        # the same instant. The verdict reads the LOG, so that run went green on
+        # a coin-flip — fifteen seconds slower and `all-PASS` never lands, the
+        # verdict fails a suite that passed every assertion, and a good deploy
+        # is blocked with no real defect behind it.
+        # It is not a hang: the same suite is 1m32s wall / exit 0 on a real GPU.
+        # It is SwiftShader paying ~7x, the same physics documented at the top
+        # of this file — so it needs a tier-appropriate budget, not a fix.
+        timeout-minutes: 20
         working-directory: tools/test
         run: node smoke.mjs 2>&1 | tee out/logs/smoke.log
       - name: garden

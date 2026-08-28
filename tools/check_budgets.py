@@ -202,6 +202,16 @@ FILES = [
     # aggregate below since it's a standalone route, not garden-mount code
     # (see §0.5's headroom problem for why new surfaces get their own row
     # rather than piling into a tight aggregate). Actual 176/200.
+    # The /play lobby. Multiplayer worked but was reachable only by hand-typing
+    # `#/garden/<room>`: a room name is a route SEGMENT, so no link could point
+    # at a room that did not exist yet and nothing said inventing a name was how
+    # rooms are made. This organ is that missing step — name a room, open it,
+    # and copy a link to send. It asks net.js's own resolveTransportConfig
+    # whether a relay exists rather than re-deriving the precedence rules, so
+    # the lobby cannot offer a room the garden would then refuse to dial.
+    # Lazily route-mounted like every organ, so an idle boot still pays zero.
+    # Actual 221/260.
+    ("site/js/organs/commons/index.js", 260, None),
     ("site/js/organs/attribution/index.js", 200, None),
 ]
 
@@ -342,7 +352,13 @@ AGGREGATES = [
     # three new in-place tune methods + the tuneRanges Map). Actual
     # 3647/3660 at the time of writing. The aggregate moves WITH the
     # per-file rows so a single file cannot grow the organ silently.
-    ("site/js/organs/garden/*.js", 3660, None),
+    # 3660 -> 3720: the in-room "Copy invite link" control, plus net.js's
+    # shared-resolver export and the §2.7 null correction. A room's URL was
+    # the only way in and nothing in the room offered it, so an empty room
+    # read as a broken feature instead of one waiting on a guest. Button,
+    # clipboard handler with the no-secure-context fallback, and the reset
+    # timer. Actual 3703/3720. Raised deliberately, this commit.
+    ("site/js/organs/garden/*.js", 3720, None),
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.
@@ -380,7 +396,10 @@ AGGREGATES = [
     # on lease flips, and onBuild's notifyEditorsAuthority reapply for
     # context-loss rebuilds. Actual 1392/1410. Bumped to 1410 for the
     # rationale comments + the onBuild/notifyEditorsAuthority reapply.
-    ("site/js/organs/garden/index.js", 1410, None),
+    # 1410 -> 1450: the invite control lives in the MP UI shell, inside the
+    # existing `if (room)` gate — so it costs the solo path nothing. Actual
+    # 1434/1450.
+    ("site/js/organs/garden/index.js", 1450, None),
     # net.js: connectRoom() + the frozen module surface in spec §8.1
     # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
     # 480 -> 560: Weekend P2P integration. Transport selection via
@@ -395,7 +414,15 @@ AGGREGATES = [
     # rejects and local compile failures; getTransport() exposed for the
     # status pill. Actual 578/590. Bumped to 590 for the rationale
     # comments documenting the §7.4 / Weekend P2P §3 / §5.3 references.
-    ("site/js/organs/garden/net.js", 590, None),
+    # 590 -> 610: exporting fetchTransportJsonDefault so the /play lobby
+    # resolves transport config through connectRoom's OWN fetch + precedence
+    # path rather than a second copy, plus the §2.7 null-vs-malformed
+    # correction (an explicit `iceCredentialsUrl: null` is the documented
+    # "not configured" value the repo ships and deploy.yml stamps; treating
+    # it as malformed left a single-player deploy's room route in a permanent
+    # ice-config backoff instead of a clean no-relay). Mostly the comment
+    # explaining why. Actual 597/610.
+    ("site/js/organs/garden/net.js", 610, None),
     # timesync.js: min-RTT offset estimator, spec §3. 111/130.
     ("site/js/organs/garden/timesync.js", 130, None),
     # roster.js: peer slot allocation for the flattened uniform bank. 80/100.

@@ -306,8 +306,79 @@ order in `site/js/organs/garden/net.js`:
    notice with the one-line command to run one. **Never** attempt `ws://` from
    an `https://` page.
 
-`site/assets/relay.json` ships with `{"url": null}` and is documented in
-DEPLOY.md as the one operator-edited file.
+`site/assets/relay.json` ships with `{ "url": null, "transport": "p2p",
+"iceServers": [] }` and is documented in DEPLOY.md as the one operator-edited
+file.
+
+### 2.6 Weekend P2P integration — transport selection
+
+The legacy central-relay mode above remains fully supported. In addition the
+`site/js/organs/garden/net.js` factory accepts a transport selector:
+
+- `?transport=p2p` / `?transport=ws` query param overrides everything else,
+- absent query, the `transport` field in `assets/relay.json` is the source of
+  truth for production (deployed default: `"p2p"`),
+- absent JSON transport, query-only `?relay=...` defaults to `"ws"` (the
+  pre-P2P default) so the pre-existing test battery stays green.
+
+P2P mode uses `site/js/multiplayer/p2p-socket.js`, dynamic-imported from
+`net.js` so a non-room mount and a ws-only room never pay the bundle cost.
+The p2p facade is WebSocket-shaped — same numeric `readyState` values
+(`CONNECTING=0, OPEN=1, CLOSING=2, CLOSED=3`), same JSON-string `send`,
+same `'open'/'message'/'close'` events — so the same `send()` /
+`handleMessage()` paths in `net.js` serve both transports. `net.js` reads
+`readyState === 1` numerically and never references `WebSocket.OPEN`, so
+the two facades drive the same logic without a transport branch.
+
+#### What the deployed config looks like
+
+The deployed default is `transport: "p2p"` with an empty `iceServers`
+list. The CI workflow stamps `SG_RELAY_URL` (the wss:// signaling endpoint
+hosted alongside the static site) and, optionally, `SG_ICE_SERVERS_JSON`
+(deploy-time operator override) into `site/assets/relay.json`. The
+`SG_ICE_SERVERS_JSON` value, if present, is validated by the CI workflow
+as a JSON array of `RTCIceServer`-shaped objects BEFORE the file is
+written — the file emitted by CI is always a single JSON document, never
+a shell-printf that could break parsing.
+
+#### Trust / privacy disclosures the operator must accept
+
+This is a weekend ship and the brief is explicit that ICE/TURN credentials
+embedded in the public site are visible to anyone who views source.
+
+1. **Direct connectivity cannot be guaranteed.** Two visitors on hostile
+   networks (symmetric NATs, firewalls, captive portals) will fail to
+   establish a peer-to-peer connection. WebRTC's ICE layer probes every
+   candidate combination and falls back to a TURN server when direct paths
+   are blocked — without TURN, those visitors cannot play together.
+2. **TURN may relay encrypted WebRTC traffic.** A TURN server is a relay
+   for media/data — it sees the encrypted WebRTC packets but never the
+   plaintext gameplay payload, because SRTP/SCTP-DTLS encrypts the entire
+   payload end-to-end. A TURN operator can see IP addresses, packet
+   timing, and bandwidth use. They CANNOT see what two players are
+   editing.
+3. **The signaling server sees only opaque SDP/ICE.** The signaling
+   transport (`SG_RELAY_URL`) carries `sg.signal.v1` messages
+   (`hello`/`signal`/`welcome`/`peer`/`host-lost`) — never `sg.mp.v1`
+   gameplay. The host's `room-core.js` reducer runs on the host's
+   machine; the relay sees SDP offers/answers and ICE candidates and
+   nothing else. A relay operator therefore has no view of the garden's
+   state, edits, tunes, poses, or hide-and-seek scores.
+4. **Host authority / star topology.** The first member to reach the
+   signal becomes the immutable host for the room and runs the
+   `room-core.js` reducer; every subsequent member sends gameplay over a
+   data channel to that host, who then broadcasts back out. The room
+   caps at 8 members total (host + 7 peers); the 8th attempt closes
+   1002. The brief calls this out as an honest star, not a mesh — a
+   single host departure takes the whole room down, and the surviving
+   members are FAIL-CLOSED: their `close` code is 1012 and they visibly
+   retry, never silently papering over the loss.
+5. **Long-lived ICE/TURN credentials are NOT acceptable for this
+   ship.** The deploy workflow must use short-lived TURN credentials
+   (REST-style time-limited) if TURN is enabled. Static or long-lived
+   credentials embedded in the public site would expose the TURN
+   service to abuse — the workflow is the gatekeeper for that.
+
 
 ---
 

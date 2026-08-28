@@ -1,1 +1,5 @@
-{"url": null}
+{
+  "url": null,
+  "transport": "p2p",
+  "iceServers": []
+}

@@ -1,11 +1,13 @@
 # server/ — The Commons relay
 
 A tiny, dependency-free WebSocket relay for multiplayer Shader Garden rooms
-(`#/garden/:room`). It speaks one JSON-over-WebSocket protocol, `sg.mp.v1`,
-and does three things: hands out a shared clock, relays player poses and
-committed shader edits between the people in a room, and referees a simple
-hide-and-seek game. See `docs/multiplayer-spec.md` §2 for the frozen design
-this implements.
+(`#/garden/:room`). It speaks one JSON-over-WebSocket protocol, `sg.signal.v1`,
+and does three things: hands out a shared clock, relays SDP/ICE between
+peers during WebRTC handshake, and tracks member liveness so a missing host
+takes the whole room down (fail-closed). Game traffic — player poses,
+committed shader edits, lease flips, game state — flows browser-to-browser
+over WebRTC data channels and never passes through here. See
+`docs/multiplayer-spec.md` §2 for the frozen design this implements.
 
 ## Running it
 
@@ -46,11 +48,12 @@ instead. That means:
   lets you run `node server/relay.mjs` and open the site locally with zero
   extra setup.
 - Anywhere else, if no `wss://` relay is configured (`site/assets/relay.json`
-  ships `{"url": null}` and is the one operator-edited file — see
-  DEPLOY.md), the room route shows a "no relay configured" notice instead of
-  silently trying and failing. It never attempts `ws://` from an `https://`
-  page; that attempt is blocked by the browser before a single byte leaves
-  the tab, so the failure would otherwise be silent and confusing.
+  ships `{"url": null, "transport": "p2p", "iceServers": []}` and is the one
+  operator-edited file — see DEPLOY.md), the room route shows a "no relay
+  configured" notice instead of silently trying and failing. It never attempts
+  `ws://` from an `https://` page; that attempt is blocked by the browser
+  before a single byte leaves the tab, so the failure would otherwise be
+  silent and confusing.
 
 ## The protocol, `sg.mp.v1`
 
@@ -163,6 +166,54 @@ than shipping multiplayer that appears broken for no visible reason.
 A variable rather than a secret on purpose: this endpoint ships inside a public
 artifact and is trivially readable from the deployed page. Marking it secret
 would hide it from the people maintaining it without hiding it from anyone else.
+
+### 3. P2P transport (Weekend integration)
+
+The shipped default is the new peer-to-peer transport — `transport: "p2p"` in
+`assets/relay.json`. The signaling endpoint is still a wss:// URL; the same
+`SG_RELAY_URL` variable points at it. No separate process or port is required.
+
+For ICE/TURN you may set the repository **secret** `SG_ICE_SERVERS_JSON` to
+an array of `RTCIceServer`-shaped objects:
+
+```json
+[
+  { "urls": "stun:stun.example.org:3478" },
+  {
+    "urls": "turn:turn.example.org:3478",
+    "username": "<short-lived>",
+    "credential": "<short-lived>",
+    "credentialType": "password"
+  }
+]
+```
+
+`deploy.yml` validates this JSON with Node (NOT shell parsing) BEFORE the
+final `assets/relay.json` is written — the file emitted by CI is always a
+single, valid JSON document.
+
+**Privacy and abuse notes for the operator.** This is a weekend ship and the
+brief is explicit:
+
+1. **Direct connectivity cannot be guaranteed.** Two visitors on hostile
+   networks (symmetric NATs, captive portals) will fail peer-to-peer.
+   Without TURN those visitors cannot play together.
+2. **TURN may relay encrypted WebRTC traffic.** A TURN server sees the
+   encrypted SRTP/SCTP-DTLS payload, never the plaintext gameplay. A TURN
+   operator can see IP addresses, packet timing, and bandwidth use; they
+   cannot see what players are editing.
+3. **Signaling sees only opaque SDP/ICE.** The signaling endpoint carries
+   `sg.signal.v1` messages (`hello`/`signal`/`welcome`/`peer`/`host-lost`)
+   only — never `sg.mp.v1` gameplay. The relay sees SDP/ICE, never edits,
+   poses, tunes, or game scores.
+4. **Host authority / star topology.** The first member to reach the
+   signal becomes the immutable host and runs `room-core.js`. The room
+   caps at 8 members total (host + 7 peers); the 8th attempt is
+   rejected. A host departure takes the whole room down — surviving
+   members close with 1012 and visibly retry, never silently.
+5. **Use short-lived TURN credentials.** Static or long-lived credentials
+   embedded in the public site would expose the TURN service to abuse.
+   The brief calls this out as a hard requirement for the ship.
 
 ### Playing locally, no deploy needed
 

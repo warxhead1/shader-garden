@@ -95,10 +95,15 @@ it is hide-and-seek.
   covered by the solo parity suite.
 - **Architecture:** browser clients connect to a single central,
   dependency-free Node WebSocket relay (`server/relay.mjs`). The relay hands
-  out a shared clock, relays player poses and committed shader edits between
-  the people in a room, and referees the game. There is **no
-  browser-to-browser WebRTC / P2P** — every byte of game traffic flows
-  through the relay, which has zero npm dependencies.
+  out a shared clock and referees the game. **Game traffic — player poses,
+  committed shader edits, lease flips, game state — flows browser-to-browser
+  over WebRTC data channels** in a star topology with the first member as
+  the room's immutable host. The relay carries only SDP/ICE signaling — never
+  gameplay. The relay has zero npm dependencies. See
+  [docs/multiplayer-spec.md §2.6](docs/multiplayer-spec.md) for the
+  transport selection rules and the trust/privacy disclosures the operator
+  must accept (visible ICE/TURN credentials in the public site, signaling
+  sees only opaque SDP/ICE, host-loss is fail-closed).
 - **Spec and design:** [docs/multiplayer-spec.md](docs/multiplayer-spec.md)
   is the frozen implementation spec (the authoritative "what we are
   building"); [docs/the-commons-design.md](docs/the-commons-design.md) is the
@@ -108,7 +113,9 @@ it is hide-and-seek.
   multiplayer on for a public Pages deploy — Pages is HTTPS, so the relay
   must be reachable as `wss://` — is in
   [DEPLOY.md](DEPLOY.md); it boils down to setting one repository variable
-  and the deploy workflow stamps it into the published artifact.
+  and the deploy workflow stamps it into the published artifact. For
+  P2P+ICE/TURN, the same workflow accepts an optional
+  `SG_ICE_SERVERS_JSON` secret and validates it with Node before stamping.
 
 The shipped garden is a single-player static PWA; The Commons is additive
 and off by default (public Pages without a configured relay is a clean

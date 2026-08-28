@@ -28,6 +28,10 @@ const EXIT_MS = 260;
  *   connections?: { uses: Array<{id,name,symbols}>, usedBy: Array<{id,name,symbols}> },
  *   onNavigate?: (componentId: string, symbol: string) => void,  // opens that component's panel, scrolled to `symbol`
  *   onHoverConnection?: (componentId: string|null) => void,  // wave-3 §3a — mouseenter/leave on a connection link
+ *   canTune?: boolean,                 // Weekend P2P §2 — slider authority at mount time. Solo (no room) and
+ *                                       // lease holder = true; everyone else in the room = false. Updated
+ *                                       // in place via setTuneAuthority() on lease flips so a panel never
+ *                                       // remounts just because someone else took the lectern.
  * }}
  * @returns {{
  *   el: HTMLElement,
@@ -41,10 +45,22 @@ const EXIT_MS = 260;
  *     // wave-4 §3 — renders the Origin block once attribution.js's fetch
  *     // resolves (index.js calls this the same way it calls setStages).
  *     // A no-op past the first real call or a null attribution.
+ *   setTuneAuthority: (canTune: boolean) => void,
+ *     // Weekend P2P §2 — toggle slider disabled-state in place. Index.js's
+ *     // renderLease() pushes this on every lease flip; the panel does not
+ *     // remount. Reads the same canTune contract as the constructor flag.
+ *   setTuneValue: (name: string, value: number) => void,
+ *     // Weekend P2P §2 — slider mirror for a remote tune delta. Updates the
+ *     // slider position + label without firing onTuneChange, so the
+ *     // authoritative echo doesn't loop back out onto the wire.
+ *   setTuneValues: (snapshot: Record<string, number>) => void,
+ *     // Weekend P2P §2 — bulk tune snapshot, e.g. the welcome payload.
+ *     // Iterates every entry the snapshot carries and routes each through
+ *     // setTuneValue so a single code path owns the DOM update.
  *   destroy: (opts?: { animate?: boolean }) => void,
  * }}
  */
-export function createProbePanel({ component, body, values, onTuneChange, onEditHere, getEditorHref, onClose, focusLine, connections, onNavigate, onHoverConnection }) {
+export function createProbePanel({ component, body, values, onTuneChange, onEditHere, getEditorHref, onClose, focusLine, connections, onNavigate, onHoverConnection, canTune = true }) {
   const panel = el('aside', 'probe-panel glass probe-panel-enter');
 
   const head = el('div', 'probe-head');
@@ -189,8 +205,23 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
     originAnchor.after(originSection);
   }
 
+  // Correction 1: panel block scope. The three in-place tune APIs MUST live
+  // at the OUTER scope of createProbePanel so a panel mounted for a component
+  // with no tunes still exposes the same uniform surface (setTuneAuthority/
+  // setTuneValue/setTuneValues). index.js's unconditional optional-chain
+  // calls (`panel?.setTuneAuthority?.(...)`) cannot reach an identifier that
+  // was only declared inside a not-taken branch. The DOM building block stays
+  // gated on tunes.length; the API surface does not.
+  const tuneRanges = new Map(); // name -> {range, value, listener}
   if (component.tunes.length) {
     const tuneList = el('div', 'probe-tunes');
+    // Weekend P2P §2: track every slider by uniform name so the in-place
+    // authority/value updates below don't have to walk the DOM twice. Also
+    // keeps a single owner of "what the slider currently displays" — the
+    // constructor sets the initial value, setTuneValue() updates it for
+    // a remote delta, setTuneValues() runs the same path over a snapshot,
+    // and the `input` listener is the only path that reads back. Keeping
+    // them keyed here avoids a querySelector in the hot path.
     for (const tune of component.tunes) {
       const row = el('div', 'probe-tune');
       const label = el('label', 'probe-tune-label');
@@ -203,15 +234,43 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
       range.step = String((tune.max - tune.min) / 200 || 0.01);
       range.value = String(values[tune.name]);
       range.dataset.name = tune.name; // smoke.mjs test hook
-      range.addEventListener('input', () => {
+      // Weekend P2P §2: initial authority — solo or lease holder at mount
+      // time is interactive; everyone else in a room sees a disabled
+      // slider that visually tracks the holder's value. The
+      // `input` listener is conditionally suppressed below so a
+      // non-holder's disabled slider can never emit a tune message.
+      range.disabled = !canTune;
+      const listener = () => {
         const v = Number(range.value);
         value.textContent = v.toFixed(2);
-        onTuneChange(tune.name, v);
-      });
+        if (canTune) onTuneChange(tune.name, v);
+      };
+      range.addEventListener('input', listener);
       row.append(label, range);
       tuneList.append(row);
+      tuneRanges.set(tune.name, { range, value, listener });
     }
     panelBody.append(tuneList);
+  }
+
+  // The three in-place tune APIs (Correction 1: outer scope). A panel with
+  // no @tune (component.tunes.length === 0) has nothing to update, but the
+  // METHODS are still bound so index.js's optional-chain calls do not throw.
+  function setTuneAuthority(next) {
+    const boolNext = !!next;
+    if (boolNext === canTune) return;
+    canTune = boolNext;
+    for (const { range } of tuneRanges.values()) range.disabled = !canTune;
+  }
+  function setTuneValue(name, val) {
+    const entry = tuneRanges.get(name);
+    if (!entry || typeof val !== 'number') return;
+    entry.range.value = String(val);
+    entry.value.textContent = val.toFixed(2);
+  }
+  function setTuneValues(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    for (const [name, val] of Object.entries(snapshot)) setTuneValue(name, val);
   }
 
   const editLink = el('a', 'btn btn-small probe-edit-link', 'Open in editor');
@@ -248,6 +307,15 @@ export function createProbePanel({ component, body, values, onTuneChange, onEdit
     el: panel,
     setStages,
     setOrigin,
+    // Correction 1: panel block scope. These three methods are bound at the
+    // outer scope of createProbePanel (NOT inside `if (component.tunes.length)`),
+    // so the public surface is uniform for every panel mount regardless of
+    // whether this component has any @tune. A panel with no tunes accepts
+    // setTuneAuthority / setTuneValue / setTuneValues as no-ops via the empty
+    // tuneRanges Map — index.js's optional-chain calls never throw.
+    setTuneAuthority,
+    setTuneValue,
+    setTuneValues,
     // animate:false is index.js's fast-swap path (probing a different
     // component, or organ cleanup) — no exit animation to overlap with the
     // next panel's own enter transition.

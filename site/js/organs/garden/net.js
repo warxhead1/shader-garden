@@ -1,23 +1,12 @@
 // Shader Garden — organs/garden/net.js
 // Multiplayer spec §8.1: the one frozen export, `connectRoom(opts)`. L5 codes
-// against this factory's opts/return shape ONLY — it never reaches past it
-// into timesync.js or roster.js, and this file never imports from
-// site/js/runtime/ (armClock takes the runtime as a plain argument, so
-// ownership of "what a runtime is" stays entirely on L4/L5's side of the
-// boundary; this file calls only the five methods §3.2/§4 name).
-//
-// Two design calls the spec's message table (§2.3) leaves implicit:
-//   - `commit`/`reject` carry no client-chosen request id. Only the lease
-//     holder ever has a commit in flight (server-enforced), so a single
-//     FIFO of pending resolvers is enough: settle the oldest on the next
-//     `commit` echoing our own id, or the next `reject`. edit.js only calls
-//     commit() once the previous one has settled, so two-in-flight never
-//     happens on the wire.
-//   - §7.4's lobby "Start" action has no §2.3 client->server entry.
-//     `game.start` (no fields) is the obvious name; L1 server.mjs agrees.
-// `poses` batches are assumed to carry the array under a `poses` key
-// (`{t:'poses', poses:[...]}`), matching how every other multi-field type
-// in §2.3 keys its payload by name rather than overloading `t`.
+// against this factory's opts/return shape ONLY — never reaches past it
+// into timesync.js or roster.js, never imports from site/js/runtime/.
+// Implicit calls the spec's §2.3 message table leaves open: commit/reject
+// carry no client-chosen request id (single FIFO on the next echo of our
+// own id or reject), §7.4's "Start" uses `game.start`, `poses` batches
+// carry the array under a `poses` key. Weekend P2P: p2p-socket.js dynamic-
+// imported; selection ?relay=/?transport= > relay.json > localhost ws.
 
 import { createTimeSync } from './timesync.js';
 import { createRoster } from './roster.js';
@@ -30,6 +19,11 @@ const POSE_INTERVAL_MS = 1000 / POSE_HZ;
 const RESYNC_EPS = 0.05; // §3.2 — the deadband IS the design, see armClock()
 const MAX_PEERS = 7; // §4.1 — slots 0..6
 const LOCAL_RELAY_PORT = 8787;
+// §7.4 / Sculptor's Tag. Seeker-side prefilter (server also checks). Matches
+// room-core.js TAG_DISTANCE; 500ms cooldown stops one dwell from spamming
+// duplicates the reducer would happily count.
+const TAG_DISTANCE = 0.9;
+const TAG_COOLDOWN_MS = 500;
 
 /** Pure: peer slot allocator (§4.1). Exported so join/leave/re-join stability
  *  is testable without a socket (mp-netclient.mjs). */
@@ -40,9 +34,7 @@ export function createSlotAllocator() {
   return { slotOf: new Map(), free };
 }
 
-/** Assigns `id` a slot (idempotent — a second call returns its existing slot).
- *  -1 if the room is already full of slots (should not happen: MAX_MEMBERS=8
- *  on the relay side caps membership at MAX_PEERS+1). */
+/** Assigns `id` a slot (idempotent). -1 if full (MAX_MEMBERS=8). */
 export function allocateSlot(state, id) {
   if (state.slotOf.has(id)) return state.slotOf.get(id);
   if (state.free.length === 0) return -1;
@@ -51,40 +43,79 @@ export function allocateSlot(state, id) {
   return slot;
 }
 
-/** Frees `id`'s slot back into the pool for a FUTURE member — deliberately
- *  does not touch any other member's assignment. Re-packing would teleport
- *  an unrelated peer's body into the departed member's old slot. */
+/** Frees `id`'s slot. Does not re-pack — would teleport an unrelated peer. */
 export function freeSlot(state, id) {
   const slot = state.slotOf.get(id);
   if (slot === undefined) return;
   state.slotOf.delete(id);
   state.free.push(slot);
-  state.free.sort((a, b) => b - a); // keep pop() = lowest free slot, stable order
+  state.free.sort((a, b) => b - a); // pop() = lowest free slot, stable order
 }
 
-/** Pure: relay discovery (§2.5). Plain string/bool inputs (no
- *  `window`/`location` reach) so all four cases are unit-testable. */
+/** Pure: relay + transport discovery (§2.5, Weekend P2P §1). Plain inputs
+ *  (no `window`/`location`) so all cases are unit-testable. */
 
-export async function resolveRelayUrl({ queryRelay, hostname, isHttps, fetchRelayJson }) {
-  if (queryRelay) return { url: queryRelay, source: 'query' };
-  const jsonUrl = await fetchRelayJson();
-  if (jsonUrl) return { url: jsonUrl, source: 'relay.json' };
-  const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1';
-  // ws:// from an https:// page is blocked silently by the browser, so this
-  // branch must never fire on https.
-  if (isLocalHost && !isHttps) {
-    return { url: `ws://${hostname}:${LOCAL_RELAY_PORT}`, source: 'localhost' };
+export async function resolveTransportConfig({ queryRelay, queryTransport, hostname, isHttps, fetchTransportJson }) {
+  // Short-circuit: `?relay=` wins outright. Defer JSON fetch until needed —
+  // a neverFetch probe must never be called. `?transport=` still runs here.
+  if (queryRelay) {
+    const transport = (queryTransport === 'p2p' || queryTransport === 'ws') ? queryTransport : 'ws';
+    return { url: queryRelay, transport, iceServers: [], source: 'query' };
   }
-  return { url: null, source: 'no-relay' };
+  // Legacy-shape fetch: STRING URL, OBJECT, or null. Coerce before reading
+  // — otherwise `json.url` is `undefined` on a string return and the
+  // resolver falls through to localhost.
+  const raw = await fetchTransportJson().catch(() => null);
+  const jsonObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+  const jsonStr = typeof raw === 'string' ? raw : null;
+  const jsonUrl = jsonObj ? jsonObj.url : jsonStr;
+  const jsonTransport = jsonObj ? jsonObj.transport : undefined;
+  const iceServers = Array.isArray(jsonObj && jsonObj.iceServers) ? jsonObj.iceServers : [];
+  let url = null;
+  let source = 'no-config';
+  if (jsonUrl) { url = jsonUrl; source = 'relay.json'; }
+  else {
+    const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1';
+    // ws:// from https:// blocked silently; must never fire on https.
+    if (isLocalHost && !isHttps) {
+      url = `ws://${hostname}:${LOCAL_RELAY_PORT}`;
+      source = 'localhost';
+    }
+  }
+  // Transport selection. `?transport=` wins; otherwise JSON's `transport`
+  // is authoritative except when URL came from query string.
+  let transport = 'ws';
+  if (queryTransport === 'p2p' || queryTransport === 'ws') {
+    transport = queryTransport;
+  } else if (source !== 'query' && (jsonTransport === 'p2p' || jsonTransport === 'ws')) {
+    transport = jsonTransport;
+  }
+  return { url, transport, iceServers, source };
 }
 
-function fetchRelayJsonDefault() {
-  // Best-effort-empty, exactly like registry.js's compositions loader: a
-  // missing/unparseable file resolves to "nothing configured", not an error.
+/** Correction 5: backward-compat alias. mp-netclient.mjs §2.5 calls
+ *  `resolveRelayUrl` and asserts the legacy `{url, source}` shape.
+ *  queryRelay precedence preserved (query > JSON > localhost).
+ */
+export async function resolveRelayUrl({ queryRelay, hostname, isHttps, fetchRelayJson }) {
+  const res = await resolveTransportConfig({
+    queryRelay,
+    queryTransport: null,
+    hostname,
+    isHttps,
+    fetchTransportJson: fetchRelayJson || (() => ({})),
+  });
+  // Project v2 source strings back: legacy must see 'no-relay' not 'no-config'.
+  const source = res.source === 'no-config' ? 'no-relay' : res.source;
+  return { url: res.url, source };
+}
+
+function fetchTransportJsonDefault() {
+  // Best-effort-empty: a missing file resolves to "nothing configured".
+  // Shape: {url?, transport?, iceServers[]?}; partial objects accepted.
   return fetch('assets/relay.json')
-    .then((r) => (r.ok ? r.json() : { url: null }))
-    .then((j) => (j && j.url) || null)
-    .catch(() => null);
+    .then((r) => (r.ok ? r.json() : {}))
+    .catch(() => ({}));
 }
 
 export function connectRoom(opts) {
@@ -92,9 +123,14 @@ export function connectRoom(opts) {
     room, relayUrl: relayUrlOverride, name,
     getPose, setPeerUniforms,
     onEdits, onCommit, onDraft, onLease, onRoster, onGame, onStatus,
+    // Correction 8: optional `knownTunes: string[]`. setTune() and tune
+    // messages refuse names outside; omitted = all fail-closed.
+    knownTunes: knownTunesOpt,
+    onTunes, onTune,
   } = opts;
 
-  let ws = null;
+  let socket = null;            // active socket (WebSocket or p2p-socket facade)
+  let socketFacade = null;       // 'ws' | 'p2p' — what we currently hold in `socket`
   let destroyed = false;
   let reconnectAttempt = 0;
   let reconnectTimer = null;
@@ -110,12 +146,19 @@ export function connectRoom(opts) {
   let slots = createSlotAllocator();
   let poseTimer = null;
   let clockRaf = null;
+  // Correction 8: known-tune set. Empty = not registered, fail-closed.
+  const knownTunes = new Set(Array.isArray(knownTunesOpt) ? knownTunesOpt.filter((n) => typeof n === 'string') : []);
+  // §7.4 / Sculptor's Tag: per-target cooldown keyed by targetId.
+  const lastTagMs = new Map();
 
   const timeSync = createTimeSync({ send: (msg) => send(msg) });
   const roster = createRoster();
 
+  // WebSocket.OPEN is 1; p2p-socket facade exports the same numeric.
+  function isOpen(s) { return s && s.readyState === 1; }
+
   function send(msg) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    if (isOpen(socket)) socket.send(JSON.stringify(msg));
   }
 
   function nameFor(id) {
@@ -133,9 +176,8 @@ export function connectRoom(opts) {
     onRoster && onRoster(list, selfId);
   }
 
-  /** Rebuilds the full 49+1 scalar bank from slots+peerState and pushes it
-   *  in one setUniforms() call — cheaper than diffing, and the runtime
-   *  contract (§0.2) is scalar-only so there is no bulk-array path. */
+  /** Rebuilds the 49+1 scalar bank from slots+peerState in one setUniforms()
+   *  call. Runtime contract (§0.2) is scalar-only. */
   function pushPeerUniforms() {
     if (!setPeerUniforms) return;
     const out = {};
@@ -172,15 +214,35 @@ export function connectRoom(opts) {
       if (!getPose) return;
       const p = getPose();
       if (!p) return;
-      if (last && p.x === last.x && p.z === last.z && p.yaw === last.yaw &&
-          p.speed01 === last.speed01 && p.gait === last.gait) return;
+      const poseChanged = !last || p.x !== last.x || p.z !== last.z || p.yaw !== last.yaw ||
+        p.speed01 !== last.speed01 || p.gait !== last.gait;
       last = p;
-      send({ t: 'pose', x: p.x, z: p.z, yaw: p.yaw, speed01: p.speed01, gait: p.gait });
+      if (poseChanged) send({ t: 'pose', x: p.x, z: p.z, yaw: p.yaw, speed01: p.speed01, gait: p.gait });
+      // §7.4 / Sculptor's Tag. Seeker (only seeker, per room-core.js) sends
+      // `tag` within TAG_DISTANCE of any peer's last-known pose.
+      if (lastGame.phase === 'seeking' && lastGame.seekerId === selfId && getPose) {
+        const now = Date.now();
+        // Correction 3: found-target skip — re-tagging a hider already in
+        // `lastGame.found` risks the server treating it as a NEW tag.
+        const found = Array.isArray(lastGame.found) ? lastGame.found : null;
+        for (const [targetId, peer] of peerState) {
+          if (targetId === selfId) continue;
+          if (found && found.includes(targetId)) continue;
+          const dx = p.x - peer.x;
+          const dz = p.z - peer.z;
+          if (Math.hypot(dx, dz) >= TAG_DISTANCE) continue;
+          const last = lastTagMs.get(targetId) || 0;
+          if (now - last < TAG_COOLDOWN_MS) continue;
+          lastTagMs.set(targetId, now);
+          send({ t: 'tag', targetId });
+        }
+      }
     }, POSE_INTERVAL_MS);
   }
 
   function stopPoseLoop() {
     if (poseTimer) { clearInterval(poseTimer); poseTimer = null; }
+    lastTagMs.clear();
   }
 
   async function handleCommit(msg) {
@@ -190,8 +252,9 @@ export function connectRoom(opts) {
     if (applied) {
       epoch = msg.epoch;
     } else {
-      // I4: the world in front of THIS client did not change. onStatus is
-      // how that gets surfaced without pretending the local epoch moved.
+      // I4: world did not change — surface without faking epoch. §6.2:
+      // a local compile failure means we're behind; resync via snapshot.request.
+      send({ t: 'snapshot.request' });
       onStatus && onStatus({
         state: 'live',
         message: `${nameFor(msg.by)}'s change didn't compile here — still showing the previous world`,
@@ -209,6 +272,7 @@ export function connectRoom(opts) {
       case 'welcome': {
         selfId = msg.selfId;
         epoch = msg.epoch;
+        lastTagMs.clear();
         timeSync.setT0(msg.t0Ms);
         members.clear();
         peerState.clear();
@@ -221,6 +285,18 @@ export function connectRoom(opts) {
         }
         pushPeerUniforms();
         onEdits && onEdits(new Map(Object.entries(msg.edits || {})));
+        // §5.3 / Weekend P2P §2: tunes snapshot in welcome. Strict to known
+        // names + finite numbers; NaN would zero the world, empty known
+        // set = not registered, drop all (fail-closed).
+        if (onTunes && msg.tunes && typeof msg.tunes === 'object') {
+          const filtered = {};
+          for (const [name, value] of Object.entries(msg.tunes)) {
+            if (!knownTunes.has(name)) continue;
+            if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+            filtered[name] = value;
+          }
+          try { onTunes(filtered); } catch { /* caller decides */ }
+        }
         lastLease = msg.lease || { holder: null };
         onLease && onLease(withIsSelf(lastLease));
         lastGame = msg.game || { phase: 'lobby' };
@@ -240,8 +316,7 @@ export function connectRoom(opts) {
         break;
       }
       case 'peer.rename': {
-        // Rename touches the roster only — hue and slot are identity, not
-        // presentation, so the peer keeps its color and uniform slot.
+        // Hue and slot are identity, not presentation.
         const m = members.get(msg.id);
         if (m) { m.name = msg.name; refreshRoster(); }
         break;
@@ -250,6 +325,7 @@ export function connectRoom(opts) {
         members.delete(msg.id);
         freeSlot(slots, msg.id);
         peerState.delete(msg.id);
+        lastTagMs.delete(msg.id);
         pushPeerUniforms();
         refreshRoster();
         break;
@@ -283,7 +359,21 @@ export function connectRoom(opts) {
         break;
       }
       case 'reject': {
+        // Correction 4: stale_epoch-only resync. Other reasons (room-full,
+        // malformed body) don't imply stale; sending snapshot.request on
+        // every reject churns the host's reducer. Settle FIFO either way.
+        if (msg.reason === 'stale_epoch') send({ t: 'snapshot.request' });
         if (pendingCommits.length) pendingCommits.shift()({ ok: false, reason: msg.reason });
+        break;
+      }
+      case 'tune': {
+        // §5 / Weekend P2P §2: holder delta. Late joiners catch up via the
+        // welcome snapshot. Strict — known name + finite number; empty known
+        // set = not registered, drop.
+        if (onTune && msg && typeof msg.name === 'string' && Number.isFinite(msg.value)
+            && knownTunes.has(msg.name)) {
+          try { onTune({ name: msg.name, value: msg.value, by: msg.by }); } catch { /* */ }
+        }
         break;
       }
       case 'time': {
@@ -308,16 +398,21 @@ export function connectRoom(opts) {
     }
   }
 
-  async function resolveUrl() {
-    if (relayUrlOverride) return relayUrlOverride;
-    const query = new URLSearchParams(window.location.search).get('relay');
-    const res = await resolveRelayUrl({
-      queryRelay: query,
+  async function resolveConfig() {
+    if (relayUrlOverride) {
+      // Bypasses query/JSON/localhost — must NOT touch `window` (undefined
+      // in node unit harness). Tests/programmatic callers; always ws.
+      return { url: relayUrlOverride, transport: 'ws', iceServers: [], source: 'override' };
+    }
+    const query = new URLSearchParams(window.location.search);
+    const res = await resolveTransportConfig({
+      queryRelay: query.get('relay'),
+      queryTransport: query.get('transport'),
       hostname: window.location.hostname,
       isHttps: window.location.protocol === 'https:',
-      fetchRelayJson: fetchRelayJsonDefault,
+      fetchTransportJson: fetchTransportJsonDefault,
     });
-    return res.url;
+    return res;
   }
 
   function scheduleReconnect() {
@@ -330,28 +425,53 @@ export function connectRoom(opts) {
   async function connect() {
     if (destroyed) return;
     onStatus && onStatus({ state: reconnectAttempt === 0 ? 'connecting' : 'retrying' });
-    const url = await resolveUrl();
+    const cfg = await resolveConfig();
     if (destroyed) return;
-    if (!url) { onStatus && onStatus({ state: 'no-relay' }); return; }
-    let socket;
+    if (!cfg.url) { onStatus && onStatus({ state: 'no-relay' }); return; }
+    let next;
     try {
-      socket = new WebSocket(url);
+      if (cfg.transport === 'p2p') {
+        // Dynamic import — keeps p2p bundle off ws-only/solo/test paths.
+        const { createP2PSocket } = await import('../../multiplayer/p2p-socket.js');
+        next = createP2PSocket({
+          signalUrl: cfg.url,
+          room, name,
+          iceServers: cfg.iceServers || [],
+          WebSocketImpl: window.WebSocket,
+          RTCPeerConnectionImpl: window.RTCPeerConnection,
+        });
+      } else {
+        next = new WebSocket(cfg.url);
+      }
     } catch {
       scheduleReconnect();
       return;
     }
-    ws = socket;
+    socket = next;
+    socketFacade = cfg.transport;
     socket.addEventListener('open', () => {
       reconnectAttempt = 0;
+      // §5.3 / Weekend P2P: duplicate hello is reducer-idempotent.
       send({ t: 'hello', protocol: PROTOCOL, room, name });
     });
     socket.addEventListener('message', (ev) => handleMessage(ev.data));
-    socket.addEventListener('close', () => {
-      ws = null;
+    socket.addEventListener('close', (ev) => {
+      socket = null;
+      socketFacade = null;
       drainPendingCommits('disconnected');
       timeSync.stop();
       stopPoseLoop();
-      // A reconnect gets a fresh `welcome` with a new epoch and edits; nothing
+      // §6.1: host loss (1012) is fail-closed — re-dialling would land on
+      // a different host's room and never reconcile. Surface, stop.
+      const code = (ev && typeof ev.code === 'number') ? ev.code
+        : (ev && ev.detail && typeof ev.detail.code === 'number') ? ev.detail.code : 1000;
+      if (code === 1012) {
+        if (!destroyed) {
+          onStatus && onStatus({ state: 'closed', message: 'host lost', code });
+        }
+        return;
+      }
+      // A reconnect gets a fresh `welcome` with new epoch and edits; nothing
       // here tries to preserve members/peerState/slots across the gap.
       if (!destroyed) {
         onStatus && onStatus({ state: 'retrying' });
@@ -361,9 +481,7 @@ export function connectRoom(opts) {
     socket.addEventListener('error', () => {}); // 'close' always follows; nothing extra to do here
   }
 
-  /** §3.2. Re-arm from onBuild() after every rebuild — a fresh runtime's
-   *  clock starts at 0 and has no idea a shared session exists. Cancels any
-   *  previous loop first so a second rebuild doesn't stack rAF callbacks. */
+  /** §3.2. Re-arm from onBuild() after every rebuild. */
   function armClock(runtime) {
     if (clockRaf != null) { cancelAnimationFrame(clockRaf); clockRaf = null; }
     const c = runtime && runtime.getClock ? runtime.getClock() : null;
@@ -395,7 +513,7 @@ export function connectRoom(opts) {
 
   function commit(componentId, body) {
     return new Promise((resolve) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (!isOpen(socket)) {
         resolve({ ok: false, reason: 'offline' });
         return;
       }
@@ -404,13 +522,20 @@ export function connectRoom(opts) {
     });
   }
 
-  /** Settle every queued commit resolver EXACTLY once with the given failure
-   *  shape, then drop the FIFO. Called on WebSocket close (so an in-flight
-   *  commit never strands its caller) and on destroy() (tear-down symmetric
-   *  with tear-down-by-disconnect). Reconnect gets a fresh `welcome` with a
-   *  new epoch; resolvers from a prior connection that survived here would
-   *  double-resolve or attribute a reply from the new connection to a request
-   *  the caller already gave up on. Hence "settle once, then drop". */
+  /** §5 / Weekend P2P §2: dial a @tune slider. Only holder can move (server
+   *  check in room-core.js); latest value wins. Correction 2: refuse when
+   *  not current lease holder. Correction 8: refuse unknown names; fail
+   *  closed. Strict — empty knownTunes means "not registered", drop. */
+  function setTune(name, value) {
+    if (lastLease.holder !== selfId) return;
+    if (!knownTunes.has(name)) return;
+    send({ t: 'tune', name, value });
+  }
+
+  /** Settle every queued commit resolver once with the failure shape, then
+   *  drop the FIFO. Called on socket close and on destroy(). Reconnect
+   *  gets a fresh `welcome`; resolvers from a prior connection would
+   *  double-resolve otherwise. */
   function drainPendingCommits(reason) {
     while (pendingCommits.length) {
       pendingCommits.shift()({ ok: false, reason });
@@ -427,7 +552,7 @@ export function connectRoom(opts) {
     for (const t of draftTimers.values()) clearTimeout(t);
     draftTimers.clear();
     roster.destroy();
-    if (ws) { try { ws.close(); } catch { /* already going away */ } ws = null; }
+    if (socket) { try { socket.close(); } catch { /* already going away */ } socket = null; }
   }
 
   connect();
@@ -441,9 +566,13 @@ export function connectRoom(opts) {
     keepLease: () => send({ t: 'lease.keepalive' }),
     sendDraft,
     commit,
+    setTune,
     tag: (targetId) => send({ t: 'tag', targetId }),
     startGame: () => send({ t: 'game.start' }),
     rename: (n) => send({ t: 'rename', name: n }),
+    // §1 / Weekend P2P: visible transport indicator. 'p2p'/'ws' shows direct
+    // to host (bound to host lifetime) vs through the relay.
+    getTransport: () => socketFacade,
     destroy,
   };
 }

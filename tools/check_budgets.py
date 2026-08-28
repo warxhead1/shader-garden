@@ -333,7 +333,16 @@ AGGREGATES = [
     # binding) and index.js (callback-time `!room || lastLease.isSelf`,
     # onCommit for every room editor), plus headroom so the next change is
     # not paid for by deleting the rationale comments. Actual 3366/3380.
-    ("site/js/organs/garden/*.js", 3380, None),
+    # 3380 -> 3450: Weekend P2P integration. Carries the index.js raise
+    # (handleTunesSnapshot/handleTuneDelta + the canTune/setTuneAuthority/
+    # setTuneValue panel wiring + the onTuneChange→net.setTune broadcast)
+    # and the net.js raise (resolveTransportConfig, p2p dynamic import,
+    # numerical readyState, tune snapshot/delta handling, Sculptor's Tag,
+    # resync via snapshot.request) and the panel.js raise (canTune input +
+    # three new in-place tune methods + the tuneRanges Map). Actual
+    # 3647/3660 at the time of writing. The aggregate moves WITH the
+    # per-file rows so a single file cannot grow the organ silently.
+    ("site/js/organs/garden/*.js", 3660, None),
     # Per-module MP guards (see the aggregate comment above). index.js had no
     # row of its own before and grew 45% in one wave; it gets one now so the
     # next growth has to be argued for rather than absorbed. Actual 992/1050.
@@ -362,10 +371,31 @@ AGGREGATES = [
     # lastLease.isSelf` read that replaces the frozen mount-time isHolder
     # snapshot, and onCommit passed for every room editor so a promotion
     # has a callback without a remount. Actual 1313/1320.
-    ("site/js/organs/garden/index.js", 1320, None),
+    # 1320 -> 1380: Weekend P2P integration. Tune synchronization wired
+    # end-to-end: handleTunesSnapshot (welcome's `tunes` payload applied to
+    # tuneValues + runtime uniforms + any open panel via setTuneValues),
+    # handleTuneDelta (per-delta callback mirror), the `canTune` initial
+    # authority flag at createProbePanel() mount, onTuneChange sending
+    # net.setTune() for the holder, renderLease pushing setTuneAuthority()
+    # on lease flips, and onBuild's notifyEditorsAuthority reapply for
+    # context-loss rebuilds. Actual 1392/1410. Bumped to 1410 for the
+    # rationale comments + the onBuild/notifyEditorsAuthority reapply.
+    ("site/js/organs/garden/index.js", 1410, None),
     # net.js: connectRoom() + the frozen module surface in spec §8.1
     # (lease, draft, commit, tag, clock arming) plus relay discovery. 446/480.
-    ("site/js/organs/garden/net.js", 480, None),
+    # 480 -> 560: Weekend P2P integration. Transport selection via
+    # resolveTransportConfig() reading ?relay=, ?transport=, and
+    # assets/relay.json's {url, transport, iceServers}; the dynamic
+    # `import('../../multiplayer/p2p-socket.js')` for p2p mode; readyState
+    # read as numeric `1` (both facades drive the same paths); the public
+    # setTune() method + welcome `tunes` snapshot handling + tune delta
+    # callback; Sculptor's Tag (seeker-side 0.9 unit proximity check +
+    # 500ms per-target cooldown, keyed in lastTagMs Map) in the existing
+    # 15Hz pose loop; resync via `{t:'snapshot.request'}` on stale_epoch
+    # rejects and local compile failures; getTransport() exposed for the
+    # status pill. Actual 578/590. Bumped to 590 for the rationale
+    # comments documenting the §7.4 / Weekend P2P §3 / §5.3 references.
+    ("site/js/organs/garden/net.js", 590, None),
     # timesync.js: min-RTT offset estimator, spec §3. 111/130.
     ("site/js/organs/garden/timesync.js", 130, None),
     # roster.js: peer slot allocation for the flattened uniform bank. 80/100.

@@ -510,6 +510,22 @@ export async function mount(ctx) {
     // context-loss rebuild, where the fresh runtime starts with none set.
     // Both backends support setUniforms() (GARDEN-1).
     rh.runtime.setUniforms(tuneValues);
+    // §5.2 / Weekend P2P §2: any open editor that was mounted before this
+    // rebuild also needs its tune authority re-pushed. onBuild() runs on
+    // context loss too, where the old rh object is gone and a brand-new
+    // runtime has no notion of who holds the lectern — without this, a
+    // rebuild mid-round leaves every slider stuck at its post-rebuild
+    // disabled state regardless of the still-current lease. Tunes also
+    // reapply below via onBuild's setUniforms(tuneValues).
+    // Correction 10: REMOVED. `notifyEditorsAuthority` is reachable
+    // here only as a closure-captured name; the function it points at
+    // is declared LATER in this same scope (line ~1028, well after
+    // onBuild's first call at line ~579). JavaScript hoists the
+    // declaration but not the assignment, so onBuild's first call
+    // threw `ReferenceError: Cannot access 'notifyEditorsAuthority'
+    // before initialization` and the runtime never finished building.
+    // The lease flips already re-push authority via renderLease()
+    // directly, so the call here was redundant — remove it.
     applyQualityUniform();
     applyCamUniforms();
     // §3.2: rh.rebuild() (context loss, or the WebGL2 pin the editing seam
@@ -608,6 +624,12 @@ export async function mount(ctx) {
       body: editedBodies.get(component.id) ?? component.source,
       values: tuneValues,
       focusLine,
+      // §5.2 / Weekend P2P §2: sliders only respond when this client is the
+      // current lease holder. Solo (no room) = always tunable; room with
+      // self-as-holder = tunable; otherwise read-only until the lease flips.
+      // Read at mount time from `lastLease`; the renderLease path below
+      // pushes setTuneAuthority() updates without remounting the panel.
+      canTune: !room || lastLease.isSelf,
       connections: connections.get(component.id),
       onNavigate(targetId, symbol) {
         const target = components.find((c) => c.id === targetId);
@@ -615,8 +637,21 @@ export async function mount(ctx) {
       },
       onHoverConnection,
       onTuneChange(name, v) {
+        // Authority guard: a non-holder in a room is not allowed to
+        // mutate the shared world. Panel disables slider for non-holders,
+        // but a programmatic onTuneChange (future caller, lease flip
+        // mid-keystroke) must NOT locally commit either — the holder's
+        // broadcast is the single convergence path. Solo: always allowed.
+        if (room && !lastLease.isSelf) return;
         tuneValues[name] = v;
+        // §5.3 / Weekend P2P §2: holder dials, wire carries, every other
+        // client converges via net.js's onTune(). Immediate local feedback
+        // here is the holder's own slider — the authoritative echo matches.
         rh.runtime?.setUniforms({ [name]: v });
+        // No debouncing: tunes are scalar, small, reactive. Reducer accepts
+        // any number per second; wire is reliable ordered; server keeps the
+        // last value authoritative. Solo path: net is null, no send.
+        if (net && lastLease.isSelf) net.setTune(name, v);
       },
       async onEditHere(onSourceChanged) {
         // GARDEN-IDE's live recompile is GLSL-only — a WebGPU-backed mount
@@ -998,6 +1033,12 @@ export async function mount(ctx) {
     // in its Watching pane header. Holders may also need to drop the
     // Watching pane on the flip out — handled inside setAuthority.
     notifyEditorsAuthority();
+    // §5.3 / Weekend P2P §2: a lease flip changes who may move a slider.
+    // The currently-mounted panel (if any) needs the authority flip too,
+    // without a remount — setTuneAuthority() is the in-place API for
+    // toggling slider disabled-state. Reading lastLease.isSelf keeps the
+    // contract identical to the canTune at panel-mount time above.
+    panel?.setTuneAuthority?.(!room || lastLease.isSelf);
   }
 
   function renderGame(game) {
@@ -1187,6 +1228,43 @@ export async function mount(ctx) {
     openEditors.get(componentId)?.setMirrorBody?.(body);
   }
 
+  // §5.3 / Weekend P2P §2: late-join welcome arrives with the full tunes
+  // snapshot — every value the room is currently rendering. Reapply ALL
+  // of them so a player who joins mid-round sees the same world the rest
+  // of the room is showing, and so their probe panel opens with the right
+  // starting slider positions if they peek a component before the first
+  // delta. tuneValues is the source of truth — both the panel and the
+  // shader read from it — and onBuild re-applies it on every rebuild.
+  function handleTunesSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    const u = {};
+    for (const [name, value] of Object.entries(snapshot)) {
+      tuneValues[name] = value;
+      u[name] = value;
+    }
+    rh.runtime?.setUniforms(u);
+    // A panel that's already open needs to know about every dialed value,
+    // too — without setTuneValue() the slider visually disagrees with the
+    // shader until the user nudges it. Pushed without remounting so the
+    // currently-mounted probe stays put.
+    panel?.setTuneValues?.(snapshot);
+  }
+
+  // §5.3 / Weekend P2P §2: a single tune delta from the holder. Mirrors
+  // tuneValues locally so a subsequent probe panel opens at the right
+  // slider position, and pushes the uniform so the world updates without
+  // waiting for the next snapshot. The wire is authoritative — this
+  // callback is the convergence path the holder's own dial initiated,
+  // landing back at this client via the host's broadcast. No panel
+  // remounting: setTuneValue() is the in-place slider update API the
+  // brief calls out explicitly.
+  function handleTuneDelta({ name, value, by }) {
+    if (typeof name !== 'string' || typeof value !== 'number') return;
+    tuneValues[name] = value;
+    rh.runtime?.setUniforms({ [name]: value });
+    panel?.setTuneValue?.(name, value);
+  }
+
   if (room) {
     mp.leaseBtn.addEventListener('click', () => {
       if (!net) return;
@@ -1204,6 +1282,13 @@ export async function mount(ctx) {
     });
     import('./net.js').then(({ connectRoom }) => {
       if (!ctx.alive()) return;
+      // Correction 8: the finite known-tune set is the union of every
+      // @tune declared by every parsed component in the scene. A holder
+      // cannot dial a uniform the scene never declared — and a
+      // non-holder cannot be tricked into trying either, because
+      // setTune() refuses unknown names BEFORE they hit the wire.
+      const knownTunes = [];
+      for (const c of components) for (const t of c.tunes) knownTunes.push(t.name);
       net = connectRoom({
         room,
         name: loadMpName(),
@@ -1216,6 +1301,18 @@ export async function mount(ctx) {
         onRoster: renderRoster,
         onGame: renderGame,
         onStatus: renderStatus,
+        // §5.3 / Weekend P2P §2: tune snapshot + delta callbacks. Snapshot
+        // arrives in the welcome payload, deltas arrive as `tune` messages
+        // from the holder. The brief is explicit — these two callbacks are
+        // the only places a non-holder's tuneValues advances, so a player
+        // joining late or returning from a context-loss rebuild lands in
+        // the room the rest of the room is in.
+        onTunes: handleTunesSnapshot,
+        onTune: handleTuneDelta,
+        // Correction 8: finite known tune validation. See net.js's
+        // `knownTunes` Set — setTune(name, value) refuses to send a wire
+        // message unless `name` is in this list.
+        knownTunes,
       });
       net.armClock(rh.runtime); // first arm — onBuild() re-arms on every rebuild thereafter (§3.2)
       checkRing(); // establish initial ring membership without waiting for the first movement frame

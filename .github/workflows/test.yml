@@ -414,6 +414,18 @@ jobs:
         timeout-minutes: 22
         working-directory: tools/test
         run: node mp-two-browsers.mjs 2>&1 | tee out/logs/mp-two-browsers.log
+      # Weekend P2P acceptance: two real browser pages dialing
+      # ?transport=p2p, real RTCPeerConnection, real data channels,
+      # signaling-stream purity, host-loss fail-closed. Same
+      # tier-gate as mp-two-browsers (a SwiftShader runner still
+      # exercises the WebRTC stack — only the canvas readback is
+      # GPU-bound).
+      - name: mp-p2p-two-browsers
+        if: env.TIER != 'deploy'
+        continue-on-error: true
+        timeout-minutes: 22
+        working-directory: tools/test
+        run: node mp-p2p-two-browsers.mjs 2>&1 | tee out/logs/mp-p2p-two-browsers.log
       # §5.2 / §6.2 / §7.4 acceptance for the dual-workspace editor and the
       # phase uniform truth. Sits right next to mp-two-browsers because both
       # drive two pages of one room — same relay-port offset pattern, same

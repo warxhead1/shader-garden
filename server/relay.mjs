@@ -24,23 +24,8 @@ import { createRoom, reduce, tick, removeMember, PROTOCOL, MAX_ROOMS, HEARTBEAT_
 // opaque forwarding, leave/host-loss teardown, its own limits and counters.
 // This file only picks the protocol on hello and dispatches into that module.
 import { createSignalHub, SIGNAL_PROTOCOL } from './signal.mjs';
-// ICE/TURN credentials endpoint: pure parsing + crypto helpers live in
-// ice-credentials.mjs; the HTTP wiring (origin gating, OPTIONS preflight,
-// rate limiting, response shaping) lives here so all socket I/O stays in
-// this one file. See server/README.md and server/test/ice-credentials.test.mjs.
-import {
-  ICE_CREDENTIALS_PATH,
-  ICE_CREDENTIALS_PATH_METHODS,
-  buildCredentials,
-  buildResponse,
-  clampTtl,
-  clampRatePerMinute,
-  createRateLimiter,
-  isEndpointEnabled,
-  parseAllowedOrigins,
-  parseTurnUrls,
-  safeHeader,
-} from './ice-credentials.mjs';
+// Short-lived TURN credential endpoint; all request/security logic is isolated.
+import { createIceCredentialsEndpoint } from './ice-credentials.mjs';
 
 const TICK_HZ = 30;
 
@@ -55,33 +40,6 @@ function parseArgs(argv) {
     }
   }
   return args;
-}
-
-// Resolve the ICE-credentials endpoint config from the environment. The
-// shared secret is read HERE (so it never escapes into logs/CLI args) and is
-// only ever passed by reference to buildCredentials(). Returning a frozen
-// object means callers can stash it without worrying about mutation.
-export function resolveIceConfig(env) {
-  const sharedSecret = typeof env.SG_TURN_SHARED_SECRET === 'string' ? env.SG_TURN_SHARED_SECRET : '';
-  const turnUrls = parseTurnUrls(env.SG_TURN_URLS);
-  const ttlSeconds = clampTtl(env.SG_TURN_TTL_SECONDS);
-  const ratePerMinute = clampRatePerMinute(env.SG_TURN_CREDENTIALS_PER_MINUTE);
-  // SG_ALLOWED_ORIGINS is the source of truth for HTTP origin gating on the
-  // /ice-credentials endpoint. --origin CLI list is still the WebSocket
-  // upgrade allowlist (kept separate so a deployment can lock the
-  // credential endpoint tighter than the signaling endpoint if it wants).
-  // Both are merged so an operator only has to set one env var.
-  const merged = new Set();
-  for (const o of parseAllowedOrigins(env.SG_ALLOWED_ORIGINS)) merged.add(o);
-  const allowedOrigins = [...merged];
-  return Object.freeze({
-    enabled: isEndpointEnabled({ sharedSecret, turnUrls }),
-    sharedSecret, // reference only — never logged, never serialized
-    turnUrls: turnUrls || [],
-    ttlSeconds,
-    ratePerMinute,
-    allowedOrigins,
-  });
 }
 
 /** Per-socket state. `roomId` is bound on the first valid hello.room; pre-hello,
@@ -105,139 +63,12 @@ function makeConnection(socket) {
   };
 }
 
-// Handle a request to /ice-credentials. This is the single HTTP entry point
-// for the long-lived relay; it runs in the same createServer callback as
-// /healthz so all socket I/O stays in this one file. The shared secret is
-// read once at boot and only ever held by reference inside `ice.sharedSecret`
-// — it is never logged, never echoed, and the response body never contains
-// it (only the HMAC output).
-export function handleIceCredentials(req, res, { ice, iceLimiter, nowMs, rng }) {
-  const method = req.method;
-  // Method gate: only GET and OPTIONS. Anything else is 405 with an Allow
-  // header so debugging tools can see what is supported.
-  if (!ICE_CREDENTIALS_PATH_METHODS.has(method)) {
-    res.writeHead(405, {
-      'content-type': 'text/plain',
-      allow: 'GET, OPTIONS',
-    });
-    res.end('method not allowed');
-    return;
-  }
-
-  // Disabled → 404 always, no CORS headers, no leak of which env var is
-  // missing. A misconfigured page just sees the path as not existing.
-  if (!ice.enabled) {
-    res.writeHead(404, { 'content-type': 'text/plain' });
-    res.end('not found');
-    return;
-  }
-
-  // Resolve the request Origin and strip anything that could smuggle a
-  // header line through (CRLF / NUL) — we echo Origin back in ACAO and a
-  // malicious Origin must never reach the response.
-  const requestOrigin = safeHeader(req.headers.origin);
-
-  // Origin gate: must exactly match one of the configured values. Empty
-  // allowedOrigins ⇒ no origin allowed (production-safe default — when the
-  // operator hasn't said who is allowed, we deny everyone).
-  if (!requestOrigin || !ice.allowedOrigins.includes(requestOrigin)) {
-    res.writeHead(403, { 'content-type': 'text/plain' });
-    res.end('forbidden');
-    return;
-  }
-
-  // CORS headers: ACAO is the *matched* origin (exact, never "*"), and
-  // Vary: Origin is required so a downstream cache doesn't serve one
-  // tenant's credentials to another.
-  const corsHeaders = {
-    'access-control-allow-origin': requestOrigin,
-    vary: 'Origin',
-    'cache-control': 'no-store',
-    'content-type': 'application/json',
-  };
-
-  if (method === 'OPTIONS') {
-    // Preflight: only GET/OPTIONS, only this path. We hard-code the
-    // advertised methods (no echoing from Access-Control-Request-Method)
-    // so a misbehaving client can't get us to advertise something the
-    // endpoint doesn't actually support.
-    res.writeHead(204, {
-      ...corsHeaders,
-      'access-control-allow-methods': 'GET, OPTIONS',
-      'access-control-max-age': '600',
-    });
-    res.end();
-    return;
-  }
-
-  // GET path. Rate-limit BEFORE any crypto so a flood does not burn the
-  // HMAC budget. The bucket key is the direct socket IP — X-Forwarded-For
-  // is deliberately NOT consulted because we are at the edge of the trust
-  // boundary; a reverse proxy that wants to enforce per-real-IP limits
-  // should do so upstream and forward the real IP as the source.
-  const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
-  const rl = iceLimiter.check(ip);
-  if (!rl.ok) {
-    res.writeHead(429, {
-      ...corsHeaders,
-      'retry-after': String(rl.retryAfterSec),
-    });
-    res.end(JSON.stringify({ error: 'rate_limited' }));
-    return;
-  }
-
-  // Issue the credential. buildCredentials only returns null when the
-  // secret is empty — the ice.enabled gate above already prevented that
-  // case, so a returned null here is a defensive 500.
-  const creds = buildCredentials({
-    sharedSecret: ice.sharedSecret,
-    ttlSeconds: ice.ttlSeconds,
-    nowMs,
-    rng,
-  });
-  if (!creds) {
-    res.writeHead(500, { 'content-type': 'text/plain' });
-    res.end('server error');
-    return;
-  }
-  const body = buildResponse({
-    urls: ice.turnUrls,
-    username: creds.username,
-    credential: creds.credential,
-    expiryUnix: creds.expiryUnix,
-  });
-  res.writeHead(200, corsHeaders);
-  res.end(JSON.stringify(body));
-}
-
-export function startRelay({
-  port = 8787,
-  host = '0.0.0.0',
-  origins = null,
-  env = process.env,
-  iceConfig: iceConfigOverride = null,
-  nowMs = () => Date.now(),
-  rng = randomUUID,
-} = {}) {
+export function startRelay({ port = 8787, host = '0.0.0.0', origins = null, env = process.env, iceConfig = null, nowMs = Date.now, rng = randomUUID } = {}) {
   const rooms = new Map(); // id -> Room
   const conns = new Map(); // socket -> connection state
   let warnedOpenOrigin = false;
-  // Resolve the ICE-credentials endpoint config once at boot; we never read
-  // the shared secret from a request. The rate limiter is a single per-IP
-  // bucket table that lives for the lifetime of the process.
-  const ice = iceConfigOverride || resolveIceConfig(env);
-  const iceLimiter = createRateLimiter({ perMinute: ice.ratePerMinute, nowMs });
-  if (ice.enabled) {
-    // One-line boot notice — does NOT include the secret. The TURN URL list
-    // is public-by-design (it ends up in the issued credential anyway), so
-    // logging its length / first host is fine.
-    const hostHint = ice.turnUrls[0] ? ` (first: ${ice.turnUrls[0]})` : '';
-    console.log(
-      `[relay] /ice-credentials ENABLED ttl=${ice.ttlSeconds}s rate=${ice.ratePerMinute}/min urls=${ice.turnUrls.length}${hostHint}`
-    );
-  } else {
-    console.log('[relay] /ice-credentials DISABLED (set SG_TURN_SHARED_SECRET and SG_TURN_URLS to enable)');
-  }
+  const iceEndpoint = createIceCredentialsEndpoint({ env, iceConfig, nowMs, rng });
+  console.log(iceEndpoint.startupMessage);
 
   function getOrCreateRoom(id, nowMs) {
     let room = rooms.get(id);
@@ -424,10 +255,7 @@ export function startRelay({
       res.end(JSON.stringify({ ok: true, rooms: rooms.size, members, ...signal.stats() }));
       return;
     }
-    if (req.url === ICE_CREDENTIALS_PATH) {
-      handleIceCredentials(req, res, { ice, iceLimiter, nowMs, rng });
-      return;
-    }
+    if (req.url === iceEndpoint.path) return iceEndpoint(req, res);
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   });

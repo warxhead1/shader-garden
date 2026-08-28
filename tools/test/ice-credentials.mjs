@@ -15,9 +15,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { handleIceCredentials, startRelay, resolveIceConfig } from '../../server/relay.mjs';
+import { startRelay } from '../../server/relay.mjs';
 import {
   ICE_CREDENTIALS_PATH,
+  handleIceCredentials,
+  resolveIceConfig,
   parseTurnUrls,
   parseAllowedOrigins,
   clampTtl,

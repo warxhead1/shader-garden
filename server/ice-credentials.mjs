@@ -199,3 +199,91 @@ export function safeHeader(v) {
   if (typeof v !== 'string') return '';
   return v.replace(/[\r\n\t\v\f\0]+/g, '').trim();
 }
+
+export function resolveIceConfig(env = {}) {
+  const sharedSecret = typeof env.SG_TURN_SHARED_SECRET === 'string' ? env.SG_TURN_SHARED_SECRET : '';
+  const turnUrls = parseTurnUrls(env.SG_TURN_URLS);
+  const ttlSeconds = clampTtl(env.SG_TURN_TTL_SECONDS);
+  const ratePerMinute = clampRatePerMinute(env.SG_TURN_CREDENTIALS_PER_MINUTE);
+  const allowedOrigins = [...new Set(parseAllowedOrigins(env.SG_ALLOWED_ORIGINS))];
+  return Object.freeze({
+    enabled: isEndpointEnabled({ sharedSecret, turnUrls }),
+    sharedSecret,
+    turnUrls: turnUrls || [],
+    ttlSeconds,
+    ratePerMinute,
+    allowedOrigins,
+  });
+}
+
+export function handleIceCredentials(req, res, { ice, iceLimiter, nowMs, rng }) {
+  const method = req.method;
+  if (!ICE_CREDENTIALS_PATH_METHODS.has(method)) {
+    res.writeHead(405, { 'content-type': 'text/plain', allow: 'GET, OPTIONS' });
+    res.end('method not allowed');
+    return;
+  }
+  if (!ice.enabled) {
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
+    return;
+  }
+
+  const requestOrigin = safeHeader(req.headers.origin);
+  if (!requestOrigin || !ice.allowedOrigins.includes(requestOrigin)) {
+    res.writeHead(403, { 'content-type': 'text/plain' });
+    res.end('forbidden');
+    return;
+  }
+  const corsHeaders = {
+    'access-control-allow-origin': requestOrigin,
+    vary: 'Origin',
+    'cache-control': 'no-store',
+    'content-type': 'application/json',
+  };
+  if (method === 'OPTIONS') {
+    res.writeHead(204, {
+      ...corsHeaders,
+      'access-control-allow-methods': 'GET, OPTIONS',
+      'access-control-max-age': '600',
+    });
+    res.end();
+    return;
+  }
+
+  const limited = iceLimiter.check((req.socket && req.socket.remoteAddress) || 'unknown');
+  if (!limited.ok) {
+    res.writeHead(429, { ...corsHeaders, 'retry-after': String(limited.retryAfterSec) });
+    res.end(JSON.stringify({ error: 'rate_limited' }));
+    return;
+  }
+  const creds = buildCredentials({
+    sharedSecret: ice.sharedSecret,
+    ttlSeconds: ice.ttlSeconds,
+    nowMs,
+    rng,
+  });
+  if (!creds) {
+    res.writeHead(500, { 'content-type': 'text/plain' });
+    res.end('server error');
+    return;
+  }
+  res.writeHead(200, corsHeaders);
+  res.end(JSON.stringify(buildResponse({
+    urls: ice.turnUrls,
+    username: creds.username,
+    credential: creds.credential,
+    expiryUnix: creds.expiryUnix,
+  })));
+}
+
+export function createIceCredentialsEndpoint({ env = {}, iceConfig = null, nowMs = Date.now, rng = randomUUID } = {}) {
+  const ice = iceConfig || resolveIceConfig(env);
+  const iceLimiter = createRateLimiter({ perMinute: ice.ratePerMinute, nowMs });
+  const endpoint = (req, res) => handleIceCredentials(req, res, { ice, iceLimiter, nowMs, rng });
+  endpoint.path = ICE_CREDENTIALS_PATH;
+  endpoint.startupMessage = ice.enabled
+    ? `[relay] /ice-credentials ENABLED ttl=${ice.ttlSeconds}s rate=${ice.ratePerMinute}/min urls=${ice.turnUrls.length}`
+    : '[relay] /ice-credentials DISABLED (set SG_TURN_SHARED_SECRET and SG_TURN_URLS to enable)';
+  return endpoint;
+}

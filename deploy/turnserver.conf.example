@@ -10,10 +10,9 @@
 #
 #   • use-auth-secret must be on (the relay's HMAC is the TURN REST API
 #     secret-auth scheme; coturn checks it via static-auth-secret).
-#   • no-anonymous must be on (otherwise the server will happily accept
-#     unauthenticated allocations, which is what we're trying to stop).
-#   • fingerprint must be on (RFC 5389/5762 STUN MESSAGE-INTEGRITY for
-#     WebRTC — without it browsers will refuse to talk to the relay).
+#   • use-auth-secret enables coturn's authenticated TURN REST mode; do not
+#     add the separate no-auth option.
+#   • fingerprint adds the RFC 5389 FINGERPRINT attribute expected by WebRTC.
 #   • min-port / max-port bound the relay UDP range to a known, monitorable
 #     set; pick a contiguous range you can firewall.
 #
@@ -32,23 +31,10 @@ realm=PLACEHOLDER_REALM
 use-auth-secret
 static-auth-secret=PLACEHOLDER_STATIC_AUTH_SECRET
 
-# No anonymous allocations. Without this, every unauthenticated client on
-# the open internet can get a relay address — exactly the abuse vector
-# short-lived creds are designed to prevent.
-no-anonymous
-
-# WebRTC requires the STUN MESSAGE-INTEGRITY attribute that RFC 5389 §15.2
-# defines (a.k.a. "fingerprint"). Without this on, browsers will silently
-# refuse to negotiate with the relay even though it answers STUN.
+# Add RFC 5389 FINGERPRINT to TURN/STUN responses.
 fingerprint
 
 # ---- TLS (modern only) ------------------------------------------------------
-
-# Disable ancient TLS so a scanner that fails the GREASE / version negotiation
-# drops the connection quickly rather than downgrading to something we
-# shouldn't be supporting in 2026.
-no-tlsv1
-no-tlsv1_1
 
 # A pinned, modern cipher list. Matches Mozilla's "intermediate" guidance
 # and excludes anything CBC-based or RC4-based. The relay only sees
@@ -92,9 +78,8 @@ log-file=/dev/stdout
 
 # ---- Safety defaults --------------------------------------------------------
 
-# Disallow relay-to-relay amplification / loopback. coturn will refuse to
-# relay peers on these ranges.
-no-loopback-peers
+# Disallow relay-to-relay amplification and private/special destinations.
+# Loopback is denied by default and again by the explicit range below.
 no-multicast-peers
 denied-peer-ip=0.0.0.0-0.255.255.255
 denied-peer-ip=10.0.0.0-10.255.255.255
@@ -112,11 +97,6 @@ denied-peer-ip=203.0.113.0-203.0.113.255
 denied-peer-ip=240.0.0.0-255.255.255.255
 
 # ---- Process / runtime ------------------------------------------------------
-
-# Run as the bundled non-root user (coturn image already creates this).
-proc-user=turnserver
-proc-group=turnserver
-
 # Disable CLI (no telnet admin port). The reference deployment has no
 # remote-admin story; if you need one, enable it behind a separate tunnel.
 no-cli

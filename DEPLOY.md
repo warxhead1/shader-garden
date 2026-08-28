@@ -205,9 +205,9 @@ TLS termination you control, in front of a container you built from
 
 ### 5.4 Public STUN-only entries — `SG_ICE_SERVERS_JSON`
 
-A **SECRET** with the same name as a previously-suggested "stun or turn"
-override, kept for backward compatibility but now explicitly bounded to
-**public, non-secret STUN entries only**.
+A repository **VARIABLE**, explicitly bounded to public, non-secret
+STUN entries only. It is not a secret because the stamped value is readable
+from the public Pages artifact.
 
 ```sh
 # Example — public STUN list (the canonical "twelve servers, no auth"

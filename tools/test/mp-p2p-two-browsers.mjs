@@ -779,7 +779,14 @@ check('(tune) B\'s runtime uniform bank received TERRAIN_ROUGHNESS=' + tuneValue
 // the "is anything actually flowing" question a rehearsal asks first.
 const diagA1 = await readDiagnostics(pageA);
 const diagB1 = await readDiagnostics(pageB);
-await sleep(scaled(1500));
+// Generate traffic in both directions instead of assuming an idle room's
+// periodic timers happen to fire inside this sampling window.
+await pageA.keyboard.down('KeyW');
+await pageB.keyboard.down('KeyW');
+await sleep(scaled(350));
+await pageA.keyboard.up('KeyW');
+await pageB.keyboard.up('KeyW');
+await sleep(scaled(1200));
 const diagA2 = await readDiagnostics(pageA);
 const diagB2 = await readDiagnostics(pageB);
 

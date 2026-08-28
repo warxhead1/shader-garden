@@ -62,12 +62,10 @@ is gone when the container exits.
 
 ## Hardening notes baked in
 
-- `no-anonymous` — required. Without this, anyone can allocate a relay
-  address without proving knowledge of the shared secret.
-- `use-auth-secret` + `static-auth-secret` — the TURN REST API shared-
-  secret scheme; coturn verifies the HMAC the relay issues.
-- `fingerprint` — RFC 5389 STUN MESSAGE-INTEGRITY; browsers refuse the
-  relay without it.
+- `use-auth-secret` + `static-auth-secret` — coturn's authenticated TURN REST
+  scheme; coturn verifies the time-limited HMAC the relay issues. Do not add
+  coturn's separate `no-auth` option.
+- `fingerprint` — adds the RFC 5389 FINGERPRINT attribute.
 - `min-port`/`max-port` (49152..49407) — the relay UDP range; bound the
   firewall to exactly this set.
 - `denied-peer-ip` covers RFC1918 / loopback / link-local / multicast /
@@ -75,13 +73,12 @@ is gone when the container exits.
   private network.
 - `no-cli` — no telnet-style admin port. Coturn is configured only via
   the file.
-- `no-tlsv1`, `no-tlsv1_1`, `cipher-list` — TLS ≥ 1.2 with modern AEAD.
-- Compose drops ALL capabilities and adds only NET_BIND_SERVICE + NET_ADMIN,
-  applies `no-new-privileges`, runs on a read-only root filesystem, and
-  puts /run on tmpfs.
-- The entrypoint runs as root long enough to render the config + chown to
-  `turnserver`, then execs coturn, which drops privileges via `proc-user`/
-  `proc-group`. The long-running process is never root.
+- `cipher-list` — restricts TLS cipher suites; coturn 4.7 with its linked
+  OpenSSL already excludes legacy TLS protocol versions.
+- Compose runs as the official image's existing UID/GID 65534 from process
+  start, drops all capabilities except the official binary's declared
+  `NET_BIND_SERVICE` file capability, applies `no-new-privileges`, uses a
+  read-only root filesystem, and puts its UID-owned `/run` on tmpfs.
 - The relay itself is unchanged: it hands the browser a 600 s
   HMAC-SHA1(username, sharedSecret) credential, never the secret.
 

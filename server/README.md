@@ -183,24 +183,20 @@ The shipped default is the new peer-to-peer transport — `transport: "p2p"` in
 `assets/relay.json`. The signaling endpoint is still a wss:// URL; the same
 `SG_RELAY_URL` variable points at it. No separate process or port is required.
 
-For ICE/TURN you may set the repository **secret** `SG_ICE_SERVERS_JSON` to
-an array of `RTCIceServer`-shaped objects:
+For public STUN discovery you may set repository **variable**
+`SG_ICE_SERVERS_JSON` to non-secret `RTCIceServer` entries:
 
 ```json
 [
-  { "urls": "stun:stun.example.org:3478" },
-  {
-    "urls": "turn:turn.example.org:3478",
-    "username": "<short-lived>",
-    "credential": "<short-lived>",
-    "credentialType": "password"
-  }
+  { "urls": "stun:stun.example.org:3478" }
 ]
 ```
 
-`deploy.yml` validates this JSON with Node (NOT shell parsing) BEFORE the
-final `assets/relay.json` is written — the file emitted by CI is always a
-single, valid JSON document.
+`deploy.yml` validates this JSON with Node and rejects username/credential
+fields before the final public `assets/relay.json` is written. Configure
+repository variable `SG_ICE_CREDENTIALS_URL` for the relay's HTTPS
+`/ice-credentials` endpoint; it vends a fresh, time-limited TURN username and
+password for each connection without storing either in Pages.
 
 **Privacy and abuse notes for the operator.** This is a weekend ship and the
 brief is explicit:

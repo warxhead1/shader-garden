@@ -105,7 +105,7 @@ jobs:
         #      a public endpoint that ships inside a public artifact, and
         #      pretending otherwise would just hide it from the people
         #      maintaining it.
-        #   2. Optionally, set the repository SECRET SG_ICE_SERVERS_JSON to a
+        #   2. Optionally, set repository VARIABLE SG_ICE_SERVERS_JSON to a
         #      JSON array of PUBLIC, NON-SECRET RTCIceServer-shaped STUN-only
         #      entries (used verbatim as the WebRTC `iceServers` list).
         #      SG_ICE_SERVERS_JSON is for public STUN entries only — it must
@@ -130,7 +130,7 @@ jobs:
         #      site will not dial without ephemeral credentials.
         env:
           RELAY_URL: ${{ vars.SG_RELAY_URL }}
-          ICE_SERVERS_JSON: ${{ secrets.SG_ICE_SERVERS_JSON }}
+          ICE_SERVERS_JSON: ${{ vars.SG_ICE_SERVERS_JSON }}
           ICE_CREDENTIALS_URL: ${{ vars.SG_ICE_CREDENTIALS_URL }}
         run: |
           set -euo pipefail

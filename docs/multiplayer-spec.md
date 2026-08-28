@@ -340,7 +340,7 @@ the two facades drive the same logic without a transport branch.
 The deployed default is `transport: "p2p"` with an empty `iceServers`
 list and `iceCredentialsUrl: null`. The CI workflow stamps
 `SG_RELAY_URL` (the wss:// signaling endpoint hosted alongside the
-static site), optionally `SG_ICE_SERVERS_JSON` (deploy-time operator
+static site), optionally the repository variable `SG_ICE_SERVERS_JSON` (deploy-time operator
 override for **public STUN-only** entries — any entry carrying
 `username`, `credential`, or `credentialType` is rejected at stamp
 time, per §2.7 below), and optionally `SG_ICE_CREDENTIALS_URL` (the
@@ -360,8 +360,9 @@ TURN credentials belong in §2.7's runtime vending endpoint, not here.
 
 #### Trust / privacy disclosures the operator must accept
 
-This is a weekend ship and the brief is explicit that ICE/TURN credentials
-embedded in the public site are visible to anyone who views source.
+This is a weekend ship: long-lived ICE/TURN credentials must never be embedded
+in the public site. Runtime-vended credentials remain visible to their browser
+recipient but expire quickly, limiting reuse.
 
 1. **Direct connectivity cannot be guaranteed.** Two visitors on hostile
    networks (symmetric NATs, firewalls, captive portals) will fail to

@@ -29,6 +29,9 @@ services:
     # /run/turnserver.conf with the secret substituted from env. It then
     # execs the original turnserver binary with that rendered config.
     entrypoint: ["/usr/local/bin/turn-entrypoint.sh", "turnserver"]
+    # coturn/coturn:4.7 has no `turnserver` OS user. Run as the image's
+    # existing nobody/nogroup identity from process start instead.
+    user: "65534:65534"
     volumes:
       # Reference config mounted read-only at the path the entrypoint
       # reads. PLACEHOLDER_STATIC_AUTH_SECRET and PLACEHOLDER_REALM are
@@ -44,25 +47,18 @@ services:
     # /run is tmpfs on most container runtimes — the rendered config lives
     # there only for the lifetime of the container.
     tmpfs:
-      - /run:size=1M,mode=0755
-    # The entrypoint runs as root (compose default) so the chown step on
-    # /run/turnserver.conf to the `turnserver` user succeeds regardless
-    # of which UID/GID that account has in the image; coturn itself drops
-    # privileges to `turnserver` via proc-user / proc-group in the config,
-    # so the long-running process is never root.
+      - /run:size=1M,mode=0700,uid=65534,gid=65534
     # A read-only root filesystem so the only writable place in the
     # container is /run/. The image's standard layers are never modified
     # at runtime — a much smaller blast radius if anything goes wrong.
     read_only: true
-    # Capability drop: coturn only needs NET_BIND_SERVICE for ports <1024,
-    # but it needs CAP_NET_ADMIN to manage the relay UDP range and to
-    # toggle some kernel-side connection-tracking behaviour. We keep
-    # NET_ADMIN + NET_BIND_SERVICE and drop everything else.
+    # The official image marks turnserver with cap_net_bind_service. Docker
+    # refuses to exec that file after cap_drop: ALL unless the same capability
+    # remains in the bounding set, even though our listeners are above 1024.
     cap_drop:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
-      - NET_ADMIN
     security_opt:
       - no-new-privileges:true
     ports:
@@ -78,10 +74,8 @@ services:
       # These MUST match min-port / max-port in turnserver.conf.example.
       - "49152-49407:49152-49407/udp"
     healthcheck:
-      # coturn does not speak HTTP, but a TCP open against the listening
-      # port is good enough to confirm the binary started. A failed
-      # healthcheck makes `restart: unless-stopped` roll a fresh container.
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/3478 && echo -e '\\r\\n' >&3 || exit 1"]
+      # The official image includes pidof; avoid shell-specific /dev/tcp.
+      test: ["CMD-SHELL", "pidof turnserver >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3

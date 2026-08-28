@@ -85,10 +85,6 @@ awk '
 ' "$TEMPLATE" > "$RENDERED"
 
 chmod 0600 "$RENDERED"
-# The coturn image's bundled non-root user is `turnserver`. chown may
-# fail if the image was rebased; that's non-fatal — file perms (0600)
-# are the actual security gate.
-chown turnserver:turnserver "$RENDERED" 2>/dev/null || true
 
 # --- verify rendering --------------------------------------------------------
 

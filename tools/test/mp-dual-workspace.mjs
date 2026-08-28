@@ -628,6 +628,20 @@ await sendOnLiveSocket(pageB, { t: 'lease.request' });
 const bTakesLease = await waitForNextOnPage(pageB, 'lease', bIdx, scaled(10000));
 bIdx = bTakesLease ? bTakesLease.index : bIdx;
 check('(c) B took the lease over its own real socket', !!bTakesLease && bTakesLease.msg.holder === bSelfId, JSON.stringify(bTakesLease));
+// Wait for A to receive the matching lease broadcast naming B as holder, so
+// A's lease cursor (aIdx) advances PAST the B-grant. The (e) round later
+// calls consumeLeaseRelease(pageA, aIdx, 'A (peer)') to drain B's next
+// null-holder release; that helper searches for the FIRST `lease` message
+// AFTER aIdx and asserts holder == null. Without this advance aIdx still
+// points at A's own null-holder release from earlier in (c), and the FIRST
+// `lease` after that is the B-grant (holder:bSelfId) — the helper would
+// land on the grant and fail its null-holder assertion on what is actually
+// a stale cursor, masquerading as an authority bug. Same shape as the
+// A-takes-lease drain in (setup), mirrored: one wait on the peer page,
+// holder === bSelfId.
+const aSeesBGrant = await waitForNextOnPage(pageA, 'lease', aIdx, scaled(10000));
+aIdx = aSeesBGrant ? aSeesBGrant.index : aIdx;
+check('(c) A received the lease broadcast naming B as holder', !!aSeesBGrant && aSeesBGrant.msg.holder === bSelfId, JSON.stringify(aSeesBGrant));
 
 // setAuthority must NOT remount: the same .component-editor-editable node
 // should still be present, AND its value should still be B's local draft.

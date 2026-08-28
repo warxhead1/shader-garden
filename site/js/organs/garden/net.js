@@ -573,6 +573,27 @@ export function connectRoom(opts) {
     rename: (n) => send({ t: 'rename', name: n }),
     // §1: visible transport indicator.
     getTransport: () => socketFacade,
+    /** Read-only, non-secret WebRTC diagnostics for a two-household
+     *  rehearsal: one entry per peer connection with connection/ICE state,
+     *  candidate TYPES (host/srflx/prflx/relay — never addresses), transport
+     *  protocol, relayProtocol, byte counters and RTT. See p2p-socket.js's
+     *  summarizeSelectedPair() for the exact whitelist.
+     *
+     *  Resolves [] whenever there is nothing to report: ws transport, solo,
+     *  no socket yet, a socket that predates the facade method, or a socket
+     *  that is not open. Callers get a stable array shape and never have to
+     *  branch on transport. */
+    getP2PDiagnostics: async () => {
+      if (socketFacade !== 'p2p') return [];
+      if (!socket || typeof socket.getDiagnostics !== 'function') return [];
+      if (!isOpen(socket)) return [];
+      try {
+        const rows = await socket.getDiagnostics();
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
+    },
     destroy,
   };
 }

@@ -298,7 +298,123 @@ credential (the spec suggests seconds to minutes, not hours). Cloud
 providers with managed TURN (Twilio Network Traversal, Cloudflare
 Calls, etc.) expose this shape directly.
 
-## 6. Sanity checklist after first deploy
+## 6. Two-household rehearsal (P2P, with a real friend)
+
+Everything above proves the site deploys. This section proves the P2P
+transport works **between two houses on two different networks** — the only
+configuration that exercises NAT traversal, and the one a single machine
+with two browser tabs cannot fake. Run it once before you invite anyone
+you'd be embarrassed in front of.
+
+You need: the public URL, a room name you both type, a phone call (or any
+side channel) so the two of you can say "go" to each other, and — for the
+forced-relay pass in step 6.5 — a TURN server in the ICE list the deploy
+already ships.
+
+### 6.1 Before the call
+
+1. Confirm the deploy is multiplayer: `site/assets/relay.json` on the live
+   site returns a `wss://` URL (open
+   `https://<domain>/assets/relay.json` in a browser). `{"url": null}`
+   means single-player and the rehearsal cannot start.
+2. Agree on ONE room name — plain lowercase, no spaces, e.g. `rehearsal-1`.
+   Both households open `https://<domain>/#/garden/<room>`.
+3. Decide who joins FIRST. The first signal member of a room is the
+   immutable host (`docs/multiplayer-spec.md` §Weekend P2P); host loss is
+   fail-closed with no re-election, so "who hosts" is a decision, not an
+   accident. Have the friend with the more stable connection host.
+
+### 6.2 Run the rehearsal instrument on your side
+
+From `tools/test` (after `npm ci`), open ONE local browser peer against the
+public deploy and let it print sanitized diagnostics on an interval:
+
+```sh
+node tools/test/mp-p2p-rehearsal.mjs \
+  --url https://<domain>/ --room rehearsal-1 --interval 10 --minutes 30
+```
+
+Add `--json-only` if you want to pipe the output somewhere. The script is
+provider-neutral (it names no STUN/TURN vendor) and prints **no URL, IP
+address, ICE candidate, SDP, TURN username or credential** — it reuses
+`p2p-socket.js`'s own sanitizer, so the output is safe to screen-share or
+paste into an issue. Pass `--no-origin` to suppress even the target origin.
+
+Your local peer counts as one of the two households; your friend joins the
+same room from theirs in an ordinary browser.
+
+### 6.3 Evidence gates
+
+The rehearsal PASSES only when every gate below is observed. A gate you
+did not check is a gate that failed.
+
+- [ ] **Both devices live.** Each side's multiplayer status pill reads
+      `live`, and each side's roster lists BOTH players. The rehearsal
+      script's `status=live` + `peers-in-roster=2` line is the same fact
+      from your side.
+- [ ] **Signaling carries no gameplay.** On either side: DevTools →
+      Network → the `wss://` signaling socket → Messages. Every frame is
+      `sg.signal.v1` (`hello`, `signal`, `signal.welcome`,
+      `signal.peer.join`/`.leave`, `signal.host-lost`). There must be
+      **zero** `sg.mp.v1` gameplay frames (`welcome`, `poses`, `lease`,
+      `draft`, `commit`, `tune`, `tag`, `game`, `time`, `ring`, …) — those
+      belong on the data channels. A gameplay `t` on the signaling hop
+      means the operator of the relay can read the game, which is the
+      whole property P2P is here to remove.
+- [ ] **Tune convergence.** One side takes the lectern lease, opens a
+      component probe panel, and drags a `@tune` slider. The OTHER
+      household's render visibly changes and its own slider lands on the
+      same value. The rehearsal script echoes the live values on its
+      `tunes:` line.
+- [ ] **Edit convergence.** The lease holder edits a component and commits.
+      The other household's garden rebuilds with the edit, and a THIRD
+      party joining afterwards receives it in their `welcome` snapshot.
+- [ ] **A selected candidate pair exists.** Every diagnostics row shows
+      `pair=transport` (or `selected-flag`/`succeeded`) with a
+      `connectionState=connected` — not `pair=none`. `pair=none` with a
+      connected pill means the room is running over the ws relay, not P2P.
+- [ ] **Forced-TURN pass: at least one candidate type is `relay`.** Repeat
+      the rehearsal with both households on networks that cannot reach
+      each other directly (mobile hotspot on one side is the easiest
+      approximation; `chrome://flags` / an `iceTransportPolicy: 'relay'`
+      build is the deterministic one). At least one of
+      `localCandidateType` / `remoteCandidateType` must read `relay`, and
+      `relayProtocol` must be non-null on the relay side. **Do not claim
+      TURN works because the direct pass succeeded** — a direct pass
+      proves nothing about the TURN path, and a broken TURN config is
+      invisible until the first household behind a symmetric NAT shows up.
+      The automated `mp-p2p-two-browsers` suite deliberately does not
+      assert `relay`: it runs on loopback where the honest answer is
+      `host`.
+- [ ] **Byte counters increase.** Across two consecutive reports, both
+      `Δsent` and `Δrecv` are positive on every row (the script labels
+      this `[MOVING]`). `[STALLED]` while both pills say `live` means the
+      pair is up but the data channels are not carrying — treat it as a
+      failure, not a slow moment.
+- [ ] **Host loss is fail-closed.** The HOST household closes its tab. The
+      guest's status pill flips to `closed` with the text `host lost`
+      (WebSocket close code **1012**), the guest's signaling socket shows
+      `signal.host-lost`, and **no fresh `welcome` arrives afterwards** —
+      there is no re-election and no silent re-dial to another host. A
+      guest that reconnects into a different room's state is the exact
+      regression this gate exists to catch. To play again, everyone
+      reloads and someone joins first.
+
+### 6.4 If a gate fails
+
+- **Never reaches `live`** — check `relay.json` is `wss://`, the relay's
+  `SG_ALLOWED_ORIGINS` includes the deployed origin, and the relay's
+  `GET /healthz` shows the room's members.
+- **`pair=none` / `connectionState=failed`** — ICE never completed. Both
+  households behind restrictive NATs with no reachable TURN server is the
+  usual cause; this is what the forced-TURN gate is for.
+- **`[STALLED]` with a connected pair** — the pair is alive but a data
+  channel closed. Reload both sides; a repeat means a transport bug worth
+  an issue (attach the sanitized rehearsal output, which is safe to paste).
+- **Gameplay frames on the signaling socket** — stop and file it. That is
+  a wire-isolation regression, not a tuning problem.
+
+## 7. Sanity checklist after first deploy
 
 - [ ] `https://<domain>/manifest.webmanifest` loads (correct MIME, not 404).
 - [ ] DevTools → Application → Service Workers shows `sw.js` activated.

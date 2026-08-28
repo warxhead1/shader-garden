@@ -836,6 +836,12 @@ export function connectRoom(opts) -> {
   commit(componentId, body): Promise<{ok, reason?}>,  // resolves after server ack/reject
   tag(targetId): void,
   startGame(): void,
+  getTransport(): 'p2p'|'ws'|null,             // visible transport indicator
+  getP2PDiagnostics(): Promise<Array<{         // read-only, non-secret; see §8.2
+    id, connectionState, iceConnectionState, selectedPairSource,
+    localCandidateType, remoteCandidateType, protocol, relayProtocol,
+    bytesSent, bytesReceived, currentRoundTripTime,
+  }>>,
   destroy(): void,
 }
 ```
@@ -849,6 +855,63 @@ debounce, the pose send rate (15 Hz, and only when the pose actually changed),
 L5 owns and L2 must not reach into: the DOM, the runtime, `editedBodies`,
 `buildSceneSource()`, and every compile call. `net.js` never imports anything
 from `site/js/runtime/`.
+
+### 8.2 WebRTC diagnostics (`getP2PDiagnostics()`) — the non-secret whitelist
+
+A two-household rehearsal has to answer four questions over a phone call:
+is the pair connected, did it go direct or through a relay, is it UDP or
+TCP, and are bytes moving. `getP2PDiagnostics()` is exactly that budget and
+nothing more.
+
+Implementation lives in `site/js/multiplayer/p2p-socket.js`
+(`summarizeSelectedPair()` / `summarizePeerConnection()`, both exported so
+tooling reuses the shipped sanitizer instead of re-deriving a second, leakier
+copy). One entry per live `RTCPeerConnection`, built from
+`RTCPeerConnection.getStats()`.
+
+**Selected-pair resolution**, in order — browsers disagree on which members
+they populate, so all three tiers are real:
+
+1. the `transport` stat's `selectedCandidatePairId` → that exact
+   `candidate-pair` (the spec path; `selectedPairSource: 'transport'`)
+2. a `candidate-pair` with `selected === true`, or `nominated === true` with
+   `state === 'succeeded'` (`'selected-flag'`)
+3. any `candidate-pair` with `state === 'succeeded'` (`'succeeded'`)
+
+No succeeded pair reports `selectedPairSource: 'none'` with null metrics —
+"not connected yet" is distinguishable from "connected and idle", rather
+than being papered over with zeros.
+
+**Reported fields** (whitelist; each is assembled field-by-field, never
+spread from a stats object):
+`id`, `connectionState`, `iceConnectionState`, `selectedPairSource`,
+`localCandidateType`, `remoteCandidateType`, `protocol`, `relayProtocol`,
+`bytesSent`, `bytesReceived`, `currentRoundTripTime`.
+
+**Never reported** — and never *read* from the stats report in the first
+place, so a browser adding a new identifying member cannot leak through:
+SDP, `address`/`ip`/`port`, `relatedAddress`/`relatedPort`, ICE server URLs,
+TURN `username`/`credential`, and raw candidate strings. Candidate TYPE
+(`host`/`srflx`/`prflx`/`relay`) is the coarse fact the operator needs: it
+says "relayed" without saying "relayed via 203.0.113.7". Enum-valued fields
+outside the known sets become `null` rather than being echoed back.
+
+**Facade contract.** `net.js`'s `getP2PDiagnostics()` resolves `[]` — never
+throws, never rejects — whenever there is nothing to report: `ws` transport,
+solo, no socket, a socket without the method, or a socket that is not `OPEN`.
+Callers get a stable array shape and never branch on transport.
+
+**Rehearsal tooling.** `tools/test/mp-p2p-rehearsal.mjs` opens ONE local
+browser peer against a supplied public URL and room and prints sanitized
+diagnostics plus gameplay convergence on an interval, for a rehearsal with a
+real friend on a real second network. It is provider-neutral (names no
+STUN/TURN vendor) and prints no URL, address, candidate, SDP, or credential.
+The evidence gates it feeds are enumerated in `DEPLOY.md` §6.3. The
+automated `tools/test/mp-p2p-two-browsers.mjs` suite asserts the shape,
+sanitization, selected pair, and advancing byte counters, but deliberately
+does **not** assert a `relay` candidate type: it runs on loopback where the
+honest answer is `host`, and a forced-TURN claim belongs to the manual
+rehearsal where a TURN server actually exists.
 
 ---
 

@@ -114,6 +114,7 @@ async function armTransportSpy(page, label) {
       dcReceivedFrames: [], // in: every dispatched 'message' event with a 't'
     };
     const s = w.__p2p;
+    w.__p2pPCs = [];
 
     // --- WebSocket spy: capture every URL + every JSON frame both ways.
     const OrigWS = w.WebSocket;
@@ -154,6 +155,11 @@ async function armTransportSpy(page, label) {
     function PCSpy(cfg) {
       s.rtcSeen = true;
       const pc = new OrigPC(cfg);
+      // Keep the LIVE instances (not serializable, so they live outside the
+      // `__p2p` buffer readSpy() clones) so the diagnostics assertions can
+      // call the production sanitizer against the real getStats() report of
+      // the exact peer connections the page is using.
+      w.__p2pPCs.push(pc);
       const iceServers = (cfg && Array.isArray(cfg.iceServers)) ? cfg.iceServers : [];
       s.pcs.push({ iceServers: JSON.parse(JSON.stringify(iceServers)) });
       s.iceServersUsed.push(JSON.parse(JSON.stringify(iceServers)));
@@ -304,8 +310,67 @@ async function readSpy(page) {
   });
 }
 
-async function waitLive(page, label) {
-  const ok = await page.waitForFunction(
+/* ---------- diagnostics reader ----------
+ *
+ * Calls the PRODUCTION sanitizer (p2p-socket.js's summarizePeerConnection)
+ * against the page's real RTCPeerConnection instances. Importing the shipped
+ * module inside the page — rather than re-deriving a stats reducer here —
+ * is what makes these assertions meaningful: a leak added to the module is
+ * a leak this test sees. The module is already in the page's module map
+ * (net.js dynamic-imports it on the p2p path), so this import is a cache hit.
+ */
+async function readDiagnostics(page) {
+  return page.evaluate(async () => {
+    const pcs = window.__p2pPCs || [];
+    if (pcs.length === 0) return [];
+    const url = new URL('js/multiplayer/p2p-socket.js', location.href).href;
+    const mod = await import(url);
+    const rows = [];
+    for (let i = 0; i < pcs.length; i++) {
+      rows.push(await mod.summarizePeerConnection('pc' + i, pcs[i]));
+    }
+    return rows;
+  });
+}
+
+// The whitelist getP2PDiagnostics() promises. Anything outside it in an
+// emitted row is a privacy regression regardless of its value.
+const DIAG_ALLOWED_KEYS = new Set([
+  'id', 'connectionState', 'iceConnectionState', 'selectedPairSource',
+  'localCandidateType', 'remoteCandidateType', 'protocol', 'relayProtocol',
+  'bytesSent', 'bytesReceived', 'currentRoundTripTime',
+]);
+// Substrings that must never appear anywhere in a serialized diagnostics
+// row. Keys are checked against the whitelist (an unexpected key fails no
+// matter what it holds); VALUES are checked for the shapes a leak would
+// take — an address literal, a raw ICE candidate line, an SDP blob, a URL.
+// Note the value scan deliberately does NOT grep for bare 'ip'/'port': the
+// legitimate field name `currentRoundTripTime` contains "ip", and matching
+// substrings inside whitelisted KEY NAMES is a false positive, not a leak.
+function diagLeak(rows) {
+  for (const row of rows) {
+    for (const k of Object.keys(row)) {
+      if (!DIAG_ALLOWED_KEYS.has(k)) return 'unexpected key "' + k + '"';
+    }
+  }
+  // Only the VALUES, joined — key names are already fully constrained above.
+  const values = rows.flatMap((r) => Object.values(r)).map((v) => String(v)).join(' | ');
+  const BAD_VALUE_PATTERNS = [
+    [/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/, 'an IPv4 literal'],
+    [/[0-9a-f]{1,4}:[0-9a-f]{0,4}:[0-9a-f]{0,4}:/i, 'an IPv6 literal'],
+    [/candidate:/i, 'a raw ICE candidate line'],
+    [/:\/\//, 'a URL'],
+    [/\b(turn|turns|stun|stuns):/i, 'an ICE server URL'],
+    [/\bv=0\b|m=application|a=fingerprint|a=ice-ufrag/i, 'SDP'],
+    [/credential|username/i, 'a credential field'],
+  ];
+  for (const [re, what] of BAD_VALUE_PATTERNS) {
+    if (re.test(values)) return 'value contains ' + what;
+  }
+  return null;
+}
+
+async function waitLive(page, label) {  const ok = await page.waitForFunction(
     () => document.querySelector('.garden-mp-status')?.textContent === 'live',
     undefined, { timeout: scaled(30000) },
   ).then(() => true).catch(() => false);
@@ -705,6 +770,85 @@ const bUniforms = await pageB.evaluate(() => (window.__uniformCalls || []).filte
 const bConverged = bUniforms.some((c) => Math.abs(c.TERRAIN_ROUGHNESS - tuneValue) < 1e-9);
 check('(tune) B\'s runtime uniform bank received TERRAIN_ROUGHNESS=' + tuneValue,
   bConverged, 'sample=' + JSON.stringify(bUniforms.slice(-3)));
+
+/* ---------------- (6b) WebRTC diagnostics: sanitized, real, and moving ------- */
+
+// These run BEFORE the host close so there is still a live peer connection
+// to describe. Two samples separated by a beat of live gameplay (the pose
+// loop runs continuously at POSE_HZ) let us assert byte counters advance —
+// the "is anything actually flowing" question a rehearsal asks first.
+const diagA1 = await readDiagnostics(pageA);
+const diagB1 = await readDiagnostics(pageB);
+await sleep(scaled(1500));
+const diagA2 = await readDiagnostics(pageA);
+const diagB2 = await readDiagnostics(pageB);
+
+check('(diagnostics) HOST reports at least one peer connection', diagA2.length >= 1,
+  JSON.stringify(diagA2));
+check('(diagnostics) GUEST reports at least one peer connection', diagB2.length >= 1,
+  JSON.stringify(diagB2));
+
+const aLeakDiag = diagLeak(diagA2);
+const bLeakDiag = diagLeak(diagB2);
+check('(diagnostics) HOST rows carry no SDP/address/URL/credential/candidate string',
+  !aLeakDiag, aLeakDiag + ' :: ' + JSON.stringify(diagA2));
+check('(diagnostics) GUEST rows carry no SDP/address/URL/credential/candidate string',
+  !bLeakDiag, bLeakDiag + ' :: ' + JSON.stringify(diagB2));
+
+const rowA = diagA2[0] || {};
+const rowB = diagB2[0] || {};
+check('(diagnostics) HOST connectionState is connected', rowA.connectionState === 'connected',
+  JSON.stringify(rowA));
+check('(diagnostics) GUEST connectionState is connected', rowB.connectionState === 'connected',
+  JSON.stringify(rowB));
+check('(diagnostics) HOST iceConnectionState is connected/completed',
+  rowA.iceConnectionState === 'connected' || rowA.iceConnectionState === 'completed',
+  JSON.stringify(rowA));
+
+// A selected pair MUST have resolved by now — via transport
+// .selectedCandidatePairId on Chromium, or one of the documented fallbacks.
+check('(diagnostics) HOST resolved a selected/nominated candidate pair',
+  rowA.selectedPairSource === 'transport' || rowA.selectedPairSource === 'selected-flag'
+  || rowA.selectedPairSource === 'succeeded',
+  'source=' + rowA.selectedPairSource);
+
+// Candidate types must be from the ICE enum. We deliberately do NOT assert
+// 'relay' here: this harness runs both pages on loopback with no TURN
+// server, so the honest outcome is 'host'. Asserting relay would be a
+// false TURN claim — the forced-TURN evidence gate lives in DEPLOY.md's
+// two-household rehearsal, where a real TURN server exists.
+const ICE_TYPES = new Set(['host', 'srflx', 'prflx', 'relay']);
+check('(diagnostics) HOST local candidate type is a valid ICE type',
+  ICE_TYPES.has(rowA.localCandidateType), 'local=' + rowA.localCandidateType);
+check('(diagnostics) HOST remote candidate type is a valid ICE type',
+  ICE_TYPES.has(rowA.remoteCandidateType), 'remote=' + rowA.remoteCandidateType);
+check('(diagnostics) HOST pair protocol is a known transport protocol',
+  rowA.protocol === 'udp' || rowA.protocol === 'tcp' || rowA.protocol === 'tls',
+  'protocol=' + rowA.protocol);
+// relayProtocol is null unless the local candidate is a relay candidate.
+// On loopback that is exactly what we expect, and asserting it keeps the
+// field from quietly turning into a pass-through for something else.
+check('(diagnostics) HOST relayProtocol is null on a non-relay (loopback) pair',
+  rowA.localCandidateType === 'relay' ? rowA.relayProtocol != null : rowA.relayProtocol === null,
+  'localType=' + rowA.localCandidateType + ' relayProtocol=' + rowA.relayProtocol);
+
+check('(diagnostics) HOST byte counters are numeric',
+  typeof rowA.bytesSent === 'number' && typeof rowA.bytesReceived === 'number',
+  JSON.stringify(rowA));
+const prevA = diagA1[0] || {};
+check('(diagnostics) HOST bytesSent advanced between samples (traffic is flowing)',
+  typeof prevA.bytesSent === 'number' && rowA.bytesSent > prevA.bytesSent,
+  'before=' + prevA.bytesSent + ' after=' + rowA.bytesSent);
+check('(diagnostics) HOST bytesReceived advanced between samples',
+  typeof prevA.bytesReceived === 'number' && rowA.bytesReceived > prevA.bytesReceived,
+  'before=' + prevA.bytesReceived + ' after=' + rowA.bytesReceived);
+check('(diagnostics) HOST currentRoundTripTime is a finite non-negative number or null',
+  rowA.currentRoundTripTime === null
+  || (Number.isFinite(rowA.currentRoundTripTime) && rowA.currentRoundTripTime >= 0),
+  'rtt=' + rowA.currentRoundTripTime);
+
+console.log('  (diagnostics) observed HOST row: ' + JSON.stringify(rowA));
+console.log('  (diagnostics) observed GUEST row: ' + JSON.stringify(rowB));
 
 /* ---------------- (7) Host close -> visible fail-closed + signal.host-lost ---------- */
 

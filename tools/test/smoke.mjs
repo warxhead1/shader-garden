@@ -29,6 +29,17 @@ const DEFAULT_ROUTES = ['#/', '#/s/biome-rolling-hills', '#/edit', '#/edit?k=bio
 const { server, base: BASE } = await serveSite();
 const browser = await launch();
 let failed = false;
+// CI shard split. This one suite was the deploy tier's whole critical path —
+// 612s of a 28m battery — so it runs as two halves on two runners. The halves
+// are CONTIGUOUS, not interleaved: the schema-fixture blocks near the end write
+// a JSON envelope in one block and re-read it two blocks later, so an
+// every-other-block split would break them. The real-GPU assertion above is
+// deliberately in BOTH halves: "green" must never be able to mean "we quietly
+// ran on SwiftShader" in either one. Unset (a developer running the file) =
+// run everything, which is why the default is 'all'.
+const SMOKE_PART = (process.env.SG_SMOKE_PART || 'all').replace(/^smoke-/, '');
+if (!['all', 'a', 'b'].includes(SMOKE_PART)) throw new Error(`SG_SMOKE_PART must be a, b, smoke-a, smoke-b or unset; got ${JSON.stringify(process.env.SG_SMOKE_PART)}`);
+const inPart = (p) => SMOKE_PART === 'all' || SMOKE_PART === p;
 
 // Prove the browser this whole battery runs in actually got the real GPU —
 // a green smoke suite must not be able to mean "we quietly ran on
@@ -53,7 +64,7 @@ function check(name, cond, detail) {
 
 /* ---------- 1) route regression ---------- */
 
-for (const route of (routes.length ? routes : DEFAULT_ROUTES)) {
+if (inPart('a')) for (const route of (routes.length ? routes : DEFAULT_ROUTES)) {
   const page = await browser.pooledPage();
   const errors = [];
   page.on('console', (m) => {
@@ -214,7 +225,7 @@ async function replaceAllAndType(page, text) {
 }
 
 // (a) foreign share link containing "void main(" is gated
-{
+if (inPart('a')) {
   const seed = await browser.pooledPage();
   await gotoSafe(seed, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(seed);
@@ -252,7 +263,7 @@ async function replaceAllAndType(page, text) {
 }
 
 // (b) editor-self typing is never blocked
-{
+if (inPart('a')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
@@ -284,7 +295,7 @@ async function replaceAllAndType(page, text) {
 }
 
 // (e) a clean share link still autoruns
-{
+if (inPart('a')) {
   const seed = await browser.pooledPage();
   await gotoSafe(seed, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(seed);
@@ -313,7 +324,7 @@ async function replaceAllAndType(page, text) {
 // run works for both — the FAIL case to watch for is '(i) CodeMirror mounts
 // when the vendor chunk exists' going PASS→FAIL after moving the chunk aside
 // (that's the expected, not a bug) — see tools/editor-bundle/README.md.
-{
+if (inPart('a')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
@@ -356,7 +367,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // the truth about which backend actually rendered.
 
 // (f) hero pauses its render loop on visibilitychange, resumes when visible
-{
+if (inPart('a')) {
   const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => {
     window.__raf = 0;
@@ -448,7 +459,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 }
 
 // (g) gallery thumbnails settle to thumb-ready exactly once per card, no re-render on scroll
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/index.html#/', { waitUntil: 'networkidle2', timeout: 20000 })
     .catch((e) => console.log('NAV', e.message));
@@ -515,7 +526,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // is reproduced deliberately by stubbing navigator.gpu away on this page
 // only (GPURuntime.create() in runtime/webgpu.js already treats a missing
 // navigator.gpu as "no adapter" and returns null, same as it always has).
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   // Pinned WebGL2, so prove it's the real renderer, not a silent SwiftShader
   // downgrade (assertRealGpu only inspects the WebGPU adapter — no
@@ -574,7 +585,7 @@ async function clickTransportButton(page, label) {
 }
 
 // (i) pause -> step advances exactly one frame (iFrame proxy: row.dataset.frame)
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await page.waitForSelector('.transport-row', { timeout: 8000 });
@@ -590,7 +601,7 @@ async function clickTransportButton(page, label) {
 }
 
 // (j) &t=30&paused=1 restores state on load
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit?t=30&paused=1', { waitUntil: 'networkidle0' });
   await page.waitForSelector('.transport-row', { timeout: 8000 });
@@ -606,7 +617,7 @@ async function clickTransportButton(page, label) {
 }
 
 // (k) setRenderScale(0.5) halves canvas.width vs CSS size, and the badge tells the truth
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await page.waitForSelector('.transport-scale', { timeout: 8000 });
@@ -634,7 +645,7 @@ async function clickTransportButton(page, label) {
 // components — this is also the regression oracle for parse.js's file-order
 // <-> shader COMP_* id mapping staying in sync (scene.glsl's own header
 // warns this isn't otherwise enforced).
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   const errors = [];
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
@@ -688,9 +699,28 @@ async function clickTransportButton(page, label) {
     return page.$eval('.probe-title', (el) => el.textContent).catch(() => null);
   }
 
-  const terrainTitle = await probe(720, 830);
-  const characterTitle = await probe(720, 380);
-  const skyTitle = await probe(720, 60);
+  // Fractions of the canvas, not absolute pixels. These three points mean
+  // "the ground", "the character", "the sky". The previous literals (720,830
+  // / 720,380 / 720,60) silently encoded a 1440x900 window — at 960x600,
+  // y=830 is off the bottom of the page, so the "terrain" probe clicked
+  // nothing and returned null. Measured: this organ's canvas is the full
+  // viewport at both sizes (x=0,y=0,w=vw,h=vh), so a viewport fraction and a
+  // canvas fraction are the same number here; the fractions below are the old
+  // pixels re-expressed against 1440x900.
+  //
+  // This makes the coordinates honest, and it does NOT make the suite
+  // window-size-independent — do not read it as license to shrink the CI
+  // viewport. Sampling all three points down the centre column x=50% at
+  // 960x600 was measured returning sky="Bouncing Figure" on one run and
+  // terrain=null on another: the character bounces THROUGH the centre column,
+  // so the oracle is animation-phase-fragile there (the same hazard the
+  // comment below already documents for the ground pixel). A smaller viewport
+  // needs those probe points re-derived off-centre first, with evidence.
+  const { vw, vh } = await page.evaluate(() => ({ vw: window.innerWidth, vh: window.innerHeight }));
+  const px = Math.round(vw * 0.5);
+  const terrainTitle = await probe(px, Math.round(vh * 0.922));
+  const characterTitle = await probe(px, Math.round(vh * 0.422));
+  const skyTitle = await probe(px, Math.round(vh * 0.067));
   check('(l) three different probe targets -> three different panels',
     new Set([terrainTitle, characterTitle, skyTitle]).size === 3 && [terrainTitle, characterTitle, skyTitle].every(Boolean),
     JSON.stringify({ terrainTitle, characterTitle, skyTitle }));
@@ -717,7 +747,7 @@ async function clickTransportButton(page, label) {
   // Re-probe the character specifically — sky (probed last above, to prove
   // the three-way distinction) has no @tune sliders, so the remaining
   // checks below need the character's panel open.
-  await probe(720, 380);
+  await probe(px, Math.round(vh * 0.422));
 
   // source chunk matches the @component span exactly — parse.js is the
   // oracle here, not a hand-copied string, so this pins the extraction
@@ -795,7 +825,7 @@ async function clickTransportButton(page, label) {
 // (w) scene richness (GARDEN-1): the file-order <-> COMP_* id invariant
 // scene.glsl's own header warns nothing enforces at build time — this is
 // that enforcement, run node-side (no browser) straight against the source.
-{
+if (inPart('b')) {
   const { parseScene } = await import('../../site/js/organs/garden/parse.js');
   const sceneSrc = readFileSync(path.join(SITE_ROOT, 'assets/garden/scene.glsl'), 'utf8');
   const { components } = parseScene(sceneSrc);
@@ -831,7 +861,7 @@ async function clickTransportButton(page, label) {
 // changes; the freeze toggle actually stops iMouse tracking (not just a
 // label flip) — proven by moving the mouse before/after the toggle and
 // reading the panel's own live value back, not the runtime's internals.
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
@@ -906,7 +936,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // SwiftShader DOES support this, unlike navigator.gpu). Downloads are
 // intercepted at the createObjectURL boundary since headless has no
 // download directory to inspect.
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => {
     window.__capturedBlobs = [];
@@ -943,7 +973,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 // (o) record: feature-detect degrade — an engine with no MediaRecorder gets
 // a disabled button with an explanatory title, never a silent/broken control.
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => { delete window.MediaRecorder; });
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
@@ -965,7 +995,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 // organs/admission/index.js over the wire to force it, proving
 // admission-gate.js's onRun forwarding and index.js's runAnyway() actually
 // work end-to-end (not just that report.js's button renders in isolation).
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await page.setRequestInterception(true);
   page.on('request', (req) => {
@@ -1020,7 +1050,7 @@ export async function admitComposition(passes, opts) {
 // (q) shader.compiled.v1 — the editor's own compile-fact emission (substrate
 // §4.5's event table names "editor, viewer" as co-emitters; the viewer side
 // already had it, this pins the editor side ED-4 adds).
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
@@ -1066,7 +1096,7 @@ async function buttonState(page, text) {
 // (r) Suggest starts disabled; "Check shader" on the clean default starter
 // produces a safe verdict and enables it; the user's own next edit
 // re-disables it (a stale verdict must not authorize a suggestion).
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await page.evaluateOnNewDocument(() => {
     window.__openedUrls = [];
@@ -1165,7 +1195,7 @@ async function buttonState(page, text) {
 // (s) "Check shader" never blocks typing: a hostile SG-S02 source can still
 // be typed freely, and an on-demand check on it reports VF/unsafe without
 // ever touching the GPU (rejected pre-sacrificial) — Suggest stays disabled.
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
@@ -1187,7 +1217,7 @@ async function buttonState(page, text) {
 // (t) python3 jsonschema: the real captured glsl envelope from (r), after
 // stripping browser-only keys, validates against nervous-bus's
 // shader.preadmit.evaluated.v1 (READ ONLY — never written to).
-{
+if (inPart('b')) {
   const fixturePath = path.join(path.resolve(path.dirname(new URL(import.meta.url).pathname), 'out'), 'admission-verdict-glsl.json');
   const checker = path.resolve(path.dirname(new URL(import.meta.url).pathname), 'check_preadmit_v1_compat.py');
   // The checker prints "SKIP:" (exit 0) when no nervous-bus checkout exists
@@ -1224,7 +1254,7 @@ async function buttonState(page, text) {
 // exist at all. Downloads are intercepted via URL.createObjectURL (no CDP
 // download plumbing needed) so the test reads the exact JSON that would be
 // written to disk.
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   await gotoSafe(page, BASE + '/index.html?operator=1#/edit', { waitUntil: 'networkidle0' });
   await waitForEditor(page);
@@ -1264,7 +1294,7 @@ async function buttonState(page, text) {
 }
 
 // (v) without the operator flag, Anatomy shows no export control at all.
-{
+if (inPart('b')) {
   const page = await browser.pooledPage();
   // domcontentloaded + a .card wait, NOT networkidle2: this section only
   // needs boot.js's hotkey listener live (proven by the gallery organ having
@@ -1286,5 +1316,5 @@ async function buttonState(page, text) {
 
 await browser.close();
 server.kill();
-console.log(failed ? '\nFAILURES ABOVE' : '\nall-PASS');
+console.log(failed ? '\nFAILURES ABOVE' : `\nall-PASS${SMOKE_PART === 'all' ? '' : ' (part ' + SMOKE_PART + ')'}`);
 process.exit(failed ? 1 : 0);

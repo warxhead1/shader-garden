@@ -34,6 +34,31 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The battery used to be ONE job running ~26 suites end to end, so the wall
+    # clock was their SUM: 27m49s on the deploy tier (run 33146601758), of which
+    # `upload` + `deploy` were 17 seconds. Publishing a static site took half an
+    # hour because the gate in front of it was summed rather than spread.
+    #
+    # Sharding makes the wall clock the LONGEST shard instead of the total.
+    # Groups are by cost, not by theme — `smoke` (10m12s) and `comp1` (5m40s)
+    # are the two poles and each gets a shard largely to itself; the cheap
+    # protocol suites ride together because ten of them do not add up to one
+    # smoke. Rebalance by MEASURING (the job API reports per-step timings),
+    # never by how tidy the grouping reads.
+    #
+    # fail-fast: false because these shards are independent evidence. Killing
+    # the other five because one failed throws away exactly the report the
+    # verdict step exists to produce — the whole reason suites are
+    # continue-on-error with a verdict at the end rather than fail-fast.
+    #
+    # This also rescues the nightly `full` tier, which had failed four nights
+    # running (2h50m/2h18m/2h57m/2h09m) by hitting its cap rather than by
+    # finding anything: `garden` alone is >40 min under SwiftShader and now
+    # runs alongside the rest instead of in front of it.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [smoke-a, smoke-b, comp-heavy, comp-light, organ, garden, mp]
     # Without this the job inherits GitHub's 360-minute default, so a suite
     # that genuinely hangs burns six hours of runner time before anything
     # intervenes. Observed real cost on this runner: the whole battery is
@@ -126,6 +151,19 @@ jobs:
       # for #/garden) without multiplying every genuine hang by ten before the
       # job times out.
       SG_TIME_SCALE: '6'
+      # 1440x900 is 1.3M pixels and this runner has no GPU, so SwiftShader
+      # raymarches every one of them on the CPU — a cost linear in pixel count
+      # and the single largest term in why CI is ~7x slower than a real GPU.
+      # 960x600 is the same 1.6 aspect ratio (so scene framing, which is
+      # aspect-driven, is unchanged) at 2.25x fewer pixels.
+      #
+      # No assertion depends on the window being 1440 wide. The one size-
+      # sensitive check, smoke's `(k) setRenderScale(0.5)`, compares
+      # canvas.width against its OWN CSS size; the gallery scroll walk derives
+      # its stops from window.innerHeight. Verified by running the deploy-tier
+      # suites at this size on a real GPU before it landed — which is also how
+      # smoke's probe coordinates turned out to be hard-coded 1440x900 pixels
+      # (y=830 is off the bottom of a 600px page); they are fractions now.
     defaults:
       run:
         # Explicit `shell: bash` runs steps with `-o pipefail` (the implicit
@@ -161,6 +199,20 @@ jobs:
       - name: Install harness dependencies
         working-directory: tools/test
         run: npm ci --no-fund --no-audit
+
+      - name: Cache the Playwright chromium download
+        # Sharding pays this install once PER SHARD, all at the same time, so
+        # it sits on the critical path of every one of them rather than being
+        # amortised across a single long job. Keyed on the lockfile because
+        # that is what pins playwright-core, and a chromium build is only
+        # valid for the playwright that asked for it.
+        # restore-keys is deliberately absent: a stale chromium that does not
+        # match the pinned playwright fails at launch, which is a far worse
+        # trade than re-downloading it.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('tools/test/package-lock.json') }}
 
       - name: Install browser and virtual display
         # The harness is Playwright-backed now: browser.mjs's chromePath()
@@ -219,16 +271,19 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'mp'
         run: node mp-netclient.mjs 2>&1 | tee out/logs/mp-netclient.log
       - name: mp-protocol
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'mp'
         run: node mp-protocol.mjs 2>&1 | tee out/logs/mp-protocol.log
       - name: mp-relay
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'mp'
         run: node mp-relay.mjs 2>&1 | tee out/logs/mp-relay.log
       - name: mp-p2p-unit
         # Pure-Node unit suite for site/js/multiplayer/p2p-socket.js — the
@@ -236,6 +291,7 @@ jobs:
         # so no GPU / browser; safe in the same tier as mp-netclient.
         timeout-minutes: 5
         working-directory: tools/test
+        if: matrix.shard == 'mp'
         run: node mp-p2p-unit.mjs 2>&1 | tee out/logs/mp-p2p-unit.log
       # TURN credential vending is pure Node: server endpoint/auth behavior
       # plus the browser-side fail-closed validation. Keep both in the deploy
@@ -244,11 +300,13 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         working-directory: tools/test
+        if: matrix.shard == 'mp'
         run: node ice-credentials.mjs 2>&1 | tee out/logs/ice-credentials.log
       - name: mp-ice-credentials
         continue-on-error: true
         timeout-minutes: 5
         working-directory: tools/test
+        if: matrix.shard == 'mp'
         run: node mp-ice-credentials.mjs 2>&1 | tee out/logs/mp-ice-credentials.log
       - name: commons-lobby
         # The /play lobby (room naming, invite link, normalization) plus the
@@ -260,6 +318,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'mp'
         run: node commons-lobby.mjs 2>&1 | tee out/logs/commons-lobby.log
       - name: smoke
         continue-on-error: true
@@ -273,41 +332,53 @@ jobs:
         # It is not a hang: the same suite is 1m32s wall / exit 0 on a real GPU.
         # It is SwiftShader paying ~7x, the same physics documented at the top
         # of this file — so it needs a tier-appropriate budget, not a fix.
+        # Runner speed swings this a lot: run 33174160403 measured the SAME
+        # suite at 977s (16m17s) — 1.6x the 612s above — so a 10m cap was
+        # not marginal, it was already broken and only luck had hidden it.
+        # Since then this suite runs as two halves (SG_SMOKE_PART, see
+        # smoke.mjs) on two runners, so a leg is ~half of whichever of
+        # those two numbers the day's runner happens to hand us.
+        # The 20m cap stays: it costs nothing on a green run and it is the
+        # thing that stops a slow runner from silently truncating the log
+        # the verdict reads.
         timeout-minutes: 20
         working-directory: tools/test
-        run: node smoke.mjs 2>&1 | tee out/logs/smoke.log
+        if: startsWith(matrix.shard, 'smoke')
+        env:
+          SG_SMOKE_PART: ${{ matrix.shard }}
+        run: node smoke.mjs 2>&1 | tee out/logs/${{ matrix.shard }}.log
       - name: garden
-        if: env.TIER == 'full'
+        if: matrix.shard == 'garden' && (env.TIER == 'full')
         continue-on-error: true
         timeout-minutes: 45
         working-directory: tools/test
         run: node garden.mjs 2>&1 | tee out/logs/garden.log
       - name: garden-connections
-        if: env.TIER == 'full'
+        if: matrix.shard == 'garden' && (env.TIER == 'full')
         continue-on-error: true
         timeout-minutes: 20
         working-directory: tools/test
         run: node garden-connections.mjs 2>&1 | tee out/logs/garden-connections.log
       - name: garden-movement
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'garden' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
         run: node garden-movement.mjs 2>&1 | tee out/logs/garden-movement.log
       - name: garden-perf
-        if: env.TIER == 'full'
+        if: matrix.shard == 'garden' && (env.TIER == 'full')
         continue-on-error: true
         timeout-minutes: 20
         working-directory: tools/test
         run: node garden-perf.mjs 2>&1 | tee out/logs/garden-perf.log
       - name: garden-wgsl-parity
-        if: env.TIER == 'full'
+        if: matrix.shard == 'garden' && (env.TIER == 'full')
         continue-on-error: true
         timeout-minutes: 20
         working-directory: tools/test
         run: node garden-wgsl-parity.mjs 2>&1 | tee out/logs/garden-wgsl-parity.log
       - name: garden-camera
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'garden' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -316,9 +387,10 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'garden'
         run: node garden-locomotion-parity.mjs 2>&1 | tee out/logs/garden-locomotion-parity.log
       - name: garden-uniform-inspector
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'garden' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -327,14 +399,16 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'garden'
         run: node dgc-graph.mjs 2>&1 | tee out/logs/dgc-graph.log
       - name: garden-attribution
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'garden'
         run: node garden-attribution.mjs 2>&1 | tee out/logs/garden-attribution.log
       - name: attribution-page
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'organ' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -343,19 +417,22 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'comp-light'
         run: node comp0.mjs 2>&1 | tee out/logs/comp0.log
       - name: comp1
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'comp-heavy'
         run: node comp1.mjs 2>&1 | tee out/logs/comp1.log
       - name: comp2
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'comp-light'
         run: node comp2.mjs 2>&1 | tee out/logs/comp2.log
       - name: comp3
-        if: env.TIER == 'full'
+        if: matrix.shard == 'comp-heavy' && (env.TIER == 'full')
         continue-on-error: true
         timeout-minutes: 20
         working-directory: tools/test
@@ -364,36 +441,43 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'organ'
         run: node anatomy.mjs 2>&1 | tee out/logs/anatomy.log
       - name: layout
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'organ'
         run: node layout.mjs 2>&1 | tee out/logs/layout.log
       - name: lineage
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'comp-light'
         run: node lineage.mjs 2>&1 | tee out/logs/lineage.log
       - name: loader
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'organ'
         run: node loader.mjs 2>&1 | tee out/logs/loader.log
       - name: seed
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'comp-light'
         run: node seed.mjs 2>&1 | tee out/logs/seed.log
       - name: admission-sac
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'comp-light'
         run: node admission-sac.mjs 2>&1 | tee out/logs/admission-sac.log
       - name: runtime-host-loss
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'organ'
         run: node runtime-host-loss.mjs 2>&1 | tee out/logs/runtime-host-loss.log
       # MP-4 (multiplayer-spec.md §6.1) acceptance for prepareShader()'s
       # compile-without-swapping contract — the I4 guarantee that a remote
@@ -404,14 +488,16 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'organ'
         run: node runtime-prepare-shader.mjs 2>&1 | tee out/logs/runtime-prepare-shader.log
       - name: servesite
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
+        if: matrix.shard == 'organ'
         run: node servesite.mjs 2>&1 | tee out/logs/servesite.log
       - name: perf
-        if: env.TIER == 'full'
+        if: matrix.shard == 'comp-heavy' && (env.TIER == 'full')
         continue-on-error: true
         timeout-minutes: 20
         working-directory: tools/test
@@ -428,7 +514,7 @@ jobs:
       # it with ?relay=ws://... — site/assets/relay.json stays {"url": null}.
       - name: mp-clock (timing quality — non-blocking, see comment)
         id: mp_clock
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'mp' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -443,7 +529,7 @@ jobs:
         # one environment least able to judge it.
         run: node mp-clock.mjs 2>&1 | tee out/logs/mp-clock.log
       - name: mp-two-browsers
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'mp' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 22
         working-directory: tools/test
@@ -455,7 +541,7 @@ jobs:
       # exercises the WebRTC stack — only the canvas readback is
       # GPU-bound).
       - name: mp-p2p-two-browsers
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'mp' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 22
         working-directory: tools/test
@@ -467,21 +553,21 @@ jobs:
       # grounds as mp-two-browsers (SwiftShader on this runner covers both
       # backends).
       - name: mp-dual-workspace
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'mp' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 22
         working-directory: tools/test
         run: node mp-dual-workspace.mjs 2>&1 | tee out/logs/mp-dual-workspace.log
       # I4: a receiver must keep rendering when a peer commits broken source.
       - name: mp-compile-swap
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'mp' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 18
         working-directory: tools/test
         run: node mp-compile-swap.mjs 2>&1 | tee out/logs/mp-compile-swap.log
       # I1/I3: the solo route must be byte-identical in behaviour to pre-MP.
       - name: mp-solo-parity
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'mp' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tools/test
@@ -489,7 +575,7 @@ jobs:
 
       - name: webgpu-live (real WebGPU execution — non-blocking, see comment)
         id: webgpu_live
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'organ' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         # NOT part of the required gate. webgpu-live.mjs proves real WebGPU
@@ -512,7 +598,7 @@ jobs:
 
       - name: webgpu-fallback (broken-WGSL → WebGL2 regression — non-blocking, same GPU constraint)
         id: webgpu_fallback
-        if: env.TIER != 'deploy'
+        if: matrix.shard == 'organ' && (env.TIER != 'deploy')
         continue-on-error: true
         timeout-minutes: 10
         # Same runner-class limitation as webgpu-live above: the canvas
@@ -578,7 +664,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-battery-failure-artifacts
+          name: test-battery-failure-artifacts-${{ matrix.shard }}
           path: tools/test/out/
           if-no-files-found: ignore
           retention-days: 14

@@ -303,7 +303,20 @@ export const SOFTWARE_ARGS = [
   '--enable-unsafe-swiftshader',
 ];
 
-const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
+// 1440x900 is 1.3M pixels. On a real GPU that is free; on a GPU-less runner
+// every one of those pixels is raymarched by SwiftShader on the CPU, and the
+// cost is linear in pixel count — which is most of why the CI battery runs
+// ~7x slower than the same suites on this workstation. SG_VIEWPORT lets CI
+// buy that time back (`SG_VIEWPORT=960x600`) without changing what any suite
+// asserts. Kept as an override rather than a lower default because the
+// layout/DOM suites are written against a desktop-width window, and because
+// a real-GPU run should keep exercising the resolution a person actually uses.
+const DEFAULT_VIEWPORT = (() => {
+  const raw = process.env.SG_VIEWPORT;
+  const m = raw && /^(\d{3,5})x(\d{3,5})$/.exec(raw.trim());
+  if (!m) return { width: 1440, height: 900 };
+  return { width: Number(m[1]), height: Number(m[2]) };
+})();
 
 // Playwright's Page is close enough to Puppeteer's that the suites port
 // almost unchanged; these are the gaps that actually bit. Kept as a thin

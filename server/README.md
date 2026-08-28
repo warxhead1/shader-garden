@@ -224,8 +224,9 @@ brief is explicit:
    relay sees no edits, poses, tunes, or game scores.
 4. **Host authority / star topology.** The first member to reach the
    signal becomes the immutable host and runs `room-core.js`. The room
-   caps at 8 members total (host + 7 peers); the 8th attempt is
-   rejected. A host departure takes the whole room down — surviving
+   caps at 8 members total (host + 7 peers); the 9th attempt is
+   rejected with WebSocket close **1013** (`error{code:'room_full'}`
+   immediately before the close). A host departure takes the whole room down — surviving
    members close with WebSocket code **1012** and the client surfaces a
    visible `closed` / "host lost" status. There is **no automatic
    retry** and **no silent promotion of a new host** on this path: the

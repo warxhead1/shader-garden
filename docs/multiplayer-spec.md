@@ -375,8 +375,10 @@ embedded in the public site are visible to anyone who views source.
    signal becomes the immutable host for the room and runs the
    `room-core.js` reducer; every subsequent member sends gameplay over a
    data channel to that host, who then broadcasts back out. The room
-   caps at 8 members total (host + 7 peers); the 8th attempt closes
-   1002. The brief calls this out as an honest star, not a mesh — a
+   caps at 8 members total (host + 7 peers); the 9th attempt is
+   rejected with WebSocket close **1013** (`error{code:'room_full'}`
+   immediately before the close, as `server/test/room.test.mjs`
+   proves). The brief calls this out as an honest star, not a mesh — a
    single host departure takes the whole room down, and the surviving
    members are FAIL-CLOSED: their `close` code is 1012 and the client
    surfaces a visible "host lost" / `closed` status (`net.js`'s

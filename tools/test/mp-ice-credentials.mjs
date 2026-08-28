@@ -2,24 +2,24 @@
 // Focused tests for the SG-MM-ICE-VENDING slice: provider-neutral
 // runtime fetching of short-lived WebRTC ICE/TURN credentials before
 // RTCPeerConnection creation. Pure-node (no browser, no socket, no real
-// network) — exercises only resolveTransportConfig()'s preservation of
-// the new `iceCredentialsUrl` field, fetchIceCredentials()'s validation
-// gate, and the integration contract (a configured endpoint must be
-// fetched before the P2P socket is built; a malformed/empty response
-// must fail closed without leaking credentials to logs).
+// network) — exercises resolveTransportConfig()'s preservation of the
+// `iceCredentialsUrl` field (and its deploy-time type gate), the pure
+// fetchIceCredentials() validation in ice-credentials.js, and the merge
+// contract (public STUN first, ephemeral TURN second; failure is
+// fail-closed).
 //
 // We do NOT mock createP2PSocket via property monkey-patch — ESM module
-// namespace exports are read-only in strict mode, and replacing the
-// dynamic import would require a custom loader hook. Instead we exercise
-// the contract at the boundary connectRoom() crosses: the resolver
-// returns the configured iceCredentialsUrl, fetchIceCredentials() applies
-// the validation gate, and the public+ephemeral merge follows the
-// documented ordering. p2p-socket.js itself is unit-tested separately
-// by mp-p2p-unit.mjs.
+// namespace exports are read-only in strict mode. The integration
+// contract is exercised at the boundary connectRoom() crosses: the
+// resolver returns the configured iceCredentialsUrl, fetchIceCredentials()
+// applies the validation gate, and the public+ephemeral merge follows
+// the documented ordering. p2p-socket.js is unit-tested separately by
+// mp-p2p-unit.mjs.
 //
-// Coverage (from the brief):
-//   1. resolveTransportConfig preserves iceCredentialsUrl (string) and
-//      normalises absent / non-string values to null.
+// Coverage:
+//   1. resolveTransportConfig preserves iceCredentialsUrl (string); a
+//      PRESENT-but-malformed value (wrong type or empty string) THROWS
+//      (spec §2.7 — silent coerce to null is a security hole).
 //   2. fetchIceCredentials validates the URL: bad URL, http-not-localhost
 //      in production, mixed content on https, bad protocol all fail
 //      closed with a short error tag — credentials NEVER appear in
@@ -36,16 +36,15 @@
 //   6. resolveTransportConfig + fetchIceCredentials round-trip: an
 //      operator-deployed config with iceCredentialsUrl set drives a
 //      single fetch per connect attempt; a failure on a configured
-//      endpoint is fail-closed (we observe no createP2PSocket call).
+//      endpoint is fail-closed.
 //
 // Usage: node tools/test/mp-ice-credentials.mjs  (or via `node --test`)
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  resolveTransportConfig, fetchIceCredentials,
-} from '../../site/js/organs/garden/net.js';
+import { resolveTransportConfig } from '../../site/js/organs/garden/net.js';
+import { fetchIceCredentials } from '../../site/js/multiplayer/ice-credentials.js';
 
 /* ======================================================================
  * resolveTransportConfig — iceCredentialsUrl preservation
@@ -82,12 +81,33 @@ test('resolveTransportConfig: omits iceCredentialsUrl when JSON does not name it
   assert.equal(res.iceCredentialsUrl, null);
 });
 
-test('resolveTransportConfig: normalises a non-string iceCredentialsUrl to null', async () => {
-  // A deploy that names the field with a wrong type (e.g. an object the
-  // operator stuffed config into) must NOT crash the resolver — it must
-  // treat it as "not set" so P2P still works via the public STUN list.
-  for (const bad of [42, true, false, [], { url: 'https://x' }, '']) {
-    const res = await resolveTransportConfig({
+test('resolveTransportConfig: malformed iceCredentialsUrl throws (deploy-time gate, not silent coerce)', async () => {
+  // Spec §2.7 security nuance: a present-but-malformed iceCredentialsUrl
+  // (wrong type OR empty string) must fail resolution rather than silently
+  // coerce to null. Silently coercing would degrade "broken TURN config"
+  // to "no TURN" invisibly — the operator would never see the misconfig.
+  // The resolver throws a TypeError; connect() catches and surfaces a short
+  // 'ice-config:bad-type' tag.
+  for (const bad of [42, true, false, [], { url: 'https://x' }]) {
+    await assert.rejects(
+      resolveTransportConfig({
+        queryRelay: null,
+        hostname: 'example.com',
+        isHttps: true,
+        fetchTransportJson: async () => ({
+          url: 'wss://relay.example.com',
+          transport: 'p2p',
+          iceServers: [],
+          iceCredentialsUrl: bad,
+        }),
+      }),
+      TypeError,
+      `wrong-type value ${JSON.stringify(bad)} must throw TypeError`
+    );
+  }
+  // Empty string is the same gate — present but malformed.
+  await assert.rejects(
+    resolveTransportConfig({
       queryRelay: null,
       hostname: 'example.com',
       isHttps: true,
@@ -95,11 +115,12 @@ test('resolveTransportConfig: normalises a non-string iceCredentialsUrl to null'
         url: 'wss://relay.example.com',
         transport: 'p2p',
         iceServers: [],
-        iceCredentialsUrl: bad,
+        iceCredentialsUrl: '',
       }),
-    });
-    assert.equal(res.iceCredentialsUrl, null, `bad value ${JSON.stringify(bad)} must coerce to null`);
-  }
+    }),
+    TypeError,
+    'empty-string iceCredentialsUrl must throw TypeError'
+  );
 });
 
 test('resolveTransportConfig: ?relay= path passes iceCredentialsUrl: null (query wins, no JSON read)', async () => {

@@ -310,7 +310,7 @@ order in `site/js/organs/garden/net.js`:
 "iceServers": [], "iceCredentialsUrl": null }` and is documented in
 DEPLOY.md as the one operator-edited file. The optional
 `iceCredentialsUrl` field is the public https URL of a short-lived TURN
-credential vending endpoint — when set, `net.js`'s
+credential vending endpoint — when set, `ice-credentials.js`'s
 `fetchIceCredentials()` runs on every connect/reconnect, BEFORE
 `createP2PSocket`, and merges the result with the public STUN list.
 §2.6 + §2.7 cover the fetch contract and validation.
@@ -426,9 +426,9 @@ ICE configuration. TURN requires per-session credentials, and shipping
 those in the static site is unacceptable (§2.6 trust disclosure 5). The
 runtime vending flow is provider-neutral — any https endpoint that
 returns the documented JSON shape works — and runs in
-`site/js/organs/garden/net.js`'s `fetchIceCredentials()` helper, called
-from `connect()` BEFORE every `createP2PSocket()` (i.e. every
-connect/reconnect attempt). The flow:
+`site/js/multiplayer/ice-credentials.js`'s `fetchIceCredentials()`
+helper, called from `connect()` BEFORE every `createP2PSocket()` (i.e.
+every connect/reconnect attempt). The flow:
 
 1. `connect()` reads `cfg.iceCredentialsUrl` (preserved by
    `resolveTransportConfig()` from `assets/relay.json`'s
@@ -527,7 +527,8 @@ as they return the documented shape. The vending host enforces auth
 (API keys, mTLS, whatever the operator chooses); the browser only
 sees the public-facing response.
 
-What the repo ships: validation in `net.js`, deploy-time stamping in
+What the repo ships: validation in `ice-credentials.js` + thin merge
+plumbing in `net.js`, deploy-time stamping in
 `.github/workflows/deploy.yml` (`SG_ICE_CREDENTIALS_URL` variable,
 https-only), and unit tests in `tools/test/mp-ice-credentials.mjs`
 covering every validation branch plus the merge contract.

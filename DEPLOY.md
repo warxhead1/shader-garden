@@ -127,7 +127,7 @@ for WebSockets instead. That means:
 - On `localhost`/`127.0.0.1` the site is allowed to use plain `ws://` and
   does so automatically — that's what lets you run `node server/relay.mjs`
   and open the site locally with zero extra setup (see
-  `docs/multiplayer-spec.md` §2.5 and `site/js/organs/garden/net.js`'s
+  `docs/multiplayer-spec.md` §2.5 and `site/js/multiplayer/ice-credentials.js`'s
   `resolveRelayUrl`).
 
 ### 5.2 Stand the relay up
@@ -250,9 +250,10 @@ SG_ICE_CREDENTIALS_URL='https://my-turn-vend.example.com/credentials'
 A **VARIABLE**, not a secret — same reasoning as `SG_RELAY_URL`. The
 URL is callable by every visitor; the secrets stay on the vending host.
 
-When this is set, `site/js/organs/garden/net.js`'s `fetchIceCredentials()`
-runs BEFORE every `createP2PSocket()` call (i.e. on every
-connect/reconnect), and:
+When this is set, `site/js/multiplayer/ice-credentials.js`'s
+`fetchIceCredentials()` runs BEFORE every `createP2PSocket()` call (i.e.
+on every connect/reconnect — `net.js` imports the helper and wires it
+into its own vend-and-merge path), and:
 
 1. Calls `GET <url>` with `cache:'no-store'`, `credentials:'omit'`,
    and `Accept: application/json`. The omit-credentials flag stops the

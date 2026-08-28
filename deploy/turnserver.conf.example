@@ -1,0 +1,122 @@
+# turnserver.conf.example — provider-neutral coturn reference for the
+# /ice-credentials endpoint on the relay. PLACEHOLDER_* markers are filled
+# in at container startup by deploy/turn-entrypoint.sh from environment
+# variables; the resulting /run/turnserver.conf is mode 0600 and is gone
+# with the container. Nothing below substitutes a real secret on disk.
+#
+# This file is a REFERENCE — copy / adapt it for your network. The relay
+# only ever hands the operator a short-lived HMAC of the shared secret,
+# never the secret itself, so:
+#
+#   • use-auth-secret must be on (the relay's HMAC is the TURN REST API
+#     secret-auth scheme; coturn checks it via static-auth-secret).
+#   • no-anonymous must be on (otherwise the server will happily accept
+#     unauthenticated allocations, which is what we're trying to stop).
+#   • fingerprint must be on (RFC 5389/5762 STUN MESSAGE-INTEGRITY for
+#     WebRTC — without it browsers will refuse to talk to the relay).
+#   • min-port / max-port bound the relay UDP range to a known, monitorable
+#     set; pick a contiguous range you can firewall.
+#
+# Ports: 3478 (STUN/TURN) over UDP+TCP, 5349 (TURNS) over TCP+TLS.
+# Realm: a hostname you control; browsers don't validate it for TURN REST
+# but STUN long-term cred uses it, so make it stable.
+
+# ---- Listening ports --------------------------------------------------------
+
+listening-port=3478
+tls-listening-port=5349
+
+# ---- Realm / auth -----------------------------------------------------------
+
+realm=PLACEHOLDER_REALM
+use-auth-secret
+static-auth-secret=PLACEHOLDER_STATIC_AUTH_SECRET
+
+# No anonymous allocations. Without this, every unauthenticated client on
+# the open internet can get a relay address — exactly the abuse vector
+# short-lived creds are designed to prevent.
+no-anonymous
+
+# WebRTC requires the STUN MESSAGE-INTEGRITY attribute that RFC 5389 §15.2
+# defines (a.k.a. "fingerprint"). Without this on, browsers will silently
+# refuse to negotiate with the relay even though it answers STUN.
+fingerprint
+
+# ---- TLS (modern only) ------------------------------------------------------
+
+# Disable ancient TLS so a scanner that fails the GREASE / version negotiation
+# drops the connection quickly rather than downgrading to something we
+# shouldn't be supporting in 2026.
+no-tlsv1
+no-tlsv1_1
+
+# A pinned, modern cipher list. Matches Mozilla's "intermediate" guidance
+# and excludes anything CBC-based or RC4-based. The relay only sees
+# encrypted SRTP/SCTP-DTLS payloads, so a weak cipher here isn't a leak
+# of game traffic — but it's still a foot-gun if TLS breaks first.
+cipher-list="ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20"
+
+# cert / pkey paths (operator-provided; out of scope for this repo).
+# cert=/etc/coturn/certs/fullchain.pem
+# pkey=/etc/coturn/certs/privkey.pem
+
+# ---- Bounded relay UDP range -----------------------------------------------
+
+# Pick a contiguous 256-port range somewhere in the dynamic/private range
+# so you can firewall the rest. 49152..49407 = 256 ports. coturn will
+# rotate within this range; outside it the kernel won't relay. The exact
+# numbers don't matter as long as min < max and the range is reachable.
+min-port=49152
+max-port=49407
+
+# ---- Quotas -----------------------------------------------------------------
+
+# total-quota: 0 = no global cap (rely on cloud-provider egress instead).
+# user-quota:  0 = no per-user cap. Set both to a non-zero value when you
+#              want hard limits at the TURN layer rather than at the bill.
+total-quota=0
+user-quota=0
+
+# bps-capacity: 0 = no bandwidth cap. Set to e.g. 10000000 (10 Mbps) if
+# you want one shared rate-limit across all sessions.
+bps-capacity=0
+
+# ---- Logging ----------------------------------------------------------------
+
+# simple-log: human-readable stdout, picked up by `docker logs`. Don't
+# enable verbose unless debugging — it dumps every allocation request
+# (which is the very thing the rate limiter is trying to keep down).
+simple-log
+# verbose
+log-file=/dev/stdout
+
+# ---- Safety defaults --------------------------------------------------------
+
+# Disallow relay-to-relay amplification / loopback. coturn will refuse to
+# relay peers on these ranges.
+no-loopback-peers
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=192.88.99.0-192.88.99.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=240.0.0.0-255.255.255.255
+
+# ---- Process / runtime ------------------------------------------------------
+
+# Run as the bundled non-root user (coturn image already creates this).
+proc-user=turnserver
+proc-group=turnserver
+
+# Disable CLI (no telnet admin port). The reference deployment has no
+# remote-admin story; if you need one, enable it behind a separate tunnel.
+no-cli

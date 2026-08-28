@@ -1,0 +1,93 @@
+# deploy/compose.turn.yml — provider-neutral reference for running coturn
+# alongside the existing Shader Garden relay. This file is a TEMPLATE; copy
+# it to your own deploy/ directory and fill in:
+#
+#   SG_TURN_SHARED_SECRET  — long random string (e.g. `openssl rand -hex 32`).
+#                            MUST be the same value the relay is given via
+#                            its SG_TURN_SHARED_SECRET env var; the relay
+#                            only ever hands clients an HMAC of it.
+#   SG_TURN_REALM          — a hostname you control (e.g. turn.example.org).
+#                            Used as the STUN long-term credential realm.
+#
+# The shared secret is NEVER baked into the image. It is provided at
+# runtime via an env var, read by deploy/turn-entrypoint.sh, substituted
+# into a 0600 file under /run/turnserver.conf, and then dropped from the
+# coturn process's environment before exec.
+#
+# This compose file does NOT mutate the existing deploy.yml / GitHub
+# Actions workflow. It is a standalone reference: an operator who already
+# deploys the relay elsewhere can drop this file into a separate repo /
+# project root and `docker compose -f deploy/compose.turn.yml up`.
+
+services:
+  turn:
+    image: coturn/coturn:4.7
+    container_name: sg-turn
+    restart: unless-stopped
+    # The entrypoint reads /etc/coturn/turnserver.conf (mounted from the
+    # repo's deploy/turnserver.conf.example) and renders it into
+    # /run/turnserver.conf with the secret substituted from env. It then
+    # execs the original turnserver binary with that rendered config.
+    entrypoint: ["/usr/local/bin/turn-entrypoint.sh", "turnserver"]
+    volumes:
+      # Reference config mounted read-only at the path the entrypoint
+      # reads. PLACEHOLDER_STATIC_AUTH_SECRET and PLACEHOLDER_REALM are
+      # filled in by the entrypoint script.
+      - ./turnserver.conf.example:/etc/coturn/turnserver.conf:ro
+      # The entrypoint script is mounted in by the operator (see README)
+      # so the image itself stays unmodified. Mode 0555 keeps it non-
+      # writable from inside the container.
+      - ./turn-entrypoint.sh:/usr/local/bin/turn-entrypoint.sh:ro
+    environment:
+      SG_TURN_SHARED_SECRET: "${SG_TURN_SHARED_SECRET:?SG_TURN_SHARED_SECRET must be set in the operator's .env}"
+      SG_TURN_REALM: "${SG_TURN_REALM:-turn.example.org}"
+    # /run is tmpfs on most container runtimes — the rendered config lives
+    # there only for the lifetime of the container.
+    tmpfs:
+      - /run:size=1M,mode=0755
+    # The entrypoint runs as root (compose default) so the chown step on
+    # /run/turnserver.conf to the `turnserver` user succeeds regardless
+    # of which UID/GID that account has in the image; coturn itself drops
+    # privileges to `turnserver` via proc-user / proc-group in the config,
+    # so the long-running process is never root.
+    # A read-only root filesystem so the only writable place in the
+    # container is /run/. The image's standard layers are never modified
+    # at runtime — a much smaller blast radius if anything goes wrong.
+    read_only: true
+    # Capability drop: coturn only needs NET_BIND_SERVICE for ports <1024,
+    # but it needs CAP_NET_ADMIN to manage the relay UDP range and to
+    # toggle some kernel-side connection-tracking behaviour. We keep
+    # NET_ADMIN + NET_BIND_SERVICE and drop everything else.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # STUN/TURN over UDP — peers send STUN binding requests here.
+      - "3478:3478/udp"
+      # STUN/TURN over TCP — fallback when UDP is blocked.
+      - "3478:3478/tcp"
+      # TURNS over TLS — required when the page is on HTTPS and the
+      # network blocks plain UDP/TCP to 3478.
+      - "5349:5349/tcp"
+      # Bounded relay UDP range. The coturn reference config uses
+      # 49152..49407 (256 ports); expand here if you change that range.
+      # These MUST match min-port / max-port in turnserver.conf.example.
+      - "49152-49407:49152-49407/udp"
+    healthcheck:
+      # coturn does not speak HTTP, but a TCP open against the listening
+      # port is good enough to confirm the binary started. A failed
+      # healthcheck makes `restart: unless-stopped` roll a fresh container.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/3478 && echo -e '\\r\\n' >&3 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

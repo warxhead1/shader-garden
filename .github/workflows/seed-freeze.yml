@@ -12,6 +12,11 @@ on:
     paths:
       - 'site/assets/seed/**'
 
+
+concurrency:
+  group: seed-freeze-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   seed-freeze:
     runs-on: ubuntu-latest

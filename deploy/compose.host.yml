@@ -22,6 +22,10 @@ services:
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
+    # Node's own heap is well under this; the cap is here so that every service
+    # on a shared host declares what it is allowed to take.
+    mem_limit: 192m
+    memswap_limit: 192m
 
   caddy:
     image: caddy:2-alpine
@@ -42,6 +46,8 @@ services:
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
+    mem_limit: 128m
+    memswap_limit: 128m
 
   turn:
     image: coturn/coturn:4.7
@@ -52,6 +58,22 @@ services:
       SG_TURN_SHARED_SECRET: "${SG_TURN_SHARED_SECRET:?set SG_TURN_SHARED_SECRET in deploy/host.env}"
       SG_TURN_REALM: "${SG_PUBLIC_HOST:?set SG_PUBLIC_HOST in deploy/host.env}"
       SG_TURN_EXTERNAL_IP: "${SG_PUBLIC_IP:?set SG_PUBLIC_IP in deploy/host.env}"
+      # coturn's resident set is not sessions. It is glibc per-thread malloc
+      # arenas, and by default glibc will open 8 x ncores of them.
+      #
+      # Measured on the shared droplet 2026-09-20, 19 days uptime: 7 threads,
+      # 13 arenas at their 64 MiB alignment, 662 MB of anonymous rw-p reserved,
+      # 396 MB resident, 228 MB of it pushed to swap -- against a session
+      # counter at 105,221 and a peer list that is almost entirely port
+      # scanners resetting the connection. The arenas are fed by short-lived
+      # scan sessions and glibc keeps the pages rather than returning them, so
+      # the number only ever goes up. That made coturn the largest process on a
+      # 4 GB host, bigger than all 24 biz-worthy containers put together.
+      #
+      # Two arenas is the standard answer: it costs a little malloc lock
+      # contention, which at ~230 sessions an hour is not measurable, and it
+      # removes the growth entirely. Nothing about TURN behaviour changes.
+      MALLOC_ARENA_MAX: "2"
     volumes:
       - ./turnserver.conf.example:/etc/coturn/turnserver.conf:ro
       - ./turn-entrypoint.sh:/usr/local/bin/turn-entrypoint.sh:ro
@@ -74,6 +96,12 @@ services:
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
+    # A ceiling, not a target. With MALLOC_ARENA_MAX above, coturn settles far
+    # below this; the limit exists so that an allocator surprise or a genuine
+    # leak restarts ONE container instead of swapping a shared host until the
+    # kernel picks a victim, which is what nearly happened here.
+    mem_limit: 256m
+    memswap_limit: 256m
 
 volumes:
   caddy_data:

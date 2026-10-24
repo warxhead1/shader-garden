@@ -24,7 +24,12 @@ services:
       options: {max-size: "10m", max-file: "3"}
 
   caddy:
-    image: caddy:2-alpine
+    # The edge for every site on this host. Upstream caddy:2-alpine lags Go
+    # security releases (2026-10-24: upstream go1.26.8 / x/net 0.59.0, while
+    # the live edge was still go1.26.3 / x/net 0.55.0). The host pins a stock
+    # Caddy built on the patched toolchain via SG_CADDY_IMAGE in host.env;
+    # unset, behaviour is unchanged.
+    image: ${SG_CADDY_IMAGE:-caddy:2-alpine}
     restart: unless-stopped
     environment:
       SG_PUBLIC_HOST: "${SG_PUBLIC_HOST:?set SG_PUBLIC_HOST in deploy/host.env}"

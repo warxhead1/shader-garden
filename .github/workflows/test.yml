@@ -178,7 +178,7 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # garden-locomotion-parity.mjs pins a BASELINE_SHA (6be2dd2) and
           # reads it with `git show <sha>:site/assets/garden/scene.glsl`. The
@@ -190,7 +190,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -214,7 +214,7 @@ jobs:
         # restore-keys is deliberately absent: a stale chromium that does not
         # match the pinned playwright fails at launch, which is a far worse
         # trade than re-downloading it.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ms-playwright-${{ runner.os }}-${{ hashFiles('tools/test/package-lock.json') }}
@@ -667,7 +667,7 @@ jobs:
         # the upload (32654025156). Uploading on a green run costs a few
         # hundred KB and makes "it passed, but how slowly?" answerable.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-battery-failure-artifacts-${{ matrix.shard }}
           path: tools/test/out/

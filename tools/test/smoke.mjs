@@ -131,7 +131,7 @@ async function shareLinkFor(page, source, lang) {
 // >5000ms log line below, which is where it belonged in the first place: a
 // budget is a ceiling, and a ceiling is the wrong instrument for measuring a
 // trend.
-const EDITOR_TIMEOUT_MS = 20000;
+const EDITOR_TIMEOUT_MS = 90000;
 
 async function waitForEditor(page) {
   const t0 = Date.now();

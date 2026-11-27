@@ -845,7 +845,10 @@ async function mountBaked(page, { id, extra = '' } = {}) {
     document.addEventListener('sg-error', (e) => window.__sgErrors.push(e.detail.code), true);
   });
   await mountBaked(soft.page, { id: 'sw-seed' });
-  await slowSleep(2500);
+  // Wait for the refusal to be reported instead of betting 2.5s on host
+  // load; a mount that never refuses exhausts the budget and fails below.
+  await soft.page.waitForFunction(() => window.__sgErrors.includes('no-webgl2'), undefined, { timeout: 30000 })
+    .catch(() => {});
   const sw = await soft.page.evaluate(() => {
     const el = document.getElementById('sw-seed');
     return {

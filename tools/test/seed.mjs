@@ -50,6 +50,9 @@
 //   (k) SEED-4: touch attribution — a synthetic `touchstart` on a
 //       hover-attribution seed reveals the chip immediately, then it fades
 //       back within ~3s (seed.md §6's "3s after first tap").
+//   (l)-(o) embed defects #11-#14: baked context-loss rebuild on a live
+//       context, bfcache pagehide/pageshow, parallel shader compile, and
+//       failIfMajorPerformanceCaveat.
 // Bonus (not required by any work item, cheap to also pin here): fetch
 // dedup across multiple same-kernel seeds, and the not-found failure path.
 // Prints "all-PASS" and exits 0 only if every check passed.
@@ -656,6 +659,205 @@ async function waitForState(page, want, selector = '#seed', timeout = 8000) {
     fade.opacity === '0' && fade.ms <= scaled(4500), JSON.stringify(fade));
   check('(k) no console/page errors', errors.length === 0, errors.join(' | '));
   await page.close();
+}
+
+/* ---------- (l)-(o) embed defects #11-#14 ---------------------------------
+   Each block is the failing-first test for one filed issue. They drive the
+   BAKED floating file, same as (f), so a source edit counts only after
+   `python3 tools/bake_seed.py`. */
+async function mountBaked(page, { id, extra = '' } = {}) {
+  await gotoSafe(page, `${GARDEN}/`, { waitUntil: 'networkidle0', timeout: 20000 });
+  await page.evaluate(async ({ id, extra }) => {
+    await import('/assets/seed/seed@1.js');
+    const el = document.createElement('shader-seed');
+    el.id = id;
+    el.style.cssText = 'position:fixed;top:0;left:0;width:240px;';
+    el.setAttribute('kernel', 'biome-rolling-hills');
+    el.setAttribute('garden', '/assets/seed/');
+    if (extra) el.setAttribute(extra, '');
+    document.body.appendChild(el);
+  }, { id, extra });
+}
+
+// (l) issue #11 — a baked kernel that loses its context must come back on a
+// LIVE context, not report "playing" over the dead one.
+{
+  const { page, errors } = await instrumentedPage();
+  await mountBaked(page, { id: 'loss-seed' });
+  const up = await waitForState(page, 'playing', '#loss-seed');
+  check('(l) baked seed plays before the loss', up);
+  const lost = await page.evaluate(() => {
+    const el = document.getElementById('loss-seed');
+    window.__oldCanvas = el.shadowRoot.querySelector('canvas');
+    const ext = el._runtime._gl.getExtension('WEBGL_lose_context');
+    if (!ext) return false;
+    ext.loseContext();
+    return true;
+  });
+  if (!lost) {
+    check('(l) WEBGL_lose_context available', false, 'extension missing in this browser');
+  } else {
+    await slowSleep(1500);
+    const after = await page.evaluate(() => {
+      const el = document.getElementById('loss-seed');
+      const rt = el._runtime;
+      const canvas = el.shadowRoot.querySelector('canvas');
+      let lit = false;
+      let live = false;
+      if (rt) {
+        live = !rt.isContextLost();
+        if (live) {
+          rt.renderOnce(1.0);
+          const gl = rt._gl;
+          const px = new Uint8Array(4);
+          for (const [fx, fy] of [[0.5, 0.5], [0.25, 0.5], [0.75, 0.25]]) {
+            gl.readPixels(Math.floor(gl.drawingBufferWidth * fx), Math.floor(gl.drawingBufferHeight * fy), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            if (px[0] + px[1] + px[2] > 0) lit = true;
+          }
+        }
+      }
+      return { state: el.state, hasRuntime: !!rt, live, lit, canvasHidden: canvas.hidden, freshCanvas: canvas !== window.__oldCanvas };
+    });
+    const honest = after.state === 'playing'
+      ? after.hasRuntime && after.live && after.lit && !after.canvasHidden
+      : after.canvasHidden; // a visible poster is acceptable; a visible dead canvas is not
+    check('(l) after a baked context loss the seed is either drawing on a live context or showing its poster',
+      honest, JSON.stringify(after));
+    check('(l) the one silent rebuild lands on a live context (state playing, frame drawn)',
+      after.state === 'playing' && after.live && after.lit, JSON.stringify(after));
+  }
+  check('(l) no console/page errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+// (m) issue #12 — pagehide disposes the runtime; the element must not claim
+// "playing" afterwards, must survive a show with no runtime, and must play
+// again on a persisted pageshow (bfcache Back).
+{
+  const { page, errors } = await instrumentedPage();
+  await mountBaked(page, { id: 'bf-seed' });
+  await waitForState(page, 'playing', '#bf-seed');
+  const hidden = await page.evaluate(() => {
+    const el = document.getElementById('bf-seed');
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    return { state: el.state, hasRuntime: !!el._runtime, canvasHidden: el.shadowRoot.querySelector('canvas').hidden };
+  });
+  check('(m) pagehide leaves no stale "playing" state over a disposed runtime',
+    hidden.state !== 'playing' && !hidden.hasRuntime && hidden.canvasHidden, JSON.stringify(hidden));
+  const threw = await page.evaluate(() => {
+    const el = document.getElementById('bf-seed');
+    try {
+      el._pausedByHidden = true;
+      el._onShow();
+      el._playRuntime('visible');
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  });
+  check('(m) showing/entering with a null runtime does not throw', threw === null, String(threw));
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  const back = await waitForState(page, 'playing', '#bf-seed');
+  const drawn = await page.evaluate(() => {
+    const el = document.getElementById('bf-seed');
+    return !!el._runtime && !el._runtime.isContextLost() && !el.shadowRoot.querySelector('canvas').hidden;
+  });
+  check('(m) a persisted pageshow brings the seed back to a drawing "playing"', back && drawn, `back=${back} drawn=${drawn}`);
+  check('(m) no console/page errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+// (n) issue #13 — with KHR_parallel_shader_compile the link status must not
+// be read until COMPLETION_STATUS_KHR reports true. The extension is stubbed
+// so the first polls report "not yet", making the order observable.
+{
+  const { page, errors } = await instrumentedPage();
+  await page.evaluateOnNewDocument(() => {
+    const COMPLETION = 0x91b1;
+    window.__pc = { completionPolls: 0, linkReadBeforeDone: 0, done: false };
+    const proto = WebGL2RenderingContext.prototype;
+    const origExt = proto.getExtension;
+    proto.getExtension = function (name) {
+      if (name === 'KHR_parallel_shader_compile') return { COMPLETION_STATUS_KHR: COMPLETION };
+      return origExt.call(this, name);
+    };
+    const origParam = proto.getProgramParameter;
+    proto.getProgramParameter = function (prog, pname) {
+      // Only the seed element's own canvas is under test; the shared hidden
+      // poster canvas links synchronously by design.
+      const mine = this.canvas && this.canvas.getAttribute && this.canvas.getAttribute('part') === 'canvas';
+      if (!mine) return origParam.call(this, prog, pname);
+      if (pname === COMPLETION) {
+        window.__pc.completionPolls++;
+        if (window.__pc.completionPolls <= 3) return false;
+        window.__pc.done = true;
+        return true;
+      }
+      if (pname === this.LINK_STATUS && !window.__pc.done) window.__pc.linkReadBeforeDone++;
+      return origParam.call(this, prog, pname);
+    };
+  });
+  await mountBaked(page, { id: 'pc-seed' });
+  const up = await waitForState(page, 'playing', '#pc-seed', 15000);
+  const pc = await page.evaluate(() => window.__pc);
+  check('(n) the seed still reaches "playing" with parallel compile', up, JSON.stringify(pc));
+  check('(n) the boot polls COMPLETION_STATUS_KHR', pc.completionPolls >= 4, JSON.stringify(pc));
+  check('(n) LINK_STATUS is never read before compilation completes', pc.linkReadBeforeDone === 0, JSON.stringify(pc));
+  check('(n) no console/page errors', errors.length === 0, errors.join(' | '));
+  await page.close();
+}
+
+// (o) issue #14 — the embed's context asks the browser to refuse software
+// WebGL, and a refusal leaves the poster, not a crawling live canvas.
+{
+  const { page, errors } = await instrumentedPage();
+  await page.evaluateOnNewDocument(() => {
+    window.__attrs = [];
+    window.__failSoftware = location.search.includes('soft=1');
+    const orig = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs, ...rest) {
+      if (type === 'webgl2' && this.getAttribute('part') === 'canvas') {
+        window.__attrs.push(attrs || null);
+        if (window.__failSoftware && attrs && attrs.failIfMajorPerformanceCaveat) return null;
+      }
+      return orig.call(this, type, attrs, ...rest);
+    };
+  });
+  await mountBaked(page, { id: 'cv-seed' });
+  await waitForState(page, 'playing', '#cv-seed');
+  const attrs = await page.evaluate(() => window.__attrs);
+  check('(o) the embed context requests failIfMajorPerformanceCaveat',
+    attrs.length > 0 && attrs.every((a) => a && a.failIfMajorPerformanceCaveat === true), JSON.stringify(attrs));
+  await page.close();
+
+  const soft = await instrumentedPage();
+  await soft.page.evaluateOnNewDocument(() => {
+    window.__failSoftware = true;
+    const orig = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs, ...rest) {
+      if (type === 'webgl2' && this.getAttribute('part') === 'canvas' && attrs && attrs.failIfMajorPerformanceCaveat) return null;
+      return orig.call(this, type, attrs, ...rest);
+    };
+    window.__sgErrors = [];
+    document.addEventListener('sg-error', (e) => window.__sgErrors.push(e.detail.code), true);
+  });
+  await mountBaked(soft.page, { id: 'sw-seed' });
+  await slowSleep(2500);
+  const sw = await soft.page.evaluate(() => {
+    const el = document.getElementById('sw-seed');
+    return {
+      state: el.state,
+      canvasHidden: el.shadowRoot.querySelector('canvas').hidden,
+      posterShown: !el.shadowRoot.querySelector('.poster').hidden,
+      errors: window.__sgErrors,
+    };
+  });
+  check('(o) a browser that refuses the context leaves the poster, never a live canvas',
+    sw.state !== 'playing' && sw.canvasHidden && sw.posterShown && sw.errors.includes('no-webgl2'), JSON.stringify(sw));
+  await soft.page.close();
 }
 
 await browser.close();

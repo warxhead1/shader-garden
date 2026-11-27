@@ -19,5 +19,12 @@
     "sha384": "sha384-19YmWh9xH5krTrdrS7Z5aWAXkRsi5iIN3RYUDMzd4tqe+bBshCVYkeRt5ZqcEaXU",
     "bytes": 39812,
     "date": "2026-07-03T22:29:10Z"
+  },
+  {
+    "version": "1.4.0",
+    "file": "assets/seed/seed@1.4.0.js",
+    "sha384": "sha384-V1lWZjGRXQ9CSEEvDILBmLoOqDustO8k1J5YsXkrPvURThWtaFFaMcIC1whubiHP",
+    "bytes": 43524,
+    "date": "2026-11-27T03:09:04Z"
   }
 ]

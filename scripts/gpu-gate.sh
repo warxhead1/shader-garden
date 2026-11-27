@@ -48,6 +48,18 @@ load1() { cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo '?'; }
 CORES="$(nproc)"
 echo "gpu-gate: load average $(load1) on $CORES cores at start"
 
+# Scale every suite's wait ceilings by the host's measured oversubscription
+# (browser.mjs scaled()): a ceiling is free unless hit, and under load 3x the
+# core count the headless browser itself is starved, so a fixed 20s wait
+# overran at 40s with nothing wrong in the app. Whole-number ratio of load to
+# cores, never below 1, capped at 6 (the cap CI already uses). An explicit
+# SG_TIME_SCALE from the caller wins.
+if [ -z "${SG_TIME_SCALE:-}" ]; then
+  SG_TIME_SCALE="$(awk -v l="$(load1)" -v c="$CORES" 'BEGIN{r=int(l/c+0.999); if(r<1)r=1; if(r>6)r=6; print r}')"
+  export SG_TIME_SCALE
+fi
+echo "gpu-gate: SG_TIME_SCALE=$SG_TIME_SCALE"
+
 SUITES=(
   smoke garden garden-movement garden-camera garden-locomotion-parity
   garden-perf garden-uniform-inspector

@@ -1651,8 +1651,8 @@ matching `tools/check_budgets.py`):
 
 | Item | Budget |
 |---|---|
-| `seed@1.js` raw | ≤ 40 KiB hard-fail, 32 KiB warn (raised from 28/24 KiB by SEED-3) |
-| `seed@1.js` gzip (level 9) | ≤ 13 KiB hard-fail (raised from 9 KiB by SEED-3) |
+| `seed@1.js` raw | ≤ 44 KiB hard-fail, 32 KiB warn (raised from 28/24 KiB by SEED-3, to 44 KiB by embed fixes #11-#14) |
+| `seed@1.js` gzip (level 9) | ≤ 14 KiB hard-fail (raised from 9 KiB by SEED-3, to 14 KiB by embed fixes #11-#14) |
 | `element.js` LOC (excludes the forked `runtime.js`) | ~450 target / 900 max (raised from 720 by SEED-3's unsafe tier + sg-admit + integrity + attribution chip) |
 | `poster-runtime.js` LOC | ≤ 150 |
 | `share-codec.js` LOC | ≤ 90 (SEED-3, new file) |

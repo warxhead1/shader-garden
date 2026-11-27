@@ -100,6 +100,9 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', () => {
   for (const s of liveSeeds) s._onPageHide();
 });
+window.addEventListener('pageshow', (ev) => {
+  if (ev.persisted) for (const s of liveSeeds) s._onPageShow();
+});
 
 const reducedMotionMQL = matchMedia('(prefers-reduced-motion: reduce)');
 reducedMotionMQL.addEventListener('change', () => {
@@ -390,7 +393,21 @@ export class ShaderSeed extends HTMLElement {
   }
 
   _onPageHide() {
-    this._teardown(); // bfcache safety: dispose without a snapshot
+    // bfcache safety: dispose without a snapshot, and leave a state a later
+    // show/enter can recover from instead of "playing" over a null runtime.
+    this._teardown();
+    this._pausedByHidden = false;
+    if (this._state === 'playing' || this._state === 'paused') {
+      this._canvas.hidden = true;
+      this._poster.hidden = false;
+      this._state = 'poster';
+    }
+  }
+
+  _onPageShow() {
+    if (this._state === 'poster' && !this._runtime && this._kernelData && this._isIntersecting && this._shouldAutoplay()) {
+      this._bootLive(this._kernelData.glsl, 'visible');
+    }
   }
 
   _onReducedMotionChange() {
@@ -677,6 +694,7 @@ export class ShaderSeed extends HTMLElement {
     } catch (err) {
       return { ok: false, code: 'no-webgl2', log: String((err && err.message) || err) };
     }
+    if (runtime.parallelCompile) return { ok: true, runtime, pending: runtime.setShaderAsync(glsl) };
     const res = runtime.setShader(glsl);
     if (!res.ok) {
       runtime.dispose();
@@ -686,6 +704,7 @@ export class ShaderSeed extends HTMLElement {
   }
 
   _bootLive(glsl, reason) {
+    if (this._pendingRuntime) return; // a parallel compile is already in flight
     // Each call is a distinct compile attempt for sg-admit (seed.md §7) —
     // reset the once-per-attempt guard so a user retry (play() after a
     // failed compile) reports again; no-rebuild-on-loss below means this
@@ -696,13 +715,38 @@ export class ShaderSeed extends HTMLElement {
     }
     const built = this._createRuntime(glsl);
     if (!built.ok) {
-      this._fail(built.code, built.log || '');
-      if (this._isUnsafe()) this._emitAdmit(glsl, 'CE', false, 'none'); // seed.md §7
+      this._bootFailed(built.code, built.log, glsl);
       return;
     }
-    this._runtime = built.runtime;
+    if (!built.pending) {
+      this._bootDone(built.runtime, reason);
+      return;
+    }
+    const runtime = built.runtime;
+    this._pendingRuntime = runtime;
+    built.pending.then((res) => {
+      if (this._pendingRuntime !== runtime) return; // torn down while compiling
+      this._pendingRuntime = null;
+      if (!res.ok) {
+        runtime.dispose();
+        this._bootFailed('compile', res.log, glsl);
+        return;
+      }
+      this._bootDone(runtime, reason);
+    });
+  }
+
+  _bootFailed(code, log, glsl) {
+    this._rebuilding = false;
+    this._fail(code, log || '');
+    if (this._isUnsafe()) this._emitAdmit(glsl, 'CE', false, 'none'); // seed.md §7
+  }
+
+  _bootDone(runtime, reason) {
+    this._runtime = runtime;
     this._runtime.onContextLost = () => this._onContextLost();
-    this._lossCount = 0;
+    if (!this._rebuilding) this._lossCount = 0;
+    this._rebuilding = false;
     this._lastFps = 0;
     this._dprDegraded = false;
     this._lowFpsStreak24 = 0;
@@ -732,6 +776,10 @@ export class ShaderSeed extends HTMLElement {
   }
 
   _playRuntime(reason) {
+    if (!this._runtime) {
+      if (this._kernelData) this._bootLive(this._kernelData.glsl, reason);
+      return;
+    }
     const wasPlaying = this._state === 'playing';
     this._canvas.hidden = false;
     this._poster.hidden = true;
@@ -807,10 +855,17 @@ export class ShaderSeed extends HTMLElement {
     this._teardown();
     this._canvas.hidden = true;
     this._poster.hidden = false;
+    // getContext() on a canvas whose context was lost returns that same dead
+    // context, so a rebuild needs a fresh canvas element.
+    const fresh = this._canvas.cloneNode(false);
+    this._canvas.replaceWith(fresh);
+    this._canvas = fresh;
     // Baked kernels get one silent rebuild; a second loss posterizes for
     // good. `unsafe` gets NO rebuild — a TDR kernel must not re-TDR on a
     // rebuild cycle (seed.md §5.2, deliberate divergence from the row above).
     if (!wasUnsafe && this._lossCount <= 1 && this._kernelData) {
+      this._rebuilding = true;
+      this._state = 'poster';
       this._bootLive(this._kernelData.glsl, 'api');
       return;
     }
@@ -822,6 +877,11 @@ export class ShaderSeed extends HTMLElement {
 
   _teardown() {
     releaseLive(this);
+    if (this._pendingRuntime) {
+      const pending = this._pendingRuntime;
+      this._pendingRuntime = null;
+      pending.dispose();
+    }
     if (this._runtime) {
       try {
         this._runtime.dispose();

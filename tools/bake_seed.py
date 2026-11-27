@@ -29,8 +29,8 @@ bake_kernels.py's kernels.json.
 
 Budgets (seed.md §3.3 / V2_BLUEPRINT.md §4 as revised by SEED-3), HARD fail
 on breach:
-  raw   <= 40 KiB (warn at 32 KiB)
-  gzip  <= 13 KiB  (CompressionStream-equivalent, measured with gzip level 9)
+  raw   <= 44 KiB (warn at 32 KiB)
+  gzip  <= 14 KiB  (CompressionStream-equivalent, measured with gzip level 9)
 
 Fork-drift guard (ruling C8): site/js/seed/runtime.js is a deliberate
 snapshot of site/js/runtime/wrap.js's GLSL prelude/epilogue, taken once
@@ -70,7 +70,7 @@ ALIAS_PATH = os.path.join(SEED_ASSET_DIR, "seed.js")  # SEED-4: "latest major" a
 RELEASES_PATH = os.path.join(HERE, "..", "site", "embed", "releases.json")
 _PINNED_RE = re.compile(r"^seed@(\d+\.\d+\.\d+)\.js$")
 
-SEED_VERSION = "1.3.0"  # SEED-4: battery enhancement + touch attribution (minor bump — append-only)
+SEED_VERSION = "1.4.0"  # embed fixes #11-#14: context-loss rebuild, bfcache restore, parallel compile, software-GL refusal (minor bump — append-only)
 
 # SEED-3 (V2_BLUEPRINT.md item 20) raised these from 28/24/9 KiB — the
 # unsafe src=/href= tier, sg-admit, integrity, and the attribution chip
@@ -79,9 +79,11 @@ SEED_VERSION = "1.3.0"  # SEED-4: battery enhancement + touch attribution (minor
 # exact tradeoff ("will need to trim comments further or grow the frozen
 # KiB budget deliberately"). Raised deliberately, this commit — same
 # sign-off as the rest of the budget table, not a silent per-file bump.
-RAW_HARD_BYTES = 40 * 1024
+# SEED-5 (embed fixes #11-#14) raised raw 40->44 KiB and gzip 13->14 KiB:
+# parallel compile, bfcache restore and the canvas swap are new surface.
+RAW_HARD_BYTES = 44 * 1024
 RAW_WARN_BYTES = 32 * 1024
-GZ_HARD_BYTES = 13 * 1024
+GZ_HARD_BYTES = 14 * 1024
 
 # Matches whole-line `import ... from '...';` module declarations only —
 # never touches `import.meta.url`, which is an expression, not a statement,

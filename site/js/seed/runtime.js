@@ -72,7 +72,9 @@ export class SeedRuntime {
 
   /** @param {HTMLCanvasElement} canvas */
   constructor(canvas) {
-    const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+    // failIfMajorPerformanceCaveat: software WebGL refuses here and the
+    // element settles on its poster instead of crawling a live raymarch.
+    const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, failIfMajorPerformanceCaveat: true });
     if (!gl) throw new Error('WebGL2 is not supported on this device/browser');
 
     this._canvas = canvas;
@@ -86,6 +88,8 @@ export class SeedRuntime {
     this._fpsFrames = 0;
     this._fpsLastSample = 0;
 
+    this._parallel = gl.getExtension('KHR_parallel_shader_compile');
+    this._disposed = false;
     this._vao = gl.createVertexArray();
     this._vert = this._compile(gl.VERTEX_SHADER, VERT_SRC).shader;
 
@@ -114,8 +118,42 @@ export class SeedRuntime {
 
   // Compile + link `src` wrapped in the seed's GLSL preamble/footer.
   setShader(src) {
+    const built = this._build(src);
+    return built.ok ? this._adopt(built.program) : built;
+  }
+
+  get parallelCompile() {
+    return Boolean(this._parallel);
+  }
+
+  // Same result as setShader, but with KHR_parallel_shader_compile the link
+  // runs off the main thread and status is read only once
+  // COMPLETION_STATUS_KHR turns true. Resolves {ok:false} if dispose() lands
+  // first.
+  setShaderAsync(src) {
+    const built = this._build(src);
+    if (!built.ok) return Promise.resolve(built);
     const gl = this._gl;
-    const { shader: frag, log: fragLog, ok: fragOk } = this._compile(gl.FRAGMENT_SHADER, wrapGlsl(src));
+    const program = built.program;
+    const done = this._parallel.COMPLETION_STATUS_KHR;
+    return new Promise((resolve) => {
+      const poll = () => {
+        if (this._disposed) {
+          gl.deleteProgram(program);
+          resolve({ ok: false, log: 'disposed' });
+        } else if (!gl.isContextLost() && !gl.getProgramParameter(program, done)) {
+          setTimeout(poll, 8);
+        } else {
+          resolve(this._adopt(program));
+        }
+      };
+      poll();
+    });
+  }
+
+  _build(src) {
+    const gl = this._gl;
+    const { shader: frag, log: fragLog, ok: fragOk } = this._compile(gl.FRAGMENT_SHADER, wrapGlsl(src), !this._parallel);
     if (!fragOk) {
       gl.deleteShader(frag);
       return { ok: false, log: fragLog };
@@ -125,6 +163,11 @@ export class SeedRuntime {
     gl.attachShader(program, frag);
     gl.linkProgram(program);
     gl.deleteShader(frag);
+    return { ok: true, program };
+  }
+
+  _adopt(program) {
+    const gl = this._gl;
     if (!gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
       const log = gl.getProgramInfoLog(program) ?? '';
       gl.deleteProgram(program);
@@ -194,6 +237,7 @@ export class SeedRuntime {
   }
 
   dispose() {
+    this._disposed = true;
     this.stop();
     this._observer.disconnect();
     this._canvas.removeEventListener('webglcontextlost', this._onLost);
@@ -209,11 +253,14 @@ export class SeedRuntime {
 
   // internals
 
-  _compile(type, src) {
+  _compile(type, src, checkStatus = true) {
     const gl = this._gl;
     const shader = gl.createShader(type);
     gl.shaderSource(shader, src);
     gl.compileShader(shader);
+    // Reading status here would block on the compile; the parallel path
+    // defers the verdict to the link status instead.
+    if (!checkStatus) return { shader, ok: true, log: '' };
     const ok = Boolean(gl.getShaderParameter(shader, gl.COMPILE_STATUS)) || gl.isContextLost();
     return { shader, ok, log: gl.getShaderInfoLog(shader) ?? '' };
   }

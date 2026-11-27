@@ -854,7 +854,21 @@ export async function gotoSafe(page, url, opts) {
   try {
     return await page.goto(url, opts);
   } catch (e) {
-    if (!String(e).includes('Navigation timeout')) throw e;
+    // Playwright words this "page.goto: Timeout 20000ms exceeded"; the
+    // puppeteer-era "Navigation timeout" match never fired, so the retry
+    // below was dead code.
+    if (!/Navigation timeout|page\.goto: Timeout \d+ms exceeded/.test(String(e))) throw e;
+    // networkidle needs 500ms with no requests; a garden that is still
+    // streaming modules on a loaded host may never get that window even
+    // though the document committed and parsed. The waitUntil is a
+    // heuristic, and every caller follows up with its own readiness wait
+    // (awaitGardenReady, selectors), so a page already at the requested URL
+    // and past 'loading' is a successful navigation.
+    const state = await page.evaluate(() => ({ href: location.href, rs: document.readyState })).catch(() => null);
+    if (state && state.rs !== 'loading' && state.href.split('#')[0] === String(url).split('#')[0]) {
+      console.log(`  [gotoSafe] networkidle not reached, document ready (${state.rs}): ${url}`);
+      return null;
+    }
     console.log(`  [gotoSafe] nav timeout, retrying once: ${url}`);
     return page.goto(url, opts);
   }

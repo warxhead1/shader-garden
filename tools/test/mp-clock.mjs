@@ -89,7 +89,17 @@ async function armClockSpy(page) {
       Ctor.prototype.getClock = function () {
         const c = orig.call(this);
         window.__runtime = this;
-        if (c !== last) { last = c; window.__clock = c; window.__clockGen++; }
+        if (c !== last) {
+          last = c; window.__clock = c; window.__clockGen++;
+          // clock.time only moves when tick()/seek() run, i.e. once per
+          // rendered frame. Record when it last moved so a sample can be
+          // extrapolated to the instant it is read.
+          window.__clockAt = performance.now();
+          for (const fn of ['tick', 'seek']) {
+            const o = c[fn];
+            c[fn] = function (...a) { const r = o.apply(this, a); window.__clockAt = performance.now(); return r; };
+          }
+        }
         return c;
       };
     }
@@ -122,6 +132,18 @@ async function waitForClock(page, label) {
   return ok;
 }
 
+// clock.time is frame-quantised: a page rendering at 5 fps under host load
+// reports a value up to one frame interval old, and a clock that is exactly
+// in sync reads as skewed by that age. Add the time elapsed since the clock
+// last moved (a running clock advances 1:1 with wall time between frames) so
+// the sample is the clock's value at the instant it is read.
+function readClock() {
+  const c = window.__clock;
+  if (!c) return { t: null, at: Date.now() };
+  const age = c.running && window.__clockAt != null ? (performance.now() - window.__clockAt) / 1000 : 0;
+  return { t: c.time + age, at: Date.now() };
+}
+
 async function sampleBoth(pageA, pageB) {
   // Promise.all fires both evaluate() calls back-to-back, but they still
   // serialize on the CDP wire, so one page is read some milliseconds after
@@ -136,8 +158,8 @@ async function sampleBoth(pageA, pageB) {
   // origin is per-document), and the sampling gap is subtracted. What is
   // left is the quantity the check has always claimed to measure.
   const [a, b] = await Promise.all([
-    pageA.evaluate(() => ({ t: window.__clock?.time ?? null, at: Date.now() })),
-    pageB.evaluate(() => ({ t: window.__clock?.time ?? null, at: Date.now() })),
+    pageA.evaluate(readClock),
+    pageB.evaluate(readClock),
   ]);
   if (a.t == null || b.t == null) return { a: a.t, b: b.t, diff: null };
   const samplingGapS = (a.at - b.at) / 1000;

@@ -150,6 +150,22 @@ export async function mount(ctx) {
 
   root.append(stage, topbar);
 
+  // Bound before the awaits below: the buttons are in the DOM from here, and a
+  // click that lands while the runtime is still building must not be dropped.
+  let rh;
+  resetBtn.addEventListener('click', () => { rh?.rebuild(); });
+  embedBtn.addEventListener('click', async () => {
+    const ok = await copyText(embedSnippet(kernel.id));
+    if (!ok) console.warn('Embed snippet:', embedSnippet(kernel.id));
+    toast(ok ? 'Embed code copied to clipboard' : 'Could not copy — see console');
+  });
+  copyBtn.addEventListener('click', async () => {
+    const url = location.href.split('#')[0] + '#/s/' + encodeURIComponent(kernel.id);
+    const ok = await copyText(url);
+    if (!ok) console.warn('Link:', url);
+    toast(ok ? 'Link copied to clipboard' : 'Could not copy — see console');
+  });
+
   /* ---- runtime: WGSL ladder + lifecycle owned by runtimeHost ---- */
   // Fetched once per mount (not re-fetched on Reset — runtimeHost.rebuild()
   // reuses this opts object; a static asset never changes mid-session).
@@ -185,28 +201,14 @@ export async function mount(ctx) {
     }
   }
 
-  // Split declaration from assignment: onChange fires synchronously inside
-  // the initial build, before the `= await runtimeHost(...)` expression
-  // itself resolves — `rh` must already be a (still-undefined) binding.
-  let rh;
+  // onChange fires synchronously inside the initial build, before the
+  // `= await runtimeHost(...)` expression itself resolves; `rh` is declared above.
   rh = await runtimeHost(stage, {
     prefer: 'auto', glslSrc: kernel.glsl, wgslSrc, canvasClass: 'viewer-canvas',
     fpsBadge, onLost: 'rebuild', bus, organ: 'viewer', onChange: onBuild,
   });
   onBuild(); // paint the state the in-flight onChange() couldn't see rh for yet
 
-  resetBtn.addEventListener('click', () => { rh.rebuild(); });
-  embedBtn.addEventListener('click', async () => {
-    const ok = await copyText(embedSnippet(kernel.id));
-    if (!ok) console.warn('Embed snippet:', embedSnippet(kernel.id));
-    toast(ok ? 'Embed code copied to clipboard' : 'Could not copy — see console');
-  });
-  copyBtn.addEventListener('click', async () => {
-    const url = location.href.split('#')[0] + '#/s/' + encodeURIComponent(kernel.id);
-    const ok = await copyText(url);
-    if (!ok) console.warn('Link:', url);
-    toast(ok ? 'Link copied to clipboard' : 'Could not copy — see console');
-  });
 
   return function cleanup() {
     rh.dispose();

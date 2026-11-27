@@ -120,7 +120,9 @@ FILES = [
     # forced-click autoplay + no-rebuild-on-loss for it, sg-admit (+hash
     # helpers), integrity, the attribution chip (DOM+CSS+deep-link
     # resolution). Actual 813/900. Raised deliberately, this commit.
-    ("site/js/seed/element.js", 900, None),
+    # 900 -> 950: embed fixes #11-#14 (fresh canvas on loss, bfcache
+    # restore, async boot path). Actual 925/950.
+    ("site/js/seed/element.js", 950, None),
     # SEED-2: shared hidden-canvas poster runtime (seed.md §4.4, a
     # thumbs.js lift) — new file, not part of the forked runtime.js.
     ("site/js/seed/poster-runtime.js", 150, None),
@@ -131,7 +133,7 @@ FILES = [
     # SEED-3 raised this from 28 KiB — see tools/bake_seed.py's own
     # RAW_HARD_BYTES comment for the full rationale (same sign-off as the
     # rest of the budget table, not a silent per-file bump).
-    ("site/assets/seed/seed@1.js", None, 40 * 1024),
+    ("site/assets/seed/seed@1.js", None, 44 * 1024),
     # GARDEN-0: organs.json stays inside its 4 KiB assets row.
     ("site/assets/organs.json", None, 4096),
     # COMP-0 (v2 §7.5, item 23): iChannel plumbing + render-to-texture.
